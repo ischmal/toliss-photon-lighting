@@ -13,9 +13,9 @@ POINT_COUNTS	0	0	0	0
 
 # Rear Tail Lights
 
-# Classic/Halogen
+# Rear Tail Lights - Nav
 ANIM_begin
-	ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+	ANIM_hide 1 1 ToLissPhoton/exterior/nav 
 	ANIM_begin
 		ANIM_hide 1.5 2.5 AirbusFBW/OHPLightSwitches[2]
 			# Tail Nav Light 1
@@ -28,15 +28,9 @@ ANIM_begin
 			LIGHT_PARAM	airplane_nav_bb	   0.07 0.7 31.26 1.0 0.70 0.44 0 600cd 0.000000 0.000000 1.000000 0.1
 			LIGHT_PARAM	airplane_nav_pm 0.07 0.7 31.26 1.0 0.70 0.44 0 600cd -0.00324956 -0.15311261 0.98820341 0.12966104
 	ANIM_end
-
-	# Tail Strobe
-	LIGHT_PARAM 	airplane_strobe_bb 		0 0.7 31.32 0.45 0.45 1 2 14000cd 0.00087055407 -0.17364822 0.98480737 0.087155801	#Strobe in the back
-	LIGHT_PARAM		airplane_strobe_pm 		0 0.7 31.32 0.75 0.75 1 2 6000cd 0.00000053 -0.17364834 0.98480773 0.090632666
 ANIM_end
-
-# LED
 ANIM_begin
-	ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+	ANIM_hide 0 0 ToLissPhoton/exterior/nav 
 	ANIM_begin
 		ANIM_hide 1.5 2.5 AirbusFBW/OHPLightSwitches[2]
 			# Tail Nav Light 1
@@ -49,7 +43,17 @@ ANIM_begin
 			LIGHT_PARAM	airplane_nav_bb	   0.07 0.7 31.26  0.66 0.91 1 0 600cd 0.000000 0.000000 1.000000 0.1
 			LIGHT_PARAM	airplane_nav_pm 0.07 0.7 31.26  0.66 0.91 1 0 1000cd -0.00324956 -0.15311261 0.98820341 0.12966104
 	ANIM_end
+ANIM_end
 
+# Rear Tail Lights - Strobe
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/strobe 
+	# Tail Strobe
+	LIGHT_PARAM 	airplane_strobe_bb 		0 0.7 31.32 0.45 0.45 1 2 14000cd 0.00087055407 -0.17364822 0.98480737 0.087155801	#Strobe in the back
+	LIGHT_PARAM		airplane_strobe_pm 		0 0.7 31.32 0.75 0.75 1 2 6000cd 0.00000053 -0.17364834 0.98480773 0.090632666
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/strobe 
 	# Tail Strobe
 	LIGHT_PARAM 	airplane_strobe_bb 		0 0.7 31.32  0.66 0.91 1 2 14000cd 0.00087055407 -0.17364822 0.98480737 0.087155801	#Strobe in the back
 	LIGHT_PARAM		airplane_strobe_pm 		0 0.7 31.32  0.66 0.91 1 2 6000cd 0.00000053 -0.17364834 0.98480773 0.090632666
@@ -64,7 +68,7 @@ ANIM_begin
 		
 		# Classic/Halogen
 		ANIM_begin
-			ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+			ANIM_hide 1 1 ToLissPhoton/exterior/beacon 
 			# Top Beacon
 			LIGHT_PARAM	airplane_beacon_bb 0 -0.0011434555 0.0080490112 1.0 0.03 0.05 0 18000cd 0 0 0 1
 			LIGHT_PARAM	airplane_beacon_pm 0 0 -0 1.0 0.03 0.05 0 4000cd 0 0 0 1
@@ -72,7 +76,7 @@ ANIM_begin
 
 		# LED
 		ANIM_begin
-			ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+			ANIM_hide 0 0 ToLissPhoton/exterior/beacon 
 			# Top Beacon
 			LIGHT_PARAM	airplane_beacon_bb 0 -0.0011434555 0.0080490112 1.0 0.03 0 0 12000cd 0 0 0 1
 			LIGHT_PARAM	airplane_beacon_pm 0 0 -0 1.0 0.03 0 0 4000cd 0 0 0 1
@@ -87,7 +91,7 @@ ANIM_begin
 	ANIM_trans_end
 		# Classic/Halogen
 		ANIM_begin
-			ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+			ANIM_hide 1 1 ToLissPhoton/exterior/logo 
 			# Left logo light
 			LIGHT_PARAM	airplane_generic_bb -3.0158925 0.30365515 -2.6993828 1.0 0.70 0.44 7 800cd 0.000000 1.000000 0.000000 0.3
 			LIGHT_PARAM	airplane_generic_pm -3.0075262 0.35542059 -2.6996956 1.0 0.70 0.44 7 3000cd 0.58926266 0.80451369 -0.07434535 0.75
@@ -97,7 +101,7 @@ ANIM_begin
 		ANIM_end
 		# LED
 		ANIM_begin
-			ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+			ANIM_hide 0 0 ToLissPhoton/exterior/logo 
 			# Left logo light
 			LIGHT_PARAM	airplane_generic_bb -3.0158925 0.30365515 -2.6993828  0.66 0.91 1 7 1000cd 0.000000 1.000000 0.000000 0.5
 			LIGHT_PARAM	airplane_generic_pm -3.0075262 0.35542059 -2.6996956  0.66 0.91 1 7 5000cd 0.58926266 0.80451369 -0.07434535 0.75
@@ -121,7 +125,7 @@ ANIM_begin
 			# Retractable Landing Light #1
 			# Original/Halogen
 			ANIM_begin
-				ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+				ANIM_hide 1 1 ToLissPhoton/exterior/landing 
 				LIGHT_PARAM	airplane_landing_bb 0.14922805 -0.030030638 -0.060171127 1.0 0.70 0.44 0 4000cd -0.052616511 -0.98717403 -0.15072834 0.96
 				LIGHT_PARAM	airplane_landing_pm 0.15093072 0.0019077957 -0.055294409 1.0 0.70 0.44 0 504900cd 0.032916613 -0.9904511 -0.13387761 0.98480775
 				LIGHT_PARAM	airplane_landing_pm 0.15093072 0.0019077957 -0.055294409 1.0 0.70 0.44 0 105600cd 0.252916613 -0.9904511 -0.13387761 0.88
@@ -130,7 +134,7 @@ ANIM_begin
 
 			# LED
 			ANIM_begin
-				ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+				ANIM_hide 0 0 ToLissPhoton/exterior/landing 
 				LIGHT_PARAM	airplane_landing_bb 0.14922805 -0.030030638 -0.060171127 0.66 0.91 1 0 6000cd -0.052616511 -0.98717403 -0.15072834 0.96
 				LIGHT_PARAM	airplane_landing_pm 0.15093072 0.0019077957 -0.055294409 0.66 0.91 1 0 1000000cd 0.032916613 -0.9904511 -0.13387761 0.98480775
 				LIGHT_PARAM	airplane_landing_pm 0.15093072 0.0019077957 -0.055294409 0.66 0.91 1 0 300000cd 0.252916613 -0.9904511 -0.13387761 0.88
@@ -151,7 +155,7 @@ ANIM_begin
 			# Retractable Landing Light #2
 			# Original/Halogen
 			ANIM_begin
-				ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+				ANIM_hide 1 1 ToLissPhoton/exterior/landing 
 				LIGHT_PARAM	airplane_landing_bb -0.13291599 -0.024538368 -0.06347546 1.0 0.70 0.44 1 4000cd 0.052616622 -0.98717397 -0.15072857 0.96
 				LIGHT_PARAM	airplane_landing_pm -0.13461867 0.0074000657 -0.058598742 1.0 0.70 0.44 1 504900cd -0.032916479 -0.99045104 -0.13387778 0.98480775
 				LIGHT_PARAM	airplane_landing_pm -0.13461867 0.0074000657 -0.058598742 1.0 0.70 0.44 1 105600cd -0.252916479 -0.99045104 -0.13387778 0.88
@@ -160,7 +164,7 @@ ANIM_begin
 
 			# LED
 			ANIM_begin
-				ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+				ANIM_hide 0 0 ToLissPhoton/exterior/landing 
 				LIGHT_PARAM	airplane_landing_bb -0.13291599 -0.024538368 -0.06347546 0.66 0.91 1 1 6000cd 0.052616622 -0.98717397 -0.15072857 0.96
 				LIGHT_PARAM	airplane_landing_pm -0.13461867 0.0074000657 -0.058598742 0.66 0.91 1 1 1000000cd -0.032916479 -0.99045104 -0.13387778 0.98480775
 				LIGHT_PARAM	airplane_landing_pm -0.13461867 0.0074000657 -0.058598742 0.66 0.91 1 1 300000cd -0.252916479 -0.99045104 -0.13387778 0.88
@@ -273,9 +277,9 @@ ANIM_begin
 			ANIM_begin
 			ANIM_hide	1	1	AirbusFBW/LandingLightLocation
 				
-				# Original/Halogen
-				ANIM_begin
-					ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+# Nosegear - Runway Turn Off
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/rwyturnoff 
 					# Runway Turnoff L
 					LIGHT_PARAM	airplane_generic_bb 0.8138479 -0.14646177 0.7647 1.0 0.70 0.44 3 3000cd 0.085035518 -0.93615925 0.34113768 0.25881907
 					LIGHT_PARAM	airplane_generic_pm 0.81144464 -0.096664727 0.70814413 1.0 0.70 0.44 3 60000cd 0.085035443 -0.64016879 0.76351351 0.8660254
@@ -283,20 +287,9 @@ ANIM_begin
 					# Runway Turnoff R
 					LIGHT_PARAM	airplane_generic_bb 0.81383836 -0.14507711 0.14966586 1.0 0.70 0.44 4 3000cd 0.085035399 -0.93615919 -0.34113795 0.25881907
 					LIGHT_PARAM	airplane_generic_pm 0.81145418 -0.098045707 0.20854333 1.0 0.70 0.44 4 60000cd 0.085035324 -0.64016879 -0.76351357 0.8660254
-
-					# Nosegear Takeoff
-					LIGHT_PARAM	airplane_generic_bb 0.34 -0.39247092 0.71 1.0 0.70 0.44 0 4000cd 0.087155916 -0.99619466 -0.00000001 0.57357645
-					LIGHT_PARAM	airplane_generic_pm 0.34 -0.3871421 0.71 1.0 0.70 0.44 0 80000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
-
-					# Nosegear Taxi
-					# This BB light is disabled because it appears ToLiss has a duplicate one hard-coded in the .ACF
-					# LIGHT_PARAM	airplane_taxi_bb 0.31 -0.39247087 0.195 1.0 0.70 0.44 0 800cd 0.087155916 -0.99619466 -0.00000001 0.57357645
-					LIGHT_PARAM	airplane_taxi_pm 0.31 -0.38714204 0.195 1.0 0.70 0.44 0 80000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
-				ANIM_end
-
-				# LED
-				ANIM_begin
-					ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/rwyturnoff 
 					# Runway Turnoff L
 					LIGHT_PARAM	airplane_generic_bb 0.8138479 -0.14646177 0.7647 0.66 0.91 1 3 3000cd 0.085035518 -0.93615925 0.34113768 0.25881907
 					LIGHT_PARAM	airplane_generic_pm 0.81144464 -0.096664727 0.70814413 0.66 0.91 1 3 80000cd 0.085035443 -0.64016879 0.76351351 0.8660254
@@ -304,16 +297,37 @@ ANIM_begin
 					# Runway Turnoff R
 					LIGHT_PARAM	airplane_generic_bb 0.81383836 -0.14507711 0.14966586 0.66 0.91 1 4 3000cd 0.085035399 -0.93615919 -0.34113795 0.25881907
 					LIGHT_PARAM	airplane_generic_pm 0.81145418 -0.098045707 0.20854333 0.66 0.91 1 4 80000cd 0.085035324 -0.64016879 -0.76351357 0.8660254
+ANIM_end
 
+# Nosegear - T.O. Light
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/to 
+					# Nosegear Takeoff
+					LIGHT_PARAM	airplane_generic_bb 0.34 -0.39247092 0.71 1.0 0.70 0.44 0 4000cd 0.087155916 -0.99619466 -0.00000001 0.57357645
+					LIGHT_PARAM	airplane_generic_pm 0.34 -0.3871421 0.71 1.0 0.70 0.44 0 80000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/to 
 					# Nosegear Takeoff
 					LIGHT_PARAM	airplane_generic_bb 0.34 -0.39247092 0.71 0.66 0.91 1 0 4000cd 0.087155916 -0.99619466 -0.00000001 0.57357645
 					LIGHT_PARAM	airplane_generic_pm 0.34 -0.3871421 0.71 0.66 0.91 1 0 120000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
+ANIM_end
 
+# Nosegear - Taxi
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/taxi 
+					# Nosegear Taxi
+					# This BB light is disabled because it appears ToLiss has a duplicate one hard-coded in the .ACF
+					# LIGHT_PARAM	airplane_taxi_bb 0.31 -0.39247087 0.195 1.0 0.70 0.44 0 800cd 0.087155916 -0.99619466 -0.00000001 0.57357645
+					LIGHT_PARAM	airplane_taxi_pm 0.31 -0.38714204 0.195 1.0 0.70 0.44 0 80000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/taxi 
 					# Nosegear Taxi
 					# This BB light is disabled because it appears ToLiss has a duplicate one hard-coded in the .ACF
 					# LIGHT_PARAM	airplane_taxi_bb 0.31 -0.39247087 0.195 0.66 0.91 1 0 800cd 0.087155916 -0.99619466 -0.00000001 0.57357645
 					LIGHT_PARAM	airplane_taxi_pm 0.31 -0.38714204 0.195 0.66 0.91 1 0 100000cd 0.087155916 -0.99619466 -0.00000001 0.8660254
-				ANIM_end
+ANIM_end
 
 			ANIM_end
 		ANIM_end
@@ -340,63 +354,88 @@ ANIM_begin
 			ANIM_rotate_key	1	1.000137
 			ANIM_rotate_end
 
-				# Classic/Halogen
-				ANIM_begin
-					ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
-					ANIM_begin
-						ANIM_hide	1	1	anim/SHARK
+# Left Wing
+# Wing Strobe
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/strobe 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
 						# Left Wingtip Fence Strobe
 						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619 0.45 0.45 1 0 300cd -0.353553 0.866025 -0.353553 0.2
 						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619 0.45 0.45 1 0 300cd -0.353553 -0.866025 -0.353553 0.2
 						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619 0.45 0.45 1 0 30000cd -0.707107 0.000000 -0.707107 0
 						LIGHT_PARAM	airplane_strobe_pm -0.2860375 0.029801849 -1.0063895 0.75 0.75 1 0 8000cd -0.89491403 -0.093880109 -0.43625161 0.090632666
-						# Wingtip Fence Red Nav
-						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 50cd -0.353553 0.866025 -0.353553 0.1
-						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 50cd -0.353553 -0.866025 -0.353553 0.1
-						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 5000cd -0.573576 0.000000 -0.819152 0.2
-						LIGHT_PARAM	airplane_nav_pm -0.17456816 0.02118947 -1.1806901 1.0 0.15 0.07 0 1000cd -0.86461157 -0.16045888 -0.47613016 0.5
-					ANIM_end
-					ANIM_begin
-						ANIM_hide	0	0	anim/SHARK
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Left Sharklet Strobe
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485 0.45 0.45 1 0 300cd 0.866025 0.000000 -0.500000 0.1
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485 0.45 0.45 1 0 300cd -0.862730 -0.087156 -0.498097 0.1
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485 0.45 0.45 1 0 30000cd -0.862730 -0.087156 -0.498097 0.5
 						LIGHT_PARAM	airplane_strobe_pm -0.89555395 0.45210534 -0.31745696 0.75 0.75 1 0 8000cd -0.99240404 -0.085809149 0.088153787 0.090632666
-						# Sharklet Red Nav
-						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 50cd -0.353553 0.866025 -0.353553 0.01
-						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 50cd -0.353553 -0.866025 -0.353553 0.01
-						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 5000cd -0.707107 0.000000 -0.707107 0.2
-						LIGHT_PARAM	airplane_nav_pm -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 1000cd -0.86461157 -0.16045888 -0.47613016 0.5
-					ANIM_end
-				ANIM_end
-
-				# LED
-				ANIM_begin
-					ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
-					ANIM_begin
-						ANIM_hide	1	1	anim/SHARK
+	ANIM_end
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/strobe 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
 						# Left Wingtip Fence Strobe
+
+						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619  0.66 0.91 1 0 300cd -0.353553 0.866025 -0.353553 0.2
+						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619  0.66 0.91 1 0 300cd -0.353553 -0.866025 -0.353553 0.2
 						LIGHT_PARAM	airplane_strobe_bb -0.28967863 0.031477977 -1.0075619  0.66 0.91 1 0 30000cd -0.707107 0.000000 -0.707107 0
 						LIGHT_PARAM	airplane_strobe_pm -0.2860375 0.029801849 -1.0063895  0.66 0.91 1 0 8000cd -0.89491403 -0.093880109 -0.43625161 0.090632666
-						# Wingtip Fence Red Nav
-						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.03 0 0 6000cd -0.573576 0.000000 -0.819152 0.2
-						LIGHT_PARAM	airplane_nav_pm -0.17456816 0.02118947 -1.1806901 1.0 0.03 0 0 4000cd -0.86461157 -0.16045888 -0.47613016 0.5
-					ANIM_end
-					ANIM_begin
-						ANIM_hide	0	0	anim/SHARK
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Left Sharklet Strobe
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485  0.66 0.91 1 0 300cd 0.866025 0.000000 -0.500000 0.1
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485  0.66 0.91 1 0 300cd -0.862730 -0.087156 -0.498097 0.1
 						LIGHT_PARAM	airplane_strobe_bb -0.90874511 0.45166996 -0.34574485  0.66 0.91 1 0 30000cd -0.862730 -0.087156 -0.498097 0.5
 						LIGHT_PARAM	airplane_strobe_pm -0.89555395 0.45210534 -0.31745696  0.66 0.91 1 0 8000cd -0.99240404 -0.085809149 0.088153787 0.090632666
+	ANIM_end
+ANIM_end
+
+# Wing Nav
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/nav 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
+						# Wingtip Fence Red Nav
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 50cd -0.353553 0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 50cd -0.353553 -0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.15 0.07 0 5000cd -0.573576 0.000000 -0.819152 0.2
+						LIGHT_PARAM	airplane_nav_pm -0.17456816 0.02118947 -1.1806901 1.0 0.15 0.07 0 1000cd -0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
+						# Sharklet Red Nav
+						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 50cd -0.353553 0.866025 -0.353553 0.01
+						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 50cd -0.353553 -0.866025 -0.353553 0.01
+						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 5000cd -0.707107 0.000000 -0.707107 0.2
+						LIGHT_PARAM	airplane_nav_pm -0.10275834 0.0042600823 -1.3144066 1.0 0.15 0.07 0 1000cd -0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/nav 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
+						# Wingtip Fence Red Nav
+
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.03 0 0 60cd -0.353553 0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.03 0 0 60cd -0.353553 -0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb -0.19374844 0.020809937 -1.2053187 1.0 0.03 0 0 6000cd -0.573576 0.000000 -0.819152 0.2
+						LIGHT_PARAM	airplane_nav_pm -0.17456816 0.02118947 -1.1806901 1.0 0.03 0 0 4000cd -0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Sharklet Red Nav
 						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.03 0 0 80cd -0.353553 0.866025 -0.353553 0.01
 						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.03 0 0 80cd -0.353553 -0.866025 -0.353553 0.01
 						LIGHT_PARAM	airplane_nav_bb -0.10275834 0.0042600823 -1.3144066 1.0 0.03 0 0 6000cd -0.707107 0.000000 -0.707107 0.2
 						LIGHT_PARAM	airplane_nav_pm -0.10275834 0.0042600823 -1.3144066 1.0 0.03 0 0 4000cd -0.86461157 -0.16045888 -0.47613016 0.5
-					ANIM_end
-				ANIM_end
+	ANIM_end
+ANIM_end
 
 			ANIM_end
 		ANIM_end
@@ -423,59 +462,86 @@ ANIM_begin
 			ANIM_rotate_key	1	1.000137
 			ANIM_rotate_end
 
-				# Classic/Halogen
-				ANIM_begin
-					ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
-					ANIM_begin
-						ANIM_hide	1	1	anim/SHARK
+# Right Wing
+# Wing Strobe
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/strobe 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
 						# Right Wingtip Fence Strobe
+						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475 0.45 0.45 1 0 50cd 0.353553 0.866025 -0.353553 0.2
+						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475 0.45 0.45 1 0 50cd 0.353553 -0.866025 -0.353553 0.2
 						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475 0.45 0.45 1 0 30000cd 0.707107 0.000000 -0.707107 0
 						LIGHT_PARAM	airplane_strobe_pm 0.27377918 0.034392413 -0.98170877 0.75 0.75 1 0 8000cd 0.86272973 -0.094810717 -0.49669734 0.090632666
-						# Wingtip Fence Green
-						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.12 0.77 0.25 0 4000cd 0.573576 0.000000 -0.819152 0.2
-						LIGHT_PARAM	airplane_nav_pm 0.16784111 0.02882218 -1.166319 0.12 0.77 0.25 0 1000cd 0.87154919 -0.16026264 -0.46337676 0.745476
-					ANIM_end
-					ANIM_begin
-						ANIM_hide	0	0	anim/SHARK
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Right Sharklet Strobe
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562 0.45 0.45 1 1 300cd -0.866025 0.000000 -0.500000 0.1
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562 0.45 0.45 1 1 300cd 0.862730 -0.087156 -0.498097 0.1
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562 0.45 0.45 1 1 30000cd 0.862730 -0.087156 -0.498097 0.5
 						LIGHT_PARAM	airplane_strobe_pm 0.91070056 0.45167041 -0.34574351 0.75 0.75 1 1 8000cd 0.99240392 -0.088481463 -0.085472427 0.090632666
-						# Sharklet Green
-						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 50cd 0.353553 0.866025 -0.353553 0.01
-						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 50cd 0.353553 -0.866025 -0.353553 0.01
-						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 4000cd 0.707107 0.000000 -0.707107 0.2
-						LIGHT_PARAM	airplane_nav_pm 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 1000cd 0.872077 -0.156434 -0.463692 0.5
-					ANIM_end
-				ANIM_end
-
-				# LED
-				ANIM_begin
-					ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
-					ANIM_begin
-						ANIM_hide	1	1	anim/SHARK
+	ANIM_end
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/strobe 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
 						# Right Wingtip Fence Strobe
+						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475  0.66 0.91 1 0 300cd -0.353553 0.866025 -0.353553 0.2
+						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475  0.66 0.91 1 0 300cd -0.353553 -0.866025 -0.353553 0.2
 						LIGHT_PARAM	airplane_strobe_bb 0.30081394 0.034152698 -0.99731475  0.66 0.91 1 0 30000cd 0.707107 0.000000 -0.707107 0
 						LIGHT_PARAM	airplane_strobe_pm 0.27377918 0.034392413 -0.98170877  0.66 0.91 1 0 8000cd 0.86272973 -0.094810717 -0.49669734 0.090632666
-						# Wingtip Fence Green
-						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.06 1.0 0 0 5000cd 0.573576 0.000000 -0.819152 0.2
-						LIGHT_PARAM	airplane_nav_pm 0.16784111 0.02882218 -1.166319 0.06 1.0 0 0 3000cd 0.87154919 -0.16026264 -0.46337676 0.745476
-					ANIM_end
-					ANIM_begin
-						ANIM_hide	0	0	anim/SHARK
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Right Sharklet Strobe
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562  0.66 0.91 1 1 300cd -0.866025 0.000000 -0.500000 0.1
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562  0.66 0.91 1 1 300cd 0.862730 -0.087156 -0.498097 0.1
 						LIGHT_PARAM	airplane_strobe_bb 0.92389178 0.45210528 -0.31745562  0.66 0.91 1 1 30000cd 0.862730 -0.087156 -0.498097 0.5
 						LIGHT_PARAM	airplane_strobe_pm 0.91070056 0.45167041 -0.34574351  0.66 0.91 1 1 8000cd 0.99240392 -0.088481463 -0.085472427 0.090632666
+	ANIM_end
+ANIM_end
+
+# Wing Nav
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/nav 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
+						# Wingtip Fence Green
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.12 0.77 0.25 0 50cd 0.353553 0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.12 0.77 0.25 0 50cd 0.353553 0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.12 0.77 0.25 0 4000cd 0.573576 0.000000 -0.819152 0.2
+						LIGHT_PARAM	airplane_nav_pm 0.17456816 0.02118947 -1.1806901 0.12 0.77 0.25 0 1000cd 0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
+						# Sharklet Green
+						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 50cd 0.353553 0.866025 -0.353553 0.01
+						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 50cd 0.353553 -0.866025 -0.353553 0.01
+						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.12 0.77 0.25 0 4000cd 0.707107 0.000000 -0.707107 0.2
+						LIGHT_PARAM	airplane_nav_pm 0.10275834 0.0042600823 -1.3144066 0.12 0.77 0.25 0 1000cd 0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/nav 
+	ANIM_begin
+		ANIM_hide 1 1 anim/SHARK
+						# Wingtip Fence Green
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.06 1.0 0 0 60cd 0.353553 0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.06 1.0 0 0 60cd 0.353553 -0.866025 -0.353553 0.1
+						LIGHT_PARAM	airplane_nav_bb 0.18574727 0.028428685 -1.1918862 0.06 1.0 0 0 5000cd 0.573576 0.000000 -0.819152 0.2
+						LIGHT_PARAM	airplane_nav_pm 0.17456816 0.02118947 -1.1806901 0.06 1.0 0 0 3000cd 0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+	ANIM_begin
+		ANIM_hide 0 0 anim/SHARK
 						# Sharklet Green
 						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.06 1.0 0 0 50cd 0.353553 0.866025 -0.353553 0.01
 						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.06 1.0 0 0 50cd 0.353553 -0.866025 -0.353553 0.01
 						LIGHT_PARAM	airplane_nav_bb 0.098812141 0.0029775307 -1.3164648 0.06 1.0 0 0 5000cd 0.707107 0.000000 -0.707107 0.2
-						LIGHT_PARAM	airplane_nav_pm 0.098812141 0.0029775307 -1.3164648 0.06 1.0 0 0 3000cd 0.872077 -0.156434 -0.463692 0.5
-					ANIM_end
-				ANIM_end
+						LIGHT_PARAM	airplane_nav_pm 0.10275834 0.0042600823 -1.3144066 0.06 1.0 0 0 3000cd 0.86461157 -0.16045888 -0.47613016 0.5
+	ANIM_end
+ANIM_end
 
 			ANIM_end
 		ANIM_end
@@ -483,31 +549,35 @@ ANIM_begin
 
 
 
-# Classic/Halogen
+# Wing Lights
 ANIM_begin
-	ANIM_hide 1 1 ToLissPhoton/exterior/is_led 
+	ANIM_hide 1 1 ToLissPhoton/exterior/wing 
 	# Wing Lights
-	LIGHT_PARAM	airplane_generic_bb -1.9430895 -0.08 2.52 01.0 0.70 0.44 1 3000cd -0.939120 -0.034899 0.341812 0.8
+	LIGHT_PARAM	airplane_generic_bb -1.9430895 -0.08 2.52 01.0 0.70 0.44 1 3000cd -0.939120 -0.034899 0.341812 0.9
 	LIGHT_PARAM	airplane_generic_pm -1.984 -0.08 2.52 01.0 0.70 0.44 1 30000cd -0.57357645 -0.00000008 0.81915206 0.92387953
 	
-	LIGHT_PARAM	airplane_generic_bb 1.9408405 -0.08 2.52 01.0 0.70 0.44 2 3000cd 0.939120 -0.034899 0.341812 0.8
-	LIGHT_PARAM	airplane_generic_pm 2.0183184 -0.08 2.52 01.0 0.70 0.44 2 30000cd 0.57357645 -0.00000008 0.81915206 0.92387953
+	LIGHT_PARAM	airplane_generic_bb 1.9408405 -0.08 2.52 01.0 0.70 0.44 2 3000cd 0.939120 -0.034899 0.341812 0.9
+	LIGHT_PARAM	airplane_generic_pm 2.0183184 -0.08 2.52 01.0 0.70 0.44 2 30000cd 0.57357645 -0.00000008 0.819152060.92387953
+ANIM_end
+ANIM_begin
+	ANIM_hide 0 0 ToLissPhoton/exterior/wing 
+	# Wing Lights
+	LIGHT_PARAM	airplane_generic_bb -1.9430895 -0.08 2.52  0.66 0.91 1 1 4000cd -0.939120 -0.034899 0.341812 0.9
+	LIGHT_PARAM	airplane_generic_pm -1.984 -0.08 2.52  0.66 0.91 1 1 40000cd -0.57357645 -0.00000008 0.81915206 0.92387953
+	
+	LIGHT_PARAM	airplane_generic_bb 1.9408405 -0.08 2.52  0.66 0.91 1 2 4000cd 0.939120 -0.034899 0.341812 0.9
+	LIGHT_PARAM	airplane_generic_pm 2.0183184 -0.08 2.52  0.66 0.91 1 2 40000cd 0.57357645 -0.00000008 0.81915206 0.92387953
+ANIM_end
 
+# Bottom Beacon
+ANIM_begin
+	ANIM_hide 1 1 ToLissPhoton/exterior/beacon 
 	# Bottom Beacon
 	LIGHT_PARAM	airplane_beacon_bb 0.0 -2.4040432 7.9558487 1.0 0.03 0.05 1 12000cd 0 0 0 1
 	LIGHT_PARAM	airplane_beacon_pm 0.0 -2.4028997 7.9477997 1.0 0.03 0.05 1 4000cd 0 0 0 1
 ANIM_end
-
-# LED
 ANIM_begin
-	ANIM_hide 0 0 ToLissPhoton/exterior/is_led 
-	# Wing Lights
-	LIGHT_PARAM	airplane_generic_bb -1.9430895 -0.08 2.52  0.66 0.91 1 1 4000cd -0.939120 -0.034899 0.341812 0.8
-	LIGHT_PARAM	airplane_generic_pm -1.984 -0.08 2.52  0.66 0.91 1 1 40000cd -0.57357645 -0.00000008 0.81915206 0.92387953
-	
-	LIGHT_PARAM	airplane_generic_bb 1.9408405 -0.08 2.52  0.66 0.91 1 2 4000cd 0.939120 -0.034899 0.341812 0.8
-	LIGHT_PARAM	airplane_generic_pm 2.0183184 -0.08 2.52  0.66 0.91 1 2 40000cd 0.57357645 -0.00000008 0.81915206 0.92387953
-
+	ANIM_hide 0 0 ToLissPhoton/exterior/beacon 
 	# Bottom Beacon
 	LIGHT_PARAM	airplane_beacon_bb 0.0 -2.4040432 7.9558487 1.0 0.03 0 1 24000cd 0 0 0 1
 	LIGHT_PARAM	airplane_beacon_pm 0.0 -2.4028997 7.9477997 1.0 0.03 0 1 6000cd 0 0 0 1

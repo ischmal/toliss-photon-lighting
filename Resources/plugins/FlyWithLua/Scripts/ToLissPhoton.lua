@@ -2,20 +2,22 @@
 --[[==========================================================================
   ToLiss Photon Lighting  -  exterior light reshaper  (FlyWithLua, X-Plane 12)
   ---------------------------------------------------------------------------
-  One unified profile drives BOTH the flash waveform and the light colors:
-      LED      -> LED colors  + crisp square beacon
-      Classic  -> original colors + halogen/xenon (instant strike, soft decay)
+  Per-category light types now live in the Python plugin (PI_ToLissPhoton.py),
+  which resolves the chosen profile into nine ToLissPhoton/exterior/* datarefs
+  (0 = halogen/xenon, 1 = LED) that the OBJ reads for its colors.
 
-  SPLIT OF RESPONSIBILITIES (this script + PI_ToLissPhoton.py):
-    Python plugin : creates the profile + is_led datarefs at sim startup (so the
-                    OBJ can bind is_led before it loads), shows the menu only on
-                    ToLiss aircraft, and saves/loads the selection per livery.
-    This script   : the decision logic - Neo detection, resolving the selection
-                    into is_led, writing is_led, and the per-frame flash waveform.
-
-  Reads  ToLissPhoton/exterior/profile  (0 Auto, 1 LED, 2 Classic) from Python.
-  Writes ToLissPhoton/exterior/is_led   (0 classic, 1 LED) for the OBJ + waveform.
+  This script only reshapes the BEACON and STROBE flash waveforms, and it now
+  follows the two category datarefs INDEPENDENTLY:
+      ToLissPhoton/exterior/beacon  -> 1 = crisp square, 0 = xenon (strike + decay)
+      ToLissPhoton/exterior/strobe  -> 1 = crisp square, 0 = xenon (strike + decay)
   (Both datarefs are owned by the Python plugin; this script binds to them.)
+
+  SPLIT OF RESPONSIBILITIES:
+    Python plugin : registers all category datarefs at sim startup, shows the
+                    menu only on ToLiss aircraft, resolves the profile into the
+                    category values, and saves/loads the selection per livery.
+    This script   : the per-frame beacon/strobe flash waveform engine, picking a
+                    waveform per light from that light's category dataref.
 
   ---- WAVEFORM MODEL -------------------------------------------------------
   Each light is a Channel with a cycle Period and a list of Pulses:
@@ -44,23 +46,9 @@ local ActivityThreshold     = 0.05    -- value above this = "ToLiss is lighting 
 local ActivityWindowSeconds = 1.2     -- hold "active" this long after last seen lit
 local MaxDeltaTime          = 0.25    -- clamp frame dt (smooths over pauses)
 
------------------------------------------------------------------- Neo detection
--- Auto mode needs to know whether the current airframe/livery is a Neo.
--- IMPORTANT: the stock X-Plane engine TYPE enum (acf_en_type) does NOT tell a
--- Neo (LEAP / geared turbofan) apart from a CEO (CFM56 / V2500) - both register
--- as "high-bypass turbofan", same value. So Auto needs a signal that actually
--- differs between the two. Find one in DataRefTool: switch between a known CEO
--- livery and a known Neo livery and watch which engine-related dataref changes
--- (a ToLiss thrust/engine dataref is the usual candidate), then set it here.
--- Until you set DataRef, Auto falls back to Classic.
-local NeoDetection = {
-  DataRef        = "",     -- e.g. "AirbusFBW/<engine-or-thrust dataref you confirm>"
-  IsNeoWhenAbove = 0.0,    -- treated as Neo when that dataref's value exceeds this
-}
-
------------------------------------------------------------------- profiles
--- [0] = LED (square beacon), [1] = Classic (halogen/xenon decay beacon).
--- Selected automatically by the resolved is_led; strobes are Square in both.
+------------------------------------------------------------------ waveforms
+-- [0] = LED (square), [1] = Classic (halogen/xenon decay). The beacon half and
+-- the strobe half are selected independently, from the beacon/strobe datarefs.
 -- Strobe indices are guesses until confirmed: drive one at a time and watch the
 -- aircraft. A320 wingtips double-flash; the tail flashes once.
 local Config = { Profiles = {
@@ -93,6 +81,9 @@ local Config = { Profiles = {
 
 } }
 
+-- LED flag (0/1) -> waveform profile index (Profiles[0] = LED, Profiles[1] = Classic)
+local function LedToProfileIndex(led) return (led >= 0.5) and 0 or 1 end
+
 ----------------------------------------------------------------- aircraft check
 local function DetectToLiss()
   if ForceEnable then return true end
@@ -109,10 +100,10 @@ define_shared_DataRef("ToLissPhoton/exterior/enabled", "Int")
 dataref("masterEnable", "ToLissPhoton/exterior/enabled", "writable")
 masterEnable = 1
 
--- profile + is_led are owned by PI_ToLissPhoton.py (registered at sim startup).
--- We read the selection and write the resolved flag.
-dataref("profilePref", "ToLissPhoton/exterior/profile", "readonly")   -- 0 Auto, 1 LED, 2 Classic
-dataref("isLed",       "ToLissPhoton/exterior/is_led",  "writable")   -- 0 classic, 1 LED
+-- Per-light types are owned by PI_ToLissPhoton.py (registered at sim startup).
+-- We read the two that drive a flash waveform. 0 = xenon/halogen, 1 = LED.
+dataref("beaconLed", "ToLissPhoton/exterior/beacon", "readonly")
+dataref("strobeLed", "ToLissPhoton/exterior/strobe", "readonly")
 
 dataref("simTime",      "sim/time/total_running_time_sec", "readonly")
 dataref("overrideFlag", "sim/flightmodel2/lights/override_beacons_and_strobes", "readonly")
@@ -125,13 +116,6 @@ dataref("strobeRatio0", "sim/flightmodel2/lights/strobe_brightness_ratio", "writ
 dataref("strobeRatio1", "sim/flightmodel2/lights/strobe_brightness_ratio", "writable", 1)
 dataref("strobeRatio2", "sim/flightmodel2/lights/strobe_brightness_ratio", "writable", 2)
 dataref("strobeRatio3", "sim/flightmodel2/lights/strobe_brightness_ratio", "writable", 3)
-
--- optional Neo-detection signal (bound only when configured above)
-local neoReader = nil
-if NeoDetection.DataRef ~= "" then
-  dataref("neoSignal", NeoDetection.DataRef, "readonly")
-  neoReader = function() return neoSignal end
-end
 
 -- optional switch-dataref gate (bound only when Gate is a path, not "auto")
 local gateReaders = { Beacon = nil, Strobe = nil }
@@ -302,37 +286,25 @@ local function ApplyIndex(arrayName, index, brightness)
   end
 end
 
------------------------------------------------------------------ profile logic
-local function DetectIsNeo()
-  if neoReader then return neoReader() > NeoDetection.IsNeoWhenAbove end
-  return false   -- unconfigured: Auto behaves as Classic until NeoDetection is set
-end
-
--- Resolve the 3-state selection (from Python) into the binary is_led flag and
--- publish it for the OBJ. Written every frame so the Python-owned dataref stays
--- in sync regardless of how the cross-plugin write is routed. Returns the value.
-local function ResolveLed()
-  local pref = math.floor((profilePref or 0) + 0.5)
-  local led
-  if pref == 1 then led = 1                       -- LED
-  elseif pref == 2 then led = 0                   -- Classic
-  else led = DetectIsNeo() and 1 or 0 end         -- Auto
-  isLed = led
-  return led
-end
-
 ----------------------------------------------------------------- build / state
+-- Beacon and strobe waveforms are rebuilt independently, each only when its own
+-- category dataref flips between LED (1) and classic (0).
 local beaconChannel = nil
 local strobeChannels = {}
-local currentProfile = -1
+local currentBeaconLed = -1
+local currentStrobeLed = -1
 
-local function Rebuild(profileIndex)
-  currentProfile = profileIndex
-  local profile = Config.Profiles[profileIndex] or Config.Profiles[0]
-
+local function RebuildBeacon(led)
+  currentBeaconLed = led
+  local profile = Config.Profiles[LedToProfileIndex(led)]
   beaconChannel = BuildChannel(profile.Beacon)
   SeekChannel(beaconChannel, simTime - beaconChannel.Offset)
+  logMsg("ToLiss Photon: beacon waveform -> " .. (led >= 0.5 and "LED" or "Classic"))
+end
 
+local function RebuildStrobe(led)
+  currentStrobeLed = led
+  local profile = Config.Profiles[LedToProfileIndex(led)]
   strobeChannels = {}
   for index, spec in pairs(profile.Strobe.Index) do
     local channel = BuildChannel({
@@ -341,7 +313,7 @@ local function Rebuild(profileIndex)
     SeekChannel(channel, simTime - channel.Offset)
     strobeChannels[index] = channel
   end
-  logMsg("ToLiss Photon: profile -> " .. (profile.Name or tostring(profileIndex)))
+  logMsg("ToLiss Photon: strobe waveform -> " .. (led >= 0.5 and "LED" or "Classic"))
 end
 
 ----------------------------------------------------------------- main loop
@@ -357,10 +329,6 @@ function ToLissPhotonFrame()
   if deltaTime < 0 then deltaTime = 0 end
   if deltaTime > MaxDeltaTime then deltaTime = MaxDeltaTime end
 
-  -- resolve the unified profile and publish is_led for the OBJ. Runs regardless
-  -- of the master enable, since the colors apply even with the flash effect off.
-  local led = ResolveLed()
-
   if masterEnable < 0.5 then return end
 
   if (not overrideWarningShown) and overrideFlag < 0.5 then
@@ -368,9 +336,11 @@ function ToLissPhotonFrame()
     overrideWarningShown = true
   end
 
-  -- the blinking waveform follows the same profile: LED -> square, Classic -> decay
-  local waveformIndex = (led == 1) and 0 or 1
-  if waveformIndex ~= currentProfile then Rebuild(waveformIndex) end
+  -- follow each light's own category dataref, rebuilding only on a change
+  local beaconFlag = (beaconLed >= 0.5) and 1 or 0
+  local strobeFlag = (strobeLed >= 0.5) and 1 or 0
+  if beaconFlag ~= currentBeaconLed then RebuildBeacon(beaconFlag) end
+  if strobeFlag ~= currentStrobeLed then RebuildStrobe(strobeFlag) end
 
   local beaconBrightness = TickChannel(beaconChannel, deltaTime)
   ApplyIndex("Beacon", 0, beaconBrightness)
