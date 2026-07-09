@@ -1,5 +1,15 @@
 # ToLiss Photon
+## Version 0.1 (Beta)
 Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
+
+> [!WARNING]
+> This plugin is in **BETA**. Stability is **not** guaranteed as this plugin is actively being tested and worked on. Please use at your own risk.
+
+## Supported Aircraft
+* **ToLiss Airbus A319**
+* **ToLiss Airbus A320** (NEO & CEO)
+* **ToLiss Airbus A321** (CEO & NEO)
+_A330-900 support is in progress. A340 support is planned, but I unforunately don't own it._
 
 # Installation
 **1. Install Requirements**
@@ -7,10 +17,12 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 * [XPPython3 v4.7.0](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html) or above
 
 **2. Copy the `Resources` folder into your root `X-Plane 12` directory.**
-When asked if you want to overwrite existing files, select **Yes**.
+
+* When asked if you want to overwrite existing files, select **Yes**.
 
 **3. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
-When asked if you want to overwrite existing files, select **Yes**.
+
+* When asked if you want to overwrite existing files, select **Yes**.
 
 **4. Open X-Plane and proceed with any first-time install windows.**
 
@@ -51,9 +63,8 @@ When asked if you want to overwrite existing files, select **Yes**.
   * Strobes: Xenon or LED
   * Logo Lights: Halogen or LED
 
-## Supported Aircraft
-* **ToLiss Airbus A320** (both NEO and CEO)
-_Additional aircraft support being added._
+# Known Issues
+* Nosegear and landing billboard lights on the A321 may still appear as though they're halogen even though they should be LED. This is unfortunately due to ToLiss using an older, less-flexible lighting system for these specific lights. Please report this to ToLiss. As much as I love them, exterior lighting has been a persistent issue for several years now.
 
 # About A320 Lighting
 The A320 originally used incandescent halogen light bulbs for exterior illumination and navigation lights, and Xenon flash-tubes for both the red beacons and white strobes. The transition to LEDs did not begin until 2015. Initially, only the navigation, beacon and strobe lights were switched to LED. While aftermarket LED bulbs were widely available, Airbus itself did not ship all-LED aircraft until about 2022, corresponding with the launch of the Multifunction Runway Light (MFRL), which merged taxi, takeoff and landing lights into a unified housing on each wing.
@@ -80,7 +91,7 @@ ToLiss Photon modifies every single light in the .OBJ and specifies a light dire
 The strobe and beacon flashing is controlled using a Lua script. The script has a function that executes every frame and overrides specific DataRefs set by ToLiss that control light intensity for both the beacon and the strobe. By default, ToLiss uses a sine wave (or similar equation) to control the brightness of the beacon, which means it smoothly fades in and out. While this kind of fading _can_ occur with halogen bulbs as they quickly warm and cool, the beacon is not halogen. It's either a Xenon flash-tube or LED. Neither option produces anything like the perceptible fade-in/fade-out you see.
 
 ### Components
-* Aircraft .obj files: Modifies light colors, positioning, anda appearance.
+* Aircraft .obj files: Modifies light colors, positioning, and appearance.
 * Lua (via FlyWithLua): Controls beacon and flash behavior.
 * Python (via XPPython3): Used for the GUI, Plugins sub-menu, and profile saving/loading.
   * _I would have preferred to just use Lua, but FlyWithLua cannot create usable DataRefs for the .obj files nor can it create a sub-menu in Plugins._
@@ -88,10 +99,15 @@ The strobe and beacon flashing is controlled using a Lua script. The script has 
 ## Other Recommended Mods
 * [KOSP Project](https://store.x-plane.org/KOSP-PROJECT--A319-A320-A321-Full-Soundscape_p_1773.html) for audio
 * [GusRodrigues'](https://forums.x-plane.org/profile/6767-gusrodrigues/) A320 Family Light Mod ([A319](https://forums.x-plane.org/files/file/93336-a319-light-mod/), [A320](https://forums.x-plane.org/files/file/93337-a320-light-mod/), [A321](https://forums.x-plane.org/files/file/93338-a321-light-mod/)) for additional lighting improvements
-  * _These mods also optionally provide improved exterior lighting. They have a different artistic direction compared to ToLiss Photon and are a good alternative if you decide you don't like this mod._
-
+  * _These mods also optionally provide improved exterior lighting. They have a different artistic direction compared to ToLiss Photon and are a good alternative if yu decide you don't like this mod._
+o
 ## Credits
-The original lighting file was authored by ToLiss Simulations. Scripting was done with the assistance of Claude Code (I don't know Python). 
+The original .obj lighting files were authored by ToLiss Simulations. Scripting was crafted with the assistance of Claude Code (Sonnet 5 and Opus 4.8). 
+
+The file you're currently reading was still 100% written by me (schmal), a real human.
+
+## Contact
+While I am a full-time 911 dispatcher, I specialize in lighting work just like this with over a decade of experience. Have a commercial project you think I could help with? Reach out at (contact@schmal.me)[contact@schmal.me].
 
 ## Disclaimer
 This project is an independent third-party modification and is not affiliated with ToLiss Simulations Solutions Inc.
