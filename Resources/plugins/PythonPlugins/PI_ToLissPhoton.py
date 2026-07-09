@@ -75,7 +75,7 @@ ProfileItems = (
 
 # Categories that are LED in the Hybrid LED profile (position/anti-collision lights);
 # the beam lights (taxi, to, rwyturnoff, wing, landing) stay halogen. Edit to taste.
-HybridLedCategories = ("beacon", "strobe", "nav", "logo")
+HybridLedCategories = ("beacon", "strobe", "nav")
 
 # ---- Auto gating (configurable; fill in MFRL once the dataref is known) ----
 # anim/SHARK is the ToLiss geometry flag used by the OBJ: 0 = wingtip fence, 1 = sharklet.
