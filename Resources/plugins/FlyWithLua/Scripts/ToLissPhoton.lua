@@ -81,6 +81,37 @@ local Config = { Profiles = {
 
 } }
 
+-- Screenshot Option
+-- local Config = { Profiles = {
+
+--   [0] = { Name = "LED",
+--     Beacon = { Period = 1.0, Offset = 0,
+--                Pulses = { { At = 0.00, Duration = 1, Shape = "Square" } } },
+--     Strobe = { Period = 1.0, Offset = 0.0, Index = {
+--         [0] = { Pulses = { { At = 0.00, Duration = 1, Shape = "Square" },
+--                            { At = 0.00, Duration = 1, Shape = "Square" } } },  -- double
+--         [1] = { Pulses = { { At = 0.00, Duration = 1, Shape = "Square" },
+--                            { At = 0.00, Duration = 1, Shape = "Square" } } },  -- double
+--         [2] = { Pulses = { { At = 0.00, Duration = 1, Shape = "Square" } } },  -- single
+--         [3] = { Pulses = { { At = 0.00, Duration = 1, Shape = "Square" } } },  -- single
+--     } },
+--   },
+
+--   [1] = { Name = "Classic",
+--     Beacon = { Period = 1.0, Offset = 0,
+--                Pulses = { { At = 0.00, Duration = 1, Shape = "Square"} } },
+--     Strobe = { Period = 1.0, Offset = 0.0, Index = {
+--         [0] = { Pulses = { { At = 0, Duration = 1, Shape = "Square" },
+--                            { At = 0, Duration = 1, Shape = "Square" } } },
+--         [1] = { Pulses = { { At = 0, Duration = 1, Shape = "Square" },
+--                            { At = 0, Duration = 1, Shape = "Square" } } },
+--         [2] = { Pulses = { { At = 0, Duration = 1, Shape = "Square"} } },
+--         [3] = { Pulses = { { At = 0, Duration = 1, Shape = "Square" } } },
+--     } },
+--   },
+
+-- } }
+
 -- LED flag (0/1) -> waveform profile index (Profiles[0] = LED, Profiles[1] = Classic)
 local function LedToProfileIndex(led) return (led >= 0.5) and 0 or 1 end
 
