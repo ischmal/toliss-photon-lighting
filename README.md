@@ -64,7 +64,8 @@ _A330-900 support is in progress. A340 support is planned, but I unforunately do
   * Logo Lights: Halogen or LED
 
 # Known Issues
-* Nosegear and landing billboard lights on the A321 may still appear as though they're halogen even though they should be LED. This is unfortunately due to ToLiss using an older, less-flexible lighting system for these specific lights. Please report this to ToLiss. As much as I love them, exterior lighting has been a persistent issue for several years now.
+* Nosegear and landing billboard lights on the A321 may still appear as though they're halogen even though they should be LED. This is unfortunately due to ToLiss using an older, less-flexible lighting system for these specific lights. I'm investigating possible workarounds.
+* Automatic selection is not fully implemented.
 
 # About A320 Lighting
 The A320 originally used incandescent halogen light bulbs for exterior illumination and navigation lights, and Xenon flash-tubes for both the red beacons and white strobes. The transition to LEDs did not begin until 2015. Initially, only the navigation, beacon and strobe lights were switched to LED. While aftermarket LED bulbs were widely available, Airbus itself did not ship all-LED aircraft until about 2022, corresponding with the launch of the Multifunction Runway Light (MFRL), which merged taxi, takeoff and landing lights into a unified housing on each wing.
@@ -100,14 +101,11 @@ The strobe and beacon flashing is controlled using a Lua script. The script has 
 * [KOSP Project](https://store.x-plane.org/KOSP-PROJECT--A319-A320-A321-Full-Soundscape_p_1773.html) for audio
 * [GusRodrigues'](https://forums.x-plane.org/profile/6767-gusrodrigues/) A320 Family Light Mod ([A319](https://forums.x-plane.org/files/file/93336-a319-light-mod/), [A320](https://forums.x-plane.org/files/file/93337-a320-light-mod/), [A321](https://forums.x-plane.org/files/file/93338-a321-light-mod/)) for additional lighting improvements
   * _These mods also optionally provide improved exterior lighting. They have a different artistic direction compared to ToLiss Photon and are a good alternative if yu decide you don't like this mod._
-o
+
 ## Credits
 The original .obj lighting files were authored by ToLiss Simulations. Scripting was crafted with the assistance of Claude Code (Sonnet 5 and Opus 4.8). 
 
 The file you're currently reading was still 100% written by me (schmal), a real human.
-
-## Contact
-While I am a full-time 911 dispatcher, I specialize in lighting work just like this with over a decade of experience. Have a commercial project you think I could help with? Reach out at (contact@schmal.me)[contact@schmal.me].
 
 ## Disclaimer
 This project is an independent third-party modification and is not affiliated with ToLiss Simulations Solutions Inc.
