@@ -10,11 +10,11 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 * **ToLiss Airbus A319**
 * **ToLiss Airbus A320** (NEO & CEO)
 * **ToLiss Airbus A321** (CEO & NEO)
+  
 _A330-900 support is in progress. A340 support is planned, but I unforunately don't own it._
 
 # Installation
-**1. Install XPPython3 v4.7.0+**
-* Download [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html). 
+**1. Download and install [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html)**
 * After installing for the first time, open X-Plane 12 and load into the simulator to complete the first-time install process.
 
 **2. Copy the `Resources` folder into your root `X-Plane 12` directory.**
