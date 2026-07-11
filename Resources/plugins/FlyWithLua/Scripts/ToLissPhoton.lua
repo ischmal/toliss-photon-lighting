@@ -131,10 +131,27 @@ define_shared_DataRef("ToLissPhoton/exterior/enabled", "Int")
 dataref("masterEnable", "ToLissPhoton/exterior/enabled", "writable")
 masterEnable = 1
 
+-- Defensive readonly bind. FlyWithLua's dataref() raises a Lua error when the path
+-- doesn't exist, and FlyWithLua reacts by moving the whole script to its quarantine
+-- folder. The ToLissPhoton/* category datarefs are owned by PI_ToLissPhoton.py and
+-- only exist if XPPython3 + that plugin are installed and started cleanly; on a
+-- machine missing either, a raw dataref() here would quarantine this script on every
+-- load. So we probe with pcall and, when it's absent, return nil and degrade to the
+-- Classic waveform instead of crashing.
+local function TryBindReadonly(globalName, path)
+  if pcall(dataref, globalName, path, "readonly") then
+    return function() return _G[globalName] end
+  end
+  logMsg("ToLiss Photon: dataref '" .. path ..
+         "' not found (PI_ToLissPhoton.py missing or not started?) - defaulting to Classic.")
+  return nil
+end
+
 -- Per-light types are owned by PI_ToLissPhoton.py (registered at sim startup).
 -- We read the two that drive a flash waveform. 0 = xenon/halogen, 1 = LED.
-dataref("beaconLed", "ToLissPhoton/exterior/beacon", "readonly")
-dataref("strobeLed", "ToLissPhoton/exterior/strobe", "readonly")
+-- A nil reader (Python plugin absent) means "treat as Classic" (see the main loop).
+local readBeaconLed = TryBindReadonly("beaconLed", "ToLissPhoton/exterior/beacon")
+local readStrobeLed = TryBindReadonly("strobeLed", "ToLissPhoton/exterior/strobe")
 
 dataref("simTime",      "sim/time/total_running_time_sec", "readonly")
 dataref("overrideFlag", "sim/flightmodel2/lights/override_beacons_and_strobes", "readonly")
@@ -151,10 +168,16 @@ dataref("strobeRatio3", "sim/flightmodel2/lights/strobe_brightness_ratio", "writ
 -- optional switch-dataref gate (bound only when Gate is a path, not "auto")
 local gateReaders = { Beacon = nil, Strobe = nil }
 local function BindGate(arrayName)
-  if Gate[arrayName] ~= "auto" then
-    local variableName = "gateSwitch" .. arrayName
-    dataref(variableName, Gate[arrayName], "readonly")
+  if Gate[arrayName] == "auto" then return end
+  local variableName = "gateSwitch" .. arrayName
+  -- Same guard as the category datarefs: a missing gate path would quarantine the
+  -- script. If it can't be bound, fall back to "auto" (infer from brightness).
+  if pcall(dataref, variableName, Gate[arrayName], "readonly") then
     gateReaders[arrayName] = function() return _G[variableName] end
+  else
+    logMsg("ToLiss Photon: gate dataref '" .. Gate[arrayName] ..
+           "' not found; falling back to auto gating for " .. arrayName .. ".")
+    Gate[arrayName] = "auto"
   end
 end
 BindGate("Beacon")
@@ -367,9 +390,13 @@ function ToLissPhotonFrame()
     overrideWarningShown = true
   end
 
-  -- follow each light's own category dataref, rebuilding only on a change
-  local beaconFlag = (beaconLed >= 0.5) and 1 or 0
-  local strobeFlag = (strobeLed >= 0.5) and 1 or 0
+  -- follow each light's own category dataref, rebuilding only on a change.
+  -- A nil reader (Python plugin absent) defaults to 0 = Classic, so the flash engine
+  -- still runs on the stock beacon/strobe datarefs instead of the script crashing.
+  local beaconValue = readBeaconLed and readBeaconLed() or 0
+  local strobeValue = readStrobeLed and readStrobeLed() or 0
+  local beaconFlag = (beaconValue >= 0.5) and 1 or 0
+  local strobeFlag = (strobeValue >= 0.5) and 1 or 0
   if beaconFlag ~= currentBeaconLed then RebuildBeacon(beaconFlag) end
   if strobeFlag ~= currentStrobeLed then RebuildStrobe(strobeFlag) end
 
