@@ -1,6 +1,7 @@
 # ToLiss Photon
-## Version 0.1 (Beta)
 Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
+
+**Version 0.2-beta**
 
 > [!WARNING]
 > This plugin is in **BETA**. Stability is **not** guaranteed as this plugin is actively being tested and worked on. Please use at your own risk.
@@ -12,21 +13,18 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 _A330-900 support is in progress. A340 support is planned, but I unforunately don't own it._
 
 # Installation
-**1. Install Requirements**
-* [FlyWithLua NG+ for X-Plane 12](https://forums.x-plane.org/files/file/82888-flywithlua-ng-next-generation-plus-edition-for-x-plane-12-win-lin-mac/)
-* [XPPython3 v4.7.0](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html) or above
+**1. Install XPPython3 v4.7.0+**
+* Download [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html). 
+* After installing for the first time, open X-Plane 12 and load into the simulator to complete the first-time install process.
 
 **2. Copy the `Resources` folder into your root `X-Plane 12` directory.**
-
 * When asked if you want to overwrite existing files, select **Yes**.
+* This installs the Python script that enables light selection and controls beacon/strobe timing.
 
 **3. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
-
 * When asked if you want to overwrite existing files, select **Yes**.
 
-**4. Open X-Plane and proceed with any first-time install windows.**
-
-**5. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
+**4. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
 
 # Features
 * Complete rework of exterior lighting for supported ToLiss aircraft
@@ -63,9 +61,18 @@ _A330-900 support is in progress. A340 support is planned, but I unforunately do
   * Strobes: Xenon or LED
   * Logo Lights: Halogen or LED
 
+## Changelog
+### v0.2-beta (2026-07-10)
+* Moved all scripting to single Python script (removed Lua).
+* Updated A321 lighting (ToLiss A321 v1.8 -> v1.9)
+
+### v0.1-beta (2026-07-09)
+Initial release.
+
 # Known Issues
 * Nosegear and landing billboard lights on the A321 may still appear as though they're halogen even though they should be LED. This is unfortunately due to ToLiss using an older, less-flexible lighting system for these specific lights. I'm investigating possible workarounds.
 * Automatic selection is not fully implemented.
+* Light positions may be incorrect if certain 
 
 # About A320 Lighting
 The A320 originally used incandescent halogen light bulbs for exterior illumination and navigation lights, and Xenon flash-tubes for both the red beacons and white strobes. The transition to LEDs did not begin until 2015. Initially, only the navigation, beacon and strobe lights were switched to LED. While aftermarket LED bulbs were widely available, Airbus itself did not ship all-LED aircraft until about 2022, corresponding with the launch of the Multifunction Runway Light (MFRL), which merged taxi, takeoff and landing lights into a unified housing on each wing.
