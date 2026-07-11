@@ -96,7 +96,7 @@ HybridLedCategories = ("beacon", "strobe", "nav")
 # anim/SHARK is the ToLiss geometry flag used by the OBJ: 0 = wingtip fence, 1 = sharklet.
 SharkletGate      = "anim/SHARK"
 SharkletThreshold = 0.5
-MfrlGate          = ""      # when set AND present above threshold => Full LED (top priority)
+MfrlGate          = "AirbusFBW/LandingLightLocation"      # when set AND present above threshold => Full LED (top priority)
 MfrlThreshold     = 0.5
 AutoFallbackProfile = PROFILE_CLASSIC   # used when no gate resolves
 
@@ -625,19 +625,29 @@ class PythonInterface:
         return ""
 
     def GateActive(self, path, threshold):
-        """True/False if the gate dataref exists, else None (not configured/present)."""
+        """True/False if the gate dataref exists, else None (not configured/present).
+
+        Reads according to the dataref's *published* type. A float read of an
+        int-only dataref (e.g. AirbusFBW/LandingLightLocation) returns 0.0
+        WITHOUT raising, so a try/except float-then-int fallback never fires
+        (see CLAUDE.md gotcha #4). Query the type and pick the right accessor.
+        """
         if not path:
             return None
         try:
             ref = xp.findDataRef(path)
             if ref is None:
                 return None
-            return xp.getDataf(ref) > threshold
-        except Exception:
-            try:
+            types = xp.getDataRefTypes(ref)
+            # Type_Float = 2, Type_Double = 4, Type_Int = 1 (bitmask).
+            if types & (2 | 4):
+                return xp.getDataf(ref) > threshold
+            if types & 1:
                 return xp.getDatai(ref) > threshold
-            except Exception:
-                return None
+            # Unknown/unspecified type: try int then float, taking the max.
+            return max(xp.getDatai(ref), xp.getDataf(ref)) > threshold
+        except Exception:
+            return None
 
     def ResolveAutoProfile(self):
         icao = self.AircraftIcao()
