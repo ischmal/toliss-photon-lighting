@@ -1,14 +1,19 @@
 """
 PI_ToLissPhoton.py  -  XPPython3 plugin for ToLiss Photon Lighting
 
-Owns the plumbing the FlyWithLua script (ToLissPhoton.lua) can't do reliably on its
-own, and (new) all of the profile-resolution logic:
-
   * Registers NINE per-category light-type datarefs at SIM STARTUP (so the aircraft
     OBJ can bind them before it loads). Each is 0 = halogen/xenon, 1 = LED:
         ToLissPhoton/exterior/{taxi,to,rwyturnoff,wing,landing,beacon,nav,strobe,logo}
     Plus a deprecated read-only alias ToLissPhoton/exterior/is_led = 1 only when ALL
     categories resolve LED, else 0 (safety net for any OBJ not yet migrated).
+
+  * Reshapes the exterior BEACON and STROBE flash waveforms every frame, picking a
+    per-light waveform from that light's resolved category value (beacon/strobe = 1 ->
+    crisp square LED flash; 0 -> xenon strike + decay). The engine runs on the
+    after-flight-model flight-loop phase so its write lands AFTER ToLiss's own per-frame
+    write and therefore wins (gotcha #5; verified in-sim). Reading the category value
+    straight from memory (self.values) means there is no dataref round-trip and none of
+    the old int/float accessor race the two-plugin split needed.
 
   * Shows a "ToLiss Photon" menu ONLY while a ToLiss aircraft is loaded:
         Auto / Classic / Hybrid LED / Full LED    (radio)
@@ -35,10 +40,15 @@ NOT reintroduce nested submenus. Menu build is defensive - failures are logged a
 degrade gracefully. Check XPPython3Log.txt if anything misbehaves.
 
 Install: copy into Resources/plugins/PythonPlugins/ (requires XPPython3). Delete any
-stale __pycache__ there and remove any older PI_PhotonMenu.py.
+stale __pycache__ there and remove any older PI_PhotonMenu.py. The old FlyWithLua
+script (ToLissPhoton.lua) must NOT run alongside this plugin - it would fight for the
+same per-frame brightness writes - so this plugin auto-deletes it from the FlyWithLua
+Scripts (and quarantine) folders at startup (see _RemoveLegacyLua). An upgrader may need
+one sim restart for that to take full effect.
 """
 import os
 import json
+import math
 import traceback
 from XPPython3 import xp
 
@@ -60,6 +70,11 @@ CategoryKeys = [c[0] for c in Categories]
 IsLedDataRefName   = "ToLissPhoton/exterior/is_led"   # deprecated alias
 LiveryIndexDataRef = "sim/aircraft/view/acf_livery_index"
 IcaoDataRef        = "sim/aircraft/view/acf_ICAO"
+
+# Retired FlyWithLua script names to auto-delete on startup (see _RemoveLegacyLua). The
+# waveform engine used to live in ToLissPhoton.lua; if an upgraded install still has it,
+# both it and this plugin would drive the same per-frame brightness writes and fight.
+LegacyLuaNames = ("ToLissPhoton.lua", "photon_toliss_lights.lua")
 
 # ---- profiles ----
 PROFILE_AUTO, PROFILE_CLASSIC, PROFILE_HYBRID, PROFILE_FULL_LED, PROFILE_CUSTOM = 0, 1, 2, 3, 4
@@ -84,6 +99,179 @@ SharkletThreshold = 0.5
 MfrlGate          = ""      # when set AND present above threshold => Full LED (top priority)
 MfrlThreshold     = 0.5
 AutoFallbackProfile = PROFILE_CLASSIC   # used when no gate resolves
+
+
+# ============================== WAVEFORM ENGINE ======================================
+# Ported from ToLissPhoton.lua (retired). Reshapes the beacon/strobe flash each frame.
+#
+# Each light is a Channel with a cycle Period, an Offset, and a list of Pulses:
+#     {"At", "Duration", "Shape", "Hold", "Tau", "Peak"}
+#   Shape = "Square" | "Decay" | "Triangle" | "Sine" | "RampUp" | "RampDown"
+#   Hold  = fraction of the pulse held at full peak before the shape runs (0..1)
+#   Tau   = decay sharpness for Shape="Decay" (smaller = sharper)
+#   Peak  = 0..1 peak brightness (default 1)
+# Advancing uses a carry-preserving timer (no drift); rendering uses a RenderAge that
+# resets to 0 at each onset, so the onset frame is always the exact peak and low frame
+# rates collapse to one peak frame then zero (no half-finished fade).
+#
+# WaveformProfiles[0] = LED (square), [1] = Classic (halogen/xenon decay). The beacon
+# and strobe halves are chosen independently from the resolved beacon/strobe category
+# values. Strobe indices are guesses until confirmed in-sim (0,1 = double-flash wingtips,
+# 2,3 = single tail flash).
+WaveformProfiles = {
+    0: {  # LED
+        "Beacon": {"Period": 1.0, "Offset": 0.5,
+                   "Pulses": [{"At": 0.00, "Duration": 0.1, "Shape": "Square"}]},
+        "Strobe": {"Period": 1.0, "Offset": 0.0, "Index": {
+            0: [{"At": 0.00, "Duration": 0.05, "Shape": "Square"},
+                {"At": 0.15, "Duration": 0.05, "Shape": "Square"}],   # double
+            1: [{"At": 0.00, "Duration": 0.05, "Shape": "Square"},
+                {"At": 0.15, "Duration": 0.05, "Shape": "Square"}],   # double
+            2: [{"At": 0.00, "Duration": 0.1,  "Shape": "Square"}],   # single
+            3: [{"At": 0.00, "Duration": 0.08, "Shape": "Square"}],   # single
+        }},
+    },
+    1: {  # Classic
+        "Beacon": {"Period": 1.0, "Offset": 0.5,
+                   "Pulses": [{"At": 0.00, "Duration": 0.06, "Hold": 0.40,
+                               "Shape": "Decay", "Tau": 0.30}]},
+        "Strobe": {"Period": 1.0, "Offset": 0.0, "Index": {
+            0: [{"At": 0.00, "Duration": 0.04, "Shape": "Square"},
+                {"At": 0.12, "Duration": 0.04, "Shape": "Square"}],
+            1: [{"At": 0.00, "Duration": 0.04, "Shape": "Square"},
+                {"At": 0.12, "Duration": 0.04, "Shape": "Square"}],
+            2: [{"At": 0.00, "Duration": 0.06, "Hold": 0.40, "Shape": "Decay", "Tau": 0.30}],
+            3: [{"At": 0.00, "Duration": 0.04, "Shape": "Square"}],
+        }},
+    },
+}
+
+# On/off gating + timing (mirrors the Lua constants).
+GateThreshold         = 0.5     # a dataref gate counts as "on" above this
+InvertStrobeGate      = False   # set True if strobes come out inverted
+ActivityThreshold     = 0.05    # ToLiss value above this = "ToLiss is lighting it"
+ActivityWindowSeconds = 1.2     # hold "active" this long after last seen lit (auto gate)
+MaxDeltaTime          = 0.25    # clamp frame dt (smooths over pauses)
+
+# sim datarefs the engine reads/writes.
+BeaconRatioDataRef = "sim/flightmodel2/lights/beacon_brightness_ratio"
+StrobeRatioDataRef = "sim/flightmodel2/lights/strobe_brightness_ratio"
+OverrideDataRef    = "sim/flightmodel2/lights/override_beacons_and_strobes"
+SimTimeDataRef     = "sim/time/total_running_time_sec"
+StrobeGateDataRef  = "sim/cockpit/electrical/strobe_lights_on"   # zero-lag strobe gate
+
+
+def _ClampBrightness(v):
+    return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+
+def _Envelope(shape, progress, tau):
+    if shape == "Square":
+        return 1.0
+    if shape == "Decay":
+        # normalised exponential: exactly 1.0 at progress 0, exactly 0.0 at progress 1,
+        # for any Tau. Smaller Tau = sharper initial drop.
+        t = tau or 0.30
+        tail = math.exp(-1.0 / t)
+        return (math.exp(-progress / t) - tail) / (1.0 - tail)
+    if shape == "RampUp":
+        return progress
+    if shape == "RampDown":
+        return 1.0 - progress
+    if shape == "Triangle":
+        return 1.0 - abs(2.0 * progress - 1.0)
+    if shape == "Sine":
+        return math.sin(progress * math.pi)
+    return 1.0
+
+
+def _BuildSegments(pulses, period):
+    ordered = sorted(pulses, key=lambda p: p["At"])
+    segments = []
+    cursor = 0.0
+    for pulse in ordered:
+        at = pulse["At"]
+        if at > cursor + 1e-6:
+            segments.append({"Duration": at - cursor, "IsOn": False})
+        segments.append({
+            "Duration": pulse["Duration"], "IsOn": True,
+            "Shape": pulse.get("Shape", "Square"), "Tau": pulse.get("Tau", 0.30),
+            "Hold": pulse.get("Hold", 0.0), "Peak": pulse.get("Peak", 1.0),
+        })
+        cursor = max(cursor, at) + pulse["Duration"]
+    if cursor < period - 1e-6:
+        segments.append({"Duration": period - cursor, "IsOn": False})
+    elif cursor > period + 1e-3:
+        _log("WARNING pulses total %.3fs exceed period %.3fs" % (cursor, period))
+    return segments
+
+
+class _Channel:
+    """One light's tiled on/off segment loop. SegmentIndex is 0-based (Python)."""
+    __slots__ = ("Segments", "Period", "Offset", "TotalDuration",
+                 "SegmentIndex", "SegmentElapsed", "RenderAge")
+
+    def __init__(self, pulses, period, offset):
+        self.Segments = _BuildSegments(pulses, period)
+        self.Period = period
+        self.Offset = offset
+        self.TotalDuration = sum(s["Duration"] for s in self.Segments)
+        self.SegmentIndex = 0
+        self.SegmentElapsed = 0.0
+        self.RenderAge = 0.0
+
+    def Seek(self, targetTime):
+        if self.TotalDuration <= 0:
+            self.SegmentIndex = 0
+            self.SegmentElapsed = 0.0
+            self.RenderAge = 0.0
+            return
+        targetTime = targetTime % self.TotalDuration
+        if targetTime < 0:
+            targetTime += self.TotalDuration
+        accumulated = 0.0
+        for index, segment in enumerate(self.Segments):
+            if targetTime < accumulated + segment["Duration"]:
+                self.SegmentIndex = index
+                self.SegmentElapsed = targetTime - accumulated
+                self.RenderAge = self.SegmentElapsed
+                return
+            accumulated += segment["Duration"]
+        self.SegmentIndex = len(self.Segments) - 1
+        self.SegmentElapsed = 0.0
+        self.RenderAge = 0.0
+
+    def Tick(self, deltaTime):
+        # Render the current segment from RenderAge (onset = peak, low-FPS = peak-then-
+        # zero), then advance using the carry-preserving SegmentElapsed (no drift).
+        segment = self.Segments[self.SegmentIndex]
+        brightness = 0.0
+        if segment["IsOn"] and segment["Duration"] > 0 and self.RenderAge < segment["Duration"]:
+            progress = self.RenderAge / segment["Duration"]
+            if progress < 0.0:
+                progress = 0.0
+            elif progress > 1.0:
+                progress = 1.0
+            hold = segment.get("Hold", 0.0)
+            if hold >= 1.0:
+                progress = 0.0
+            elif progress > hold:
+                progress = (progress - hold) / (1.0 - hold)
+            else:
+                progress = 0.0
+            brightness = _Envelope(segment["Shape"], progress, segment.get("Tau", 0.30)) \
+                * segment.get("Peak", 1.0)
+
+        self.SegmentElapsed += deltaTime
+        self.RenderAge += deltaTime
+        if self.SegmentElapsed >= segment["Duration"]:
+            self.SegmentElapsed -= segment["Duration"]
+            self.SegmentIndex += 1
+            if self.SegmentIndex >= len(self.Segments):
+                self.SegmentIndex = 0
+            self.RenderAge = 0.0
+        return brightness
+# =====================================================================================
 
 
 def CategoriesForNamedProfile(profile):
@@ -137,6 +325,21 @@ class PythonInterface:
 
         self.flightLoopRegistered = False
 
+        # ---- waveform engine state (ported from ToLissPhoton.lua) ----
+        self.engineLoopID   = None          # after-flight-model per-frame loop
+        self.simTimeRef     = None
+        self.beaconRatioRef = None
+        self.strobeRatioRef = None
+        self.overrideRef    = None
+        self.strobeGateRef  = None
+        self.lastSimTime    = -1.0
+        self.overrideWarned = False
+        self.beaconChannel  = None          # _Channel
+        self.strobeChannels = {}            # index -> _Channel
+        self.currentBeaconLed = -1          # -1 = "not built yet"
+        self.currentStrobeLed = -1
+        self.lastActiveBeacon = {}          # index -> last simTime seen lit (auto gate)
+
     # ---- dataref accessor callbacks ----
     def _makeReaders(self, key):
         # per-key closures so we don't depend on refCon plumbing
@@ -159,10 +362,42 @@ class PythonInterface:
             self.isLedAccessor = xp.registerDataAccessor(
                 IsLedDataRefName, readInt=self._readIsLedInt, readFloat=self._readIsLedFloat)
             self.LoadProfilesFile()
+            self._RemoveLegacyLua()
             _log("started; registered %d category datarefs" % len(self.accessors))
         except Exception:
             _log("XPluginStart error:\n" + traceback.format_exc())
         return self.Name, self.Sig, self.Desc
+
+    def _RemoveLegacyLua(self):
+        """Delete the retired FlyWithLua script(s) so an upgraded install doesn't run the
+        old Lua engine alongside this plugin (both would write the beacon/strobe ratios
+        every frame and fight). Checks the Scripts folder and FlyWithLua's quarantine
+        folder. Best-effort: missing folders and permission errors are just logged.
+
+        NOTE: if FlyWithLua already loaded the old script THIS session, deleting the file
+        now doesn't unload the running copy - it stops loading on the next FlyWithLua
+        script reload (aircraft change) or sim restart. So an upgrader may need one
+        restart for the effect to be clean; after that the file is gone for good.
+        """
+        try:
+            root = xp.getSystemPath()
+        except Exception:
+            root = ""
+        if not root:
+            return
+        fwlScripts = os.path.join(root, "Resources", "plugins", "FlyWithLua")
+        scriptDirs = (os.path.join(fwlScripts, "Scripts"),
+                      os.path.join(fwlScripts, "Scripts (Quarantine)"))
+        for directory in scriptDirs:
+            for name in LegacyLuaNames:
+                path = os.path.join(directory, name)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                        _log("removed legacy FlyWithLua script: %s" % path)
+                except Exception:
+                    _log("could NOT remove legacy script %s:\n%s"
+                         % (path, traceback.format_exc()))
 
     def XPluginEnable(self):
         try:
@@ -170,6 +405,7 @@ class PythonInterface:
             if not self.flightLoopRegistered:
                 xp.registerFlightLoopCallback(self.FlightLoop, 1.0, 0)
                 self.flightLoopRegistered = True
+            self._StartEngine()
             self.UpdateMenuVisibility()
             self.LoadProfileForCurrentLivery()
         except Exception:
@@ -181,11 +417,150 @@ class PythonInterface:
             if self.flightLoopRegistered:
                 xp.unregisterFlightLoopCallback(self.FlightLoop, 0)
                 self.flightLoopRegistered = False
+            self._StopEngine()
         except Exception:
             _log("XPluginDisable error:\n" + traceback.format_exc())
 
+    # ---- waveform engine (ported from ToLissPhoton.lua) ----
+    def _StartEngine(self):
+        if self.engineLoopID is not None:
+            return
+        try:
+            self.simTimeRef     = xp.findDataRef(SimTimeDataRef)
+            self.beaconRatioRef = xp.findDataRef(BeaconRatioDataRef)
+            self.strobeRatioRef = xp.findDataRef(StrobeRatioDataRef)
+            self.overrideRef    = xp.findDataRef(OverrideDataRef)
+            self.strobeGateRef  = xp.findDataRef(StrobeGateDataRef)
+            # After-flight-model phase runs late in the frame, so our write lands after
+            # ToLiss's own per-frame write and wins (verified by the write-race probe).
+            phase = getattr(xp, "FlightLoop_Phase_AfterFlightModel", 1)
+            self.engineLoopID = xp.createFlightLoop(self.EngineLoop, phase, 0)
+            xp.scheduleFlightLoop(self.engineLoopID, -1.0, 1)   # -1 = every frame
+            _log("waveform engine started (after-flight-model, every frame)")
+        except Exception:
+            _log("engine start error:\n" + traceback.format_exc())
+
+    def _StopEngine(self):
+        try:
+            if self.engineLoopID is not None:
+                xp.destroyFlightLoop(self.engineLoopID)
+                self.engineLoopID = None
+        except Exception:
+            _log("engine stop error:\n" + traceback.format_exc())
+
+    def _SimTime(self):
+        if self.simTimeRef is not None:
+            try:
+                return xp.getDataf(self.simTimeRef)
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _ReadRatios(self, ref):
+        # XPPython3's getDatavf fills a list in place and returns the count (not a list),
+        # so pass an empty list and read it back.
+        values = []
+        xp.getDatavf(ref, values, 0, 4)
+        return values
+
+    def _RebuildBeacon(self, led, simTime):
+        self.currentBeaconLed = led
+        spec = WaveformProfiles[0 if led >= 1 else 1]["Beacon"]
+        channel = _Channel(spec["Pulses"], spec["Period"], spec.get("Offset", 0.0))
+        channel.Seek(simTime - channel.Offset)
+        self.beaconChannel = channel
+        _log("beacon waveform -> " + ("LED" if led >= 1 else "Classic"))
+
+    def _RebuildStrobe(self, led, simTime):
+        self.currentStrobeLed = led
+        spec = WaveformProfiles[0 if led >= 1 else 1]["Strobe"]
+        self.strobeChannels = {}
+        for index, pulses in spec["Index"].items():
+            channel = _Channel(pulses, spec["Period"], spec.get("Offset", 0.0))
+            channel.Seek(simTime - channel.Offset)
+            self.strobeChannels[index] = channel
+        _log("strobe waveform -> " + ("LED" if led >= 1 else "Classic"))
+
+    def _BeaconActive(self, index, sampledValue, simTime):
+        # "auto" gate: infer on/off from ToLiss's own value, holding active for a window
+        # so the beacon's own flash gaps (and our own off-segments) don't read as "off".
+        if sampledValue > ActivityThreshold:
+            self.lastActiveBeacon[index] = simTime
+        return (simTime - self.lastActiveBeacon.get(index, -1e9)) < ActivityWindowSeconds
+
+    def _StrobeGateOn(self):
+        if self.strobeGateRef is None:
+            return False
+        try:
+            on = xp.getDatai(self.strobeGateRef) > GateThreshold
+        except Exception:
+            try:
+                on = xp.getDataf(self.strobeGateRef) > GateThreshold
+            except Exception:
+                return False
+        return (not on) if InvertStrobeGate else on
+
+    def EngineLoop(self, sinceLast, sinceLoop, counter, refCon):
+        try:
+            # Only drive lights on a ToLiss aircraft (menuCreated tracks that).
+            if not self.menuCreated:
+                self.lastSimTime = -1.0
+                return -1.0
+
+            simTime = self._SimTime()
+            if self.lastSimTime < 0:
+                self.lastSimTime = simTime
+            deltaTime = simTime - self.lastSimTime
+            self.lastSimTime = simTime
+            if deltaTime < 0:
+                deltaTime = 0.0
+            elif deltaTime > MaxDeltaTime:
+                deltaTime = MaxDeltaTime
+
+            if not self.overrideWarned and self.overrideRef is not None:
+                try:
+                    if xp.getDatai(self.overrideRef) < 1:
+                        _log("NOTE override_beacons_and_strobes is 0 - effect may not show.")
+                        self.overrideWarned = True
+                except Exception:
+                    pass
+
+            # follow each light's resolved category value, rebuilding only on a change
+            beaconLed = 1 if self.values.get("beacon", 0) >= 1 else 0
+            strobeLed = 1 if self.values.get("strobe", 0) >= 1 else 0
+            if beaconLed != self.currentBeaconLed:
+                self._RebuildBeacon(beaconLed, simTime)
+            if strobeLed != self.currentStrobeLed:
+                self._RebuildStrobe(strobeLed, simTime)
+
+            # beacon: one waveform applied to all 4 indices, each auto-gated independently
+            if self.beaconChannel is not None and self.beaconRatioRef is not None:
+                brightness = self.beaconChannel.Tick(deltaTime)
+                current = self._ReadRatios(self.beaconRatioRef)
+                out = list(current)
+                for i in range(len(out)):
+                    if self._BeaconActive(i, current[i], simTime):
+                        out[i] = _ClampBrightness(brightness)
+                xp.setDatavf(self.beaconRatioRef, out, 0, 4)
+
+            # strobe: per-index waveforms, gated on the strobe switch. Tick every channel
+            # every frame (even when gated off) so phase stays correct when it turns on.
+            if self.strobeChannels and self.strobeRatioRef is not None:
+                current = self._ReadRatios(self.strobeRatioRef)
+                out = list(current)
+                gateOn = self._StrobeGateOn()
+                for index, channel in self.strobeChannels.items():
+                    value = channel.Tick(deltaTime)
+                    if gateOn and 0 <= index < len(out):
+                        out[index] = _ClampBrightness(value)
+                xp.setDatavf(self.strobeRatioRef, out, 0, 4)
+        except Exception:
+            _log("EngineLoop error:\n" + traceback.format_exc())
+        return -1.0   # keep running every frame
+
     def XPluginStop(self):
         try:
+            self._StopEngine()
             self.DestroyMenu()
             if self.isLedAccessor is not None:
                 xp.unregisterDataAccessor(self.isLedAccessor)

@@ -2,3 +2,7 @@
 XPPython3Log.txt
 Log.txt
 CLAUDE.md
+
+# Python bytecode (XPPython3 regenerates these)
+__pycache__/
+*.pyc
