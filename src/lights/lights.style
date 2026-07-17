@@ -1,0 +1,227 @@
+// ============================================================================
+// ToLiss Photon Lighting — Phase II stylesheet (appearance)
+// ============================================================================
+// Palettes, category->original-palette mapping, and reusable light types.
+// Placement lives in lights.layout. Full syntax spec: phase_ii/dsl.md.
+//
+// Conditional values use @<axis-value> blocks (nesting = AND); the applicable
+// declaration with the most conditions wins, equal-specificity conflicts are
+// a build error. `extends` mixes a parent light's declarations in first.
+//
+// Verify:  python build/build_objs.py check --airframe a320
+
+axis profile: halogen xenon led;
+axis side: port starboard;
+axis swatch: bb sp;   // billboard vs spill, from the light class suffix
+
+// -- PALETTES: rgb per colour; @bb/@sp override when swatches differ --
+palette led {
+  white: 0.66 0.91 1;
+  red: 1 0.03 0;
+  green: 0.06 1 0;
+}
+palette halogen {
+  white: 1 0.7 0.44;
+  red: 1 0.15 0.07;
+  green: 0.12 0.77 0.25;
+}
+palette xenon {
+  white: 0.75 0.75 1;  @bb { white: 0.45 0.45 1; }
+  red: 1 0.03 0.05;
+}
+
+// -- CATEGORIES: which palette the dataref=0 (original) branch uses --
+categories {
+  nav: halogen;
+  strobe: xenon;
+  beacon: xenon;
+  landing: halogen;
+  taxi: halogen;
+  to: halogen;
+  rwyturnoff: halogen;
+  wing: halogen;
+  logo: halogen;
+}
+
+// -- LIGHT TYPES (appearance): class + colour + intensity + cone --
+light nav_tail_bb {
+  class: airplane_nav_bb;
+  color: white;
+  intensity: 600;
+  cone: 0.1;
+  dir: 0 0 1;
+}
+light nav_tail_sp {
+  class: airplane_nav_pm;
+  color: white;
+  intensity: 600;
+  @led { intensity: 1000; }
+  cone: 0.13;
+  dir: -0.003 -0.153 0.988;
+}
+light nav_base {   // mixin: wingtip nav colours (port red / starboard green)
+  color: red;
+  @starboard { color: green; }
+}
+light nav_marker extends nav_base {
+  class: airplane_nav_bb;
+  intensity: 50;
+  @led { intensity: 60; }
+  cone: 0.1;
+}
+light nav_beam extends nav_base {
+  class: airplane_nav_bb;
+  intensity: 5000;
+  @starboard { intensity: 4000; }
+  @led { intensity: 6000;  @starboard { intensity: 5000; } }
+  cone: 0.2;
+}
+light nav_spill extends nav_base {
+  class: airplane_nav_pm;
+  intensity: 1000;
+  @led { intensity: 4000;  @starboard { intensity: 3000; } }
+  cone: 0.5;
+}
+light strobe_tail_bb {
+  class: airplane_strobe_bb;
+  color: white;
+  intensity: 14000;
+  cone: 0.087;
+  dir: 0.001 -0.174 0.985;
+  index: 2;
+}
+light strobe_tail_sp {
+  class: airplane_strobe_pm;
+  color: white;
+  intensity: 6000;
+  cone: 0.091;
+  dir: 0 -0.174 0.985;
+  index: 2;
+}
+light strobe_marker {
+  class: airplane_strobe_bb;
+  color: white;
+  intensity: 300;
+  cone: 0.2;
+}
+light strobe_beam {
+  class: airplane_strobe_bb;
+  color: white;
+  intensity: 30000;
+  cone: 0.01;
+}
+light strobe_spill {
+  class: airplane_strobe_pm;
+  color: white;
+  intensity: 8000;
+  cone: 0.091;
+}
+light beacon_bb {
+  class: airplane_beacon_bb;
+  color: red;
+  intensity: 18000;
+  @led { intensity: 12000; }
+  cone: 1;
+  dir: 0 0 0;
+}
+light beacon_pm {
+  class: airplane_beacon_pm;
+  color: red;
+  intensity: 4000;
+  cone: 1;
+  dir: 0 0 0;
+}
+light logo_bb {
+  class: airplane_generic_bb;
+  color: white;
+  intensity: 800;
+  @led { intensity: 1000; }
+  cone: 0.3;
+  @led { cone: 0.5; }
+  dir: 0 1 0;
+}
+light logo_pm {
+  class: airplane_generic_pm;
+  color: white;
+  intensity: 3000;
+  @led { intensity: 5000; }
+  cone: 0.75;
+}
+light landing_bb {
+  class: airplane_landing_bb;
+  color: white;
+  intensity: 4000;
+  @led { intensity: 6000; }
+  cone: 0.96;
+}
+light landing_main {
+  class: airplane_landing_pm;
+  color: white;
+  intensity: 504900;
+  @led { intensity: 1000000; }
+  cone: 0.985;
+}
+light landing_mid {
+  class: airplane_landing_pm;
+  color: white;
+  intensity: 105600;
+  @led { intensity: 300000; }
+  cone: 0.88;
+}
+light landing_wide {
+  class: airplane_landing_pm;
+  color: white;
+  intensity: 50490;
+  @led { intensity: 200000; }
+  cone: 0.7;
+}
+light to_bb {
+  class: airplane_generic_bb;
+  color: white;
+  intensity: 4000;
+  cone: 0.574;
+  dir: 0.087 -0.996 0;
+}
+light to_pm {
+  class: airplane_generic_pm;
+  color: white;
+  intensity: 80000;
+  @led { intensity: 120000; }
+  cone: 0.866;
+  dir: 0.087 -0.996 0;
+}
+light taxi_pm {
+  class: airplane_taxi_pm;
+  color: white;
+  intensity: 80000;
+  @led { intensity: 100000; }
+  cone: 0.866;
+  dir: 0.087 -0.996 0;
+}
+light rwy_bb {
+  class: airplane_generic_bb;
+  color: white;
+  intensity: 3000;
+  cone: 0.259;
+}
+light rwy_pm {
+  class: airplane_generic_pm;
+  color: white;
+  intensity: 60000;
+  @led { intensity: 80000; }
+  cone: 0.866;
+}
+light wing_bb {
+  class: airplane_generic_bb;
+  color: white;
+  intensity: 3000;
+  @led { intensity: 4000; }
+  cone: 0.9;
+}
+light wing_pm {
+  class: airplane_generic_pm;
+  color: white;
+  intensity: 30000;
+  @led { intensity: 40000; }
+  cone: 0.924;
+}

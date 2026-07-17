@@ -1,0 +1,8 @@
+ANIM_begin
+	ANIM_trans_begin	1-sim/fus
+	ANIM_trans_key	2	0.033100002	2.0041001	8.9426003
+	ANIM_trans_key	1	0.033100002	2.0041001	7.9555001
+	ANIM_trans_key	0	0.033100002	2.0041001	7.9300799
+	ANIM_trans_end
+{{lights}}
+ANIM_end

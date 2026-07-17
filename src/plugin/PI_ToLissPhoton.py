@@ -71,6 +71,14 @@ IsLedDataRefName   = "ToLissPhoton/exterior/is_led"   # deprecated alias
 LiveryIndexDataRef = "sim/aircraft/view/acf_livery_index"
 IcaoDataRef        = "sim/aircraft/view/acf_ICAO"
 
+# Hidden screenshot helpers. Two independent writable int/float datarefs (default 0); set
+# one to 1 with the DataRefEditor and the waveform engine pins that light type to full
+# brightness on every index, ignoring the flash waveform AND the on/off gate - so it stays
+# lit steadily for a clean screenshot. They are independent: light the beacon, the strobe,
+# both, or neither. Set back to 0 to resume normal flashing. Not in the menu; not persisted.
+BeaconAlwaysOnDataRefName = "ToLissPhoton/debug/beacon_always_on"
+StrobeAlwaysOnDataRefName = "ToLissPhoton/debug/strobe_always_on"
+
 # Retired FlyWithLua script names to auto-delete on startup (see _RemoveLegacyLua). The
 # waveform engine used to live in ToLissPhoton.lua; if an upgraded install still has it,
 # both it and this plugin would drive the same per-frame brightness writes and fight.
@@ -96,7 +104,7 @@ HybridLedCategories = ("beacon", "strobe", "nav")
 # anim/SHARK is the ToLiss geometry flag used by the OBJ: 0 = wingtip fence, 1 = sharklet.
 SharkletGate      = "anim/SHARK"
 SharkletThreshold = 0.5
-MfrlGate          = "AirbusFBW/LandingLightLocation"      # when set AND present above threshold => Full LED (top priority)
+MfrlGate          = ""      # when set AND present above threshold => Full LED (top priority)
 MfrlThreshold     = 0.5
 AutoFallbackProfile = PROFILE_CLASSIC   # used when no gate resolves
 
@@ -308,6 +316,13 @@ class PythonInterface:
         self.accessors = {}                            # key -> accessor handle
         self.isLedAccessor = None
 
+        # Hidden "keep lit" screenshot flags (see *AlwaysOnDataRefName). Backing ints owned
+        # here; writable via their datarefs, read every frame by the engine. Independent.
+        self.beaconAlwaysOn = 0
+        self.strobeAlwaysOn = 0
+        self.beaconAlwaysOnAccessor = None
+        self.strobeAlwaysOnAccessor = None
+
         self.profiles = {}          # liveryKey -> {"profile": n[, "categories": {...}]}
         self.liveryIndexRef = None
 
@@ -352,6 +367,17 @@ class PythonInterface:
     def _readIsLedInt(self, refCon):   return self._allLed()
     def _readIsLedFloat(self, refCon): return float(self._allLed())
 
+    # hidden screenshot flags: read + write, int and float (DataRefEditor may use either)
+    def _readBeaconAlwaysOnInt(self, refCon):    return self.beaconAlwaysOn
+    def _readBeaconAlwaysOnFloat(self, refCon):  return float(self.beaconAlwaysOn)
+    def _writeBeaconAlwaysOnInt(self, refCon, value):   self.beaconAlwaysOn = 1 if value else 0
+    def _writeBeaconAlwaysOnFloat(self, refCon, value): self.beaconAlwaysOn = 1 if value >= 0.5 else 0
+
+    def _readStrobeAlwaysOnInt(self, refCon):    return self.strobeAlwaysOn
+    def _readStrobeAlwaysOnFloat(self, refCon):  return float(self.strobeAlwaysOn)
+    def _writeStrobeAlwaysOnInt(self, refCon, value):   self.strobeAlwaysOn = 1 if value else 0
+    def _writeStrobeAlwaysOnFloat(self, refCon, value): self.strobeAlwaysOn = 1 if value >= 0.5 else 0
+
     # ---- lifecycle ----
     def XPluginStart(self):
         try:
@@ -361,6 +387,14 @@ class PythonInterface:
                     name, readInt=readInt, readFloat=readFloat)
             self.isLedAccessor = xp.registerDataAccessor(
                 IsLedDataRefName, readInt=self._readIsLedInt, readFloat=self._readIsLedFloat)
+            self.beaconAlwaysOnAccessor = xp.registerDataAccessor(
+                BeaconAlwaysOnDataRefName,
+                readInt=self._readBeaconAlwaysOnInt,   writeInt=self._writeBeaconAlwaysOnInt,
+                readFloat=self._readBeaconAlwaysOnFloat, writeFloat=self._writeBeaconAlwaysOnFloat)
+            self.strobeAlwaysOnAccessor = xp.registerDataAccessor(
+                StrobeAlwaysOnDataRefName,
+                readInt=self._readStrobeAlwaysOnInt,   writeInt=self._writeStrobeAlwaysOnInt,
+                readFloat=self._readStrobeAlwaysOnFloat, writeFloat=self._writeStrobeAlwaysOnFloat)
             self.LoadProfilesFile()
             self._RemoveLegacyLua()
             _log("started; registered %d category datarefs" % len(self.accessors))
@@ -533,13 +567,20 @@ class PythonInterface:
             if strobeLed != self.currentStrobeLed:
                 self._RebuildStrobe(strobeLed, simTime)
 
+            # Hidden screenshot overrides: independently pin the beacon and/or strobe
+            # full-on, ignoring waveform and gates, so either can be photographed lit.
+            beaconAlwaysOn = self.beaconAlwaysOn >= 1
+            strobeAlwaysOn = self.strobeAlwaysOn >= 1
+
             # beacon: one waveform applied to all 4 indices, each auto-gated independently
             if self.beaconChannel is not None and self.beaconRatioRef is not None:
-                brightness = self.beaconChannel.Tick(deltaTime)
+                brightness = self.beaconChannel.Tick(deltaTime)   # tick to keep phase
                 current = self._ReadRatios(self.beaconRatioRef)
                 out = list(current)
                 for i in range(len(out)):
-                    if self._BeaconActive(i, current[i], simTime):
+                    if beaconAlwaysOn:
+                        out[i] = 1.0
+                    elif self._BeaconActive(i, current[i], simTime):
                         out[i] = _ClampBrightness(brightness)
                 xp.setDatavf(self.beaconRatioRef, out, 0, 4)
 
@@ -551,7 +592,9 @@ class PythonInterface:
                 gateOn = self._StrobeGateOn()
                 for index, channel in self.strobeChannels.items():
                     value = channel.Tick(deltaTime)
-                    if gateOn and 0 <= index < len(out):
+                    if strobeAlwaysOn and 0 <= index < len(out):
+                        out[index] = 1.0
+                    elif gateOn and 0 <= index < len(out):
                         out[index] = _ClampBrightness(value)
                 xp.setDatavf(self.strobeRatioRef, out, 0, 4)
         except Exception:
@@ -565,6 +608,12 @@ class PythonInterface:
             if self.isLedAccessor is not None:
                 xp.unregisterDataAccessor(self.isLedAccessor)
                 self.isLedAccessor = None
+            if self.beaconAlwaysOnAccessor is not None:
+                xp.unregisterDataAccessor(self.beaconAlwaysOnAccessor)
+                self.beaconAlwaysOnAccessor = None
+            if self.strobeAlwaysOnAccessor is not None:
+                xp.unregisterDataAccessor(self.strobeAlwaysOnAccessor)
+                self.strobeAlwaysOnAccessor = None
             for key, handle in list(self.accessors.items()):
                 xp.unregisterDataAccessor(handle)
             self.accessors = {}
@@ -625,29 +674,19 @@ class PythonInterface:
         return ""
 
     def GateActive(self, path, threshold):
-        """True/False if the gate dataref exists, else None (not configured/present).
-
-        Reads according to the dataref's *published* type. A float read of an
-        int-only dataref (e.g. AirbusFBW/LandingLightLocation) returns 0.0
-        WITHOUT raising, so a try/except float-then-int fallback never fires
-        (see CLAUDE.md gotcha #4). Query the type and pick the right accessor.
-        """
+        """True/False if the gate dataref exists, else None (not configured/present)."""
         if not path:
             return None
         try:
             ref = xp.findDataRef(path)
             if ref is None:
                 return None
-            types = xp.getDataRefTypes(ref)
-            # Type_Float = 2, Type_Double = 4, Type_Int = 1 (bitmask).
-            if types & (2 | 4):
-                return xp.getDataf(ref) > threshold
-            if types & 1:
-                return xp.getDatai(ref) > threshold
-            # Unknown/unspecified type: try int then float, taking the max.
-            return max(xp.getDatai(ref), xp.getDataf(ref)) > threshold
+            return xp.getDataf(ref) > threshold
         except Exception:
-            return None
+            try:
+                return xp.getDatai(ref) > threshold
+            except Exception:
+                return None
 
     def ResolveAutoProfile(self):
         icao = self.AircraftIcao()

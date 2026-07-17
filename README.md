@@ -14,17 +14,33 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 _A330-900 support is in progress. A340 support is planned, but I unforunately don't own it._
 
 # Installation
-**1. Download and install [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html)**
+**1. Download the latest release archive from the [Releases](../../releases) page and unzip it.**
+* The repository itself does not contain ready-to-install files — they are generated (see [Building from source](#building-from-source)).
+
+**2. Download and install [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html)**
 * After installing for the first time, open X-Plane 12 and load into the simulator to complete the first-time install process.
 
-**2. Copy the `Resources` folder into your root `X-Plane 12` directory.**
+**3. Copy the `Resources` folder into your root `X-Plane 12` directory.**
 * When asked if you want to overwrite existing files, select **Yes**.
 * This installs the Python script that enables light selection and controls beacon/strobe timing.
 
-**3. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
+**4. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
 * When asked if you want to overwrite existing files, select **Yes**.
 
-**4. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
+**5. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
+
+## Building from source
+The aircraft `.obj` files are generated from a small CSS-like config, not edited by hand.
+
+```
+python build/build_objs.py build          # -> dist/  (the installable tree)
+python build/build_objs.py check          # verify against the reference OBJs
+python build/watch.py                     # rebuild on save
+```
+
+`dist/` is what you install (or zip for a release). Everything hand-authored lives in
+`src/` — the light config in [src/lights/](src/lights/) and the plugin in
+[src/plugin/](src/plugin/). See [docs/dsl.md](docs/dsl.md) for the config syntax.
 
 # Features
 * Complete rework of exterior lighting for supported ToLiss aircraft

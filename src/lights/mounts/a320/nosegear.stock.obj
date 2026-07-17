@@ -1,0 +1,29 @@
+	ANIM_begin
+	ANIM_trans	-0.1202	-0.29576999	-1.43062	-0.1202	-0.29576999	-1.43062
+	ANIM_trans_begin	1-sim/fus
+	ANIM_trans_key	0	0	0	-0
+	ANIM_trans_key	1	0	-0	1.6
+	ANIM_trans_key	2	-0	0	-4.2600002
+	ANIM_trans_end
+		ANIM_begin
+		ANIM_trans	0.57822001	-1.66679	0.48256001	0.57822001	-1.66679	0.48256001
+		ANIM_rotate	0	0	-1	90.00021	90.00021
+		ANIM_rotate	1	0	0	90.00021	90.00021
+		ANIM_trans_begin	anim/gearFrontRetract
+		ANIM_trans_key	0	0	0	-0
+		ANIM_trans_key	0.40000001	0	0	0
+		ANIM_trans_key	0.69999999	0	0	0
+		ANIM_trans_key	1	0.069204363	0.0047660158	0
+		ANIM_trans_end
+		ANIM_rotate_begin	0.00000008	0.00000008	-1	anim/gearFrontRetract
+		ANIM_rotate_key	0	0
+		ANIM_rotate_key	0.40000001	31.000005
+		ANIM_rotate_key	0.69999999	61.999997
+		ANIM_rotate_key	1	91.949263
+		ANIM_rotate_end
+			ANIM_begin
+			ANIM_hide	1	1	AirbusFBW/LandingLightLocation
+{{lights}}
+			ANIM_end
+		ANIM_end
+	ANIM_end
