@@ -6,15 +6,15 @@
 // !! the build only reads it if the DSL files are missing. DO NOT EDIT.
 // ============================================================================
 // Arranged by concern: palettes -> categories (which profile is "original") ->
-// lightTypes (appearance: class + colour + per-profile intensity + cone) ->
+// lightTypes (appearance: class + color + per-profile intensity + cone) ->
 // mounts -> airframes (placement + gating). Objects with 2+ properties are
 // one-per-line; number arrays and single-property objects stay inline.
-// Colour is stated explicitly on every light type (nav wingtips are per-side).
+// color is stated explicitly on every light type (nav wingtips are per-side).
 //
 // Verify:  python build/build_objs.py check --airframe a320
 {
   "schema": 3,
-  // -- PALETTES: rgb per profile (halogen/xenon/led) x colour x bb/sp --
+  // -- PALETTES: rgb per profile (halogen/xenon/led) x color x bb/sp --
   "palettes": {
     "led": {
       "white": {
@@ -67,7 +67,7 @@
     "wing": { "original": "halogen" },
     "logo": { "original": "halogen" }
   },
-  // -- LIGHT TYPES (appearance): class + colour + per-profile intensity + cone --
+  // -- LIGHT TYPES (appearance): class + color + per-profile intensity + cone --
   "lightTypes": {
     "nav_tail_bb": {
       "class": "airplane_nav_bb",

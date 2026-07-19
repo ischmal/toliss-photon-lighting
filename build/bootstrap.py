@@ -5,7 +5,7 @@ hand-authored Photon OBJs (reference/photon/), so they don't have to be
 hand-transcribed.
 
 STATUS: one-shot tool, already run — the A319/A321 overrides it derived are
-already in src/lights/lights.layout. Its analysis (`--report`) is still valid and
+already in src/lights/lights.layout.phdsl. Its analysis (`--report`) is still valid and
 useful, but its JSON output mode predates the DSL and emits schema-3 blocks for
 the retired reference/legacy/lights.poc.jsonc; that JSON can no longer be pasted
 into the config. Port the emitter to DSL selector syntax before relying on it

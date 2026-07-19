@@ -2,7 +2,8 @@
 """
 ToLiss Photon Lighting — DSL loader (Phase II).
 
-Parses the CSS-like light config (src/lights/lights.style + src/lights/lights.layout)
+Parses the CSS-like light config (src/lights/lights.style.phdsl +
+src/lights/lights.layout.phdsl)
 into the same schema-3 dict that the retired lights.poc.jsonc decoded to, so
 build_objs.py's Emitter consumes either source unchanged. Full spec in docs/dsl.md.
 
@@ -31,10 +32,18 @@ Format at a glance:
     }
 
 Resolution rule (deliberately NOT the CSS cascade): for a concrete context
-(profile, side, swatch), the applicable declaration with the MOST conditions
-wins; two different values at equal specificity are an error. A later
+(profile, side, swatch, wing), the applicable declaration with the MOST
+conditions wins; two different values at equal specificity are an error. A later
 declaration with the IDENTICAL condition set replaces an earlier one — that is
 what `extends` (light mixins and airframe overrides) relies on.
+
+Axes are free or bound. profile/side/swatch are free: one OBJ carries every
+profile branch and both sides, so they expand into nested dicts the Emitter
+resolves later (AXIS_ORDER). `wing` is bound (BOUND_AXES): --wing fixes it for
+the whole build, so it is passed in here as a base context and its conditions
+merely filter — the result is a plain scalar, specific to that variant, and the
+config is tagged "wing" so a mismatched Emitter is caught rather than silently
+emitting another variant's values.
 """
 from __future__ import annotations
 
@@ -50,6 +59,14 @@ MISSING = object()
 # canonical nesting order when re-encoding conditional values into the
 # schema-3 nested-dict shapes resolve_field / pick_side already understand
 AXIS_ORDER = ("profile", "swatch", "side")
+
+# Axes NOT in AXIS_ORDER are *pre-bound*: fixed for a whole build, so they are
+# supplied as a base context at load time and act as a filter on @-conditions
+# rather than as a dimension of the expanded value. `wing` is pre-bound because
+# --wing picks one variant per build, so it never has to survive into the OBJ:
+# everything collapses to a scalar before the Emitter sees it, which is what
+# keeps resolve_field (and the rest of the Emitter) out of this entirely.
+BOUND_AXES = ("wing",)
 
 # DSL property name -> schema-3 key
 PROP_MAP = {"pos": "position"}
@@ -290,22 +307,33 @@ def _cell(items, ctx, where):
     return winners[0]
 
 
-def expand_value(decls, axes, where):
+def expand_value(decls, axes, where, base=None):
     """Expand [(conds, value)] into the schema-3 shape: a scalar/list, or
-    nested dicts keyed by profile and/or port/starboard (profile-major)."""
+    nested dicts keyed by profile and/or port/starboard (profile-major).
+
+    `base` pre-binds the BOUND_AXES (e.g. {"wing": "realwings"}): conditions on
+    those axes filter declarations in or out here and add specificity, but never
+    become a key in the result."""
+    base = dict(base or {})
     items = _dedup(decls)
     involved = [a for a in AXIS_ORDER
                 if any(ax == a for conds, _ in items for ax, _ in conds)]
     if not involved:
-        return items[-1][1]
+        # NB: not `items[-1][1]` — with nothing in AXIS_ORDER involved there may
+        # still be BOUND_AXES conditions to honour, and last-wins would ignore
+        # them (silently picking another variant's value).
+        result = _cell(items, base, where)
+        if result is MISSING:
+            raise DslError(f"{where}: no applicable value for any context")
+        return result
 
-    def build(ctx, remaining):
+    def build(cur, remaining):
         if not remaining:
-            return _cell(items, ctx, where)
+            return _cell(items, cur, where)
         ax, rest = remaining[0], remaining[1:]
         out = {}
         for val in axes[ax]:
-            sub = build({**ctx, ax: val}, rest)
+            sub = build({**cur, ax: val}, rest)
             if sub is not MISSING:
                 out[val] = sub
         if not out:
@@ -318,26 +346,26 @@ def expand_value(decls, axes, where):
             return vals[0]  # all contexts agree -> collapse
         return out
 
-    result = build({}, involved)
+    result = build(base, involved)
     if result is MISSING:
         raise DslError(f"{where}: no applicable value for any context")
     return result
 
 
-def expand_palette_color(decls, where):
+def expand_palette_color(decls, where, base=None):
     """Palette colors always emit explicit {bb, sp} swatches (the emitter
     indexes them directly)."""
     items = _dedup(decls)
     out = {}
     for swatch in ("bb", "sp"):
-        v = _cell(items, {"swatch": swatch}, where)
+        v = _cell(items, {**(base or {}), "swatch": swatch}, where)
         if v is MISSING:
             raise DslError(f"{where}: no value for swatch '{swatch}'")
         out[swatch] = v if isinstance(v, list) else [v]
     return out
 
 
-def _expand_props(props, axes, where):
+def _expand_props(props, axes, where, base=None):
     """props: [(prop, conds, values)] -> {schema-3 key: expanded value}."""
     by = {}
     order = []
@@ -347,11 +375,11 @@ def _expand_props(props, axes, where):
             by[key] = []
             order.append(key)
         by[key].append((conds, _decl_value(values)))
-    return {k: expand_value(by[k], axes, f"{where}.{k}") for k in order}
+    return {k: expand_value(by[k], axes, f"{where}.{k}", base) for k in order}
 
 
 # ─── style file ───────────────────────────────────────────────────────────────
-def _load_style(stmts, filename):
+def _load_style(stmts, filename, base=None):
     axes, axis_of = {}, {}
     palettes, categories = {}, {}
     light_raw = {}  # name -> (parent, decls)
@@ -372,7 +400,8 @@ def _load_style(stmts, filename):
                     per_color[prop] = []
                     order.append(prop)
                 per_color[prop].append((conds, _decl_value(values)))
-            palettes[pname] = {c: expand_palette_color(per_color[c], f"{where}.{c}")
+            palettes[pname] = {c: expand_palette_color(per_color[c], f"{where}.{c}",
+                                                      base)
                                for c in order}
         elif st.kind == "block" and st.words[0] == "categories":
             for d in st.children:
@@ -407,7 +436,7 @@ def _load_style(stmts, filename):
     for name in light_raw:
         light_types[name] = _expand_props(
             [(p, c, v) for p, c, v in type_decls(name)],
-            axes, f"{filename}: light {name}")
+            axes, f"{filename}: light {name}", base)
     return axes, axis_of, palettes, categories, light_types
 
 
@@ -526,30 +555,56 @@ def apply_override(root, node, st, axis_of, where):
 
 
 # ─── named model -> schema-3 dicts ────────────────────────────────────────────
-def light_to_old(l, axes, where):
+def _vec3(v, where):
+    ok = (isinstance(v, list) and len(v) == 3
+          and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v))
+    if not ok:
+        raise DslError(f"{where}: expected 3 numbers, got {v!r}")
+    return v
+
+
+def _offset_value(v, where):
+    """A fixture offset is a translation, so it may vary by side but not by
+    profile or swatch (one emitted fixture spans every profile branch)."""
+    if isinstance(v, dict):
+        extra = set(v) - {"port", "starboard"}
+        if extra:
+            raise DslError(f"{where}: offset may vary by side (@port/@starboard) "
+                           f"and wing variant only, not by {sorted(extra)}")
+        return {k: _vec3(x, f"{where}.{k}") for k, x in v.items()}
+    return _vec3(v, where)
+
+
+def light_to_old(l, axes, where, base=None):
     out = {"type": l["type"]}
-    out.update(_expand_props(l["props"], axes, f"{where} {l['type']}"))
+    out.update(_expand_props(l["props"], axes, f"{where} {l['type']}", base))
     return out
 
 
-def group_to_old(g, axes, where):
+def group_to_old(g, axes, where, base=None):
     out = {}
+    if g["name"]:
+        out["name"] = g["name"]
     if g["comment"]:
         out["comment"] = g["comment"]
     if g["gate"]:
         out["gate"] = g["gate"]
     if g["position"] is not None:
         out["position"] = g["position"]
-    out["lights"] = [light_to_old(l, axes, where) for l in g["lights"]]
+    out["lights"] = [light_to_old(l, axes, where, base) for l in g["lights"]]
     return out
 
 
-def fixture_to_old(fx, axes, where):
-    props = _expand_props(fx["props"], axes, where)
+def fixture_to_old(fx, axes, where, base=None):
+    props = _expand_props(fx["props"], axes, where, base)
     out = {}
     if fx["comment"]:
         out["comment"] = fx["comment"]
     if "raw" in props:
+        if "offset" in props:
+            raise DslError(f"{where}: 'offset' is not supported on a raw fixture "
+                           "(its block is copied verbatim); move the light into "
+                           "the DSL or bake the offset into the raw file")
         out["raw"] = props["raw"]
         return out
     if "category" not in props:
@@ -565,15 +620,17 @@ def fixture_to_old(fx, axes, where):
     out["gating"] = gating
     if "position" in props:
         out["position"] = props["position"]
+    if "offset" in props:
+        out["offset"] = _offset_value(props["offset"], f"{where}.offset")
     if fx["groups"]:
-        out["groups"] = [group_to_old(g, axes, f"{where} group {g['name']}")
+        out["groups"] = [group_to_old(g, axes, f"{where} group {g['name']}", base)
                          for g in fx["groups"]]
     elif fx["lights"]:
-        out["lights"] = [light_to_old(l, axes, where) for l in fx["lights"]]
+        out["lights"] = [light_to_old(l, axes, where, base) for l in fx["lights"]]
     return out
 
 
-def _load_doc(stmts, filename, axes, axis_of):
+def _load_doc(stmts, filename, axes, axis_of, base=None):
     mounts, airframe_stmts, order = {}, {}, []
     for st in stmts:
         if st.kind == "block" and st.words[0] == "mounts":
@@ -628,7 +685,7 @@ def _load_doc(stmts, filename, axes, axis_of):
         model = build_model(name)
         where = f"{filename}: airframe {name}"
         airframes[name] = {"fixtures": {
-            fname: fixture_to_old(fx, axes, f"{where} fixture {fname}")
+            fname: fixture_to_old(fx, axes, f"{where} fixture {fname}", base)
             for fname, fx in model.items()}}
 
     # flatten mounts down each extends chain so lookups need no chain walk
@@ -647,20 +704,29 @@ def _load_doc(stmts, filename, axes, axis_of):
 
 
 # ─── entry point ──────────────────────────────────────────────────────────────
-def load_dsl(style_path, doc_path) -> dict:
+def load_dsl(style_path, doc_path, wing: str = "stock") -> dict:
+    """Parse the DSL pair for one wing variant. `wing` is pre-bound (see
+    BOUND_AXES): @stock/@durantula/@realwings conditions are resolved here, so
+    the returned config is specific to that variant — it is tagged with "wing"
+    so the Emitter can refuse a mismatched pairing."""
     style_text = style_path.read_text(encoding="utf-8")
     doc_text = doc_path.read_text(encoding="utf-8")
     style = Parser(tokenize(style_text, style_path.name),
                    style_path.name).parse_file()
     doc = Parser(tokenize(doc_text, doc_path.name), doc_path.name).parse_file()
+    base = {"wing": wing}
     axes, axis_of, palettes, categories, light_types = _load_style(
-        style, style_path.name)
-    for required in ("profile", "side", "swatch"):
+        style, style_path.name, base)
+    for required in ("profile", "side", "swatch", "wing"):
         if required not in axes:
             raise DslError(f"{style_path.name}: missing 'axis {required}: ...;'")
-    mounts, airframes = _load_doc(doc, doc_path.name, axes, axis_of)
+    if wing not in axes["wing"]:
+        raise DslError(f"{style_path.name}: unknown wing variant {wing!r}; "
+                       f"'axis wing' declares {axes['wing']}")
+    mounts, airframes = _load_doc(doc, doc_path.name, axes, axis_of, base)
     return {
         "schema": 3,
+        "wing": wing,
         "palettes": palettes,
         "categories": categories,
         "lightTypes": light_types,

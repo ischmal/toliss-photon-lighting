@@ -2,8 +2,8 @@
 """
 ToLiss Photon Lighting — OBJ generator (Phase II).
 
-Reads the declarative light config — the CSS-like DSL pair src/lights/lights.style
-(appearance) + src/lights/lights.layout (placement), parsed by photon_dsl.py; the
+Reads the declarative light config — the CSS-like DSL pair src/lights/lights.style.phdsl
+(appearance) + src/lights/lights.layout.phdsl (placement), parsed by photon_dsl.py; the
 legacy reference/legacy/lights.poc.jsonc is used only if the DSL files are absent
 — and emits the X-Plane lights_out3xx_XP12.obj files into dist/ (the installable
 X-Plane tree; `build` also stages the plugin there, so dist/ is a complete drop-in).
@@ -15,18 +15,25 @@ rounded to 3 decimals, so hand-authored formatting quirks and the intentional
 mirror-symmetry cleanup don't register as differences.
 
 Usage:
-    python build/build_objs.py build [--airframe a320] [--out DIR] [--write]
-    python build/build_objs.py check  [--airframe a320] [--category nav]
+    python build/build_objs.py build [--airframe a320] [--wing stock] [--out DIR] [--write]
+    python build/build_objs.py check [--airframe a320] [--category nav]
+    python build/build_objs.py patch-realwings [--airframe a320] [--dry-run] [--reverse]
 
 `build` writes to dist/ by default; `--out DIR` redirects elsewhere. `--write`
-additionally deploys straight into the live X-Plane install (see tools/Link-Objects.ps1
-for the symlink alternative).
+additionally installs each built OBJ straight into the live X-Plane install, at
+<X-Plane 12>/Aircraft/ToLissA3XX*/objects/, which is auto-located. This replaces
+the old Link-Objects.ps1 symlink workflow (removed): `build --write`, or
+`watch.py --write` to do it on every save. Any leftover symlink from that
+workflow is replaced with a real file. The plugin is only ever staged into
+dist/; copy it into Resources/plugins/PythonPlugins/ yourself.
 
 `--wing realwings` with `--write` also patches the installed RealWings mod's
 baked wingtip lights in place (patch_realwings.py) — one command, no separate
-step. Each airframe's RealWings folder is auto-located in the X-Plane install
-(<X-Plane 12>/Aircraft/ToLissA3XX*/objects/RealWings3XX/); override the X-Plane
-root with the XPLANE_ROOT env var if it isn't auto-detected.
+step. The `patch-realwings` subcommand runs that same patch on its own (with
+--dry-run / --reverse) for in-sim tuning without a rebuild. Each airframe's
+RealWings folder is auto-located too (…/objects/RealWings3XX/); override the
+X-Plane root with the XPLANE_ROOT env var if it isn't auto-detected, or pass
+--root.
 
 `check` reference source: reference/photon/<obj> — the frozen hand-authored OBJs.
 These are deliberately NOT the build output: comparing dist/ against itself would
@@ -46,8 +53,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "reference" / "legacy" / "lights.poc.jsonc"  # legacy fallback
-CONFIG_STYLE = REPO / "src" / "lights" / "lights.style"
-CONFIG_LAYOUT = REPO / "src" / "lights" / "lights.layout"
+CONFIG_STYLE = REPO / "src" / "lights" / "lights.style.phdsl"
+CONFIG_LAYOUT = REPO / "src" / "lights" / "lights.layout.phdsl"
 
 DIST = REPO / "dist"                       # generated installable tree
 GOLDEN = REPO / "reference" / "photon"     # frozen hand-authored `check` reference
@@ -110,12 +117,17 @@ def strip_jsonc(text: str) -> str:
     return "".join(out)
 
 
-def load_config(path: Path = CONFIG) -> dict:
-    """Load the light config: the DSL pair (lights.style + lights.layout) when
-    both exist, else the legacy JSONC at `path`. Both decode to the same dict."""
+def load_config(path: Path = CONFIG, wing: str = "stock") -> dict:
+    """Load the light config: the DSL pair (lights.style.phdsl + lights.layout.phdsl)
+    when both exist, else the legacy JSONC at `path`. Both decode to the same dict.
+
+    `wing` resolves the DSL's @stock/@durantula/@realwings conditions, so the
+    result is specific to that variant and must be paired with an Emitter built
+    for the same one (the Emitter checks). The legacy JSONC has no wing
+    conditions, so it ignores this."""
     if CONFIG_STYLE.exists() and CONFIG_LAYOUT.exists():
         import photon_dsl
-        return photon_dsl.load_dsl(CONFIG_STYLE, CONFIG_LAYOUT)
+        return photon_dsl.load_dsl(CONFIG_STYLE, CONFIG_LAYOUT, wing)
     return json.loads(strip_jsonc(path.read_text(encoding="utf-8")))
 
 
@@ -247,6 +259,12 @@ def reindent(text: str) -> str:
 class Emitter:
     def __init__(self, cfg: dict, airframe: str, variant: str = "stock",
                  annotate: bool = False):
+        cfg_wing = cfg.get("wing")
+        if cfg_wing is not None and cfg_wing != variant:
+            raise SystemExit(
+                f"config was loaded for wing variant {cfg_wing!r} but the Emitter "
+                f"was built for {variant!r} — the DSL resolves @<variant> "
+                f"conditions at load time, so pass load_config(wing={variant!r})")
         self.cfg = cfg
         self.airframe = airframe
         self.variant = variant  # wing-mod variant: stock | durantula | realwings
@@ -270,7 +288,7 @@ class Emitter:
             pos = [-pos[0], pos[1], pos[2]]
             d = [-d[0], d[1], d[2]]
 
-        # colour is an explicit property of the light type (per-side where it
+        # color is an explicit property of the light type (per-side where it
         # differs); swatch (bb/sp) comes from the class
         cname = pick_side(merged.get("color", "white"), side or "port")
         rgb = [rnd(v) for v in self.palettes[profile][cname][swatch_for(cls)]]
@@ -345,8 +363,30 @@ class Emitter:
             mount = mount.get(side)
         if mount:
             text = resolve_mount(self.cfg, self.airframe, mount, self.variant)
-            return text.replace("{{lights}}", body)
-        return body
+            body = text.replace("{{lights}}", body)
+        return self.apply_offset(fixture, body, side, mirror)
+
+    def apply_offset(self, fixture, body, side, mirror):
+        """A fixture `offset` translates the whole assembly — mount rigging and
+        all — in aircraft coordinates, as a static ANIM_trans wrapping it. The
+        mount's own ANIM_trans is first in its chain and so shares this frame:
+        the two add linearly, making an offset numerically identical to editing
+        the mount snippet's placement by hand. Lights stay in mount-local space.
+
+        This is deliberately translation-only. Rotations and the deploy
+        keyframes are frozen rigging lifted from ToLiss and are not what varies
+        between wing mods; a mod that needs different *rotation* is what the
+        per-variant mount snippet slot is still there for."""
+        off = fixture.get("offset")
+        if not off:
+            return body
+        v = [rnd(x) for x in pick_side(off, side or "port")]
+        if mirror and side == "starboard":
+            v = [-v[0], v[1], v[2]]
+        if v == [0.0, 0.0, 0.0]:
+            return body  # a zero offset emits nothing, so stock output is unchanged
+        t = " ".join(fmt(x) for x in v + v)  # static trans: both keys identical
+        return "\n".join(["ANIM_begin", f"\tANIM_trans {t}", body, "ANIM_end"])
 
     def emit_fixture(self, name, fixture):
         out = []
@@ -450,17 +490,23 @@ def get_reference(airframe: str) -> str:
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
-# airframe -> (aircraft-folder glob under Aircraft/, RealWings mod subfolder under objects/)
-REALWINGS = {
-    "a319": ("ToLissA319*", "RealWings319"),
-    "a320": ("ToLissA320*", "RealWings320"),
-    "a321": ("ToLissA321*", "RealWings321"),
+# airframe -> aircraft-folder glob under <X-Plane 12>/Aircraft/
+AIRCRAFT_GLOB = {
+    "a319": "ToLissA319*",
+    "a320": "ToLissA320*",
+    "a321": "ToLissA321*",
+}
+# airframe -> RealWings mod subfolder under the aircraft's objects/
+REALWINGS_DIR = {
+    "a319": "RealWings319",
+    "a320": "RealWings320",
+    "a321": "RealWings321",
 }
 
 
 def _xplane_root():
-    """Locate the X-Plane 12 folder, matching tools/Link-Objects.ps1:
-    $XPLANE_ROOT env override -> the repo's Log.txt symlink target -> Steam default."""
+    """Locate the X-Plane 12 folder: $XPLANE_ROOT env override -> the repo's
+    Log.txt symlink target -> Steam default."""
     env = os.environ.get("XPLANE_ROOT")
     if env and Path(env).is_dir():
         return Path(env)
@@ -476,20 +522,53 @@ def _xplane_root():
     return fallback if fallback.is_dir() else None
 
 
-def _find_realwings_dir(airframe):
-    """Auto-locate an airframe's installed RealWings mod folder in X-Plane.
+def _find_aircraft_dir(airframe):
+    """Auto-locate an airframe's installed objects/ folder in X-Plane.
     Returns (path, None) on success or (None, reason) if it can't be found."""
     root = _xplane_root()
     if root is None:
         return None, "X-Plane 12 folder not found (set the XPLANE_ROOT env var)"
-    glob_pat, rw_folder = REALWINGS[airframe]
+    glob_pat = AIRCRAFT_GLOB[airframe]
     matches = sorted((root / "Aircraft").glob(glob_pat))
     if not matches:
         return None, f"no aircraft folder matching {glob_pat} under {root / 'Aircraft'}"
-    rw = matches[0] / "objects" / rw_folder
+    objects = matches[0] / "objects"
+    if not objects.is_dir():
+        return None, f"{matches[0].name} has no objects/ folder"
+    return objects, None
+
+
+def _find_realwings_dir(airframe):
+    """Auto-locate an airframe's installed RealWings mod folder in X-Plane.
+    Returns (path, None) on success or (None, reason) if it can't be found."""
+    objects, reason = _find_aircraft_dir(airframe)
+    if objects is None:
+        return None, reason
+    rw_folder = REALWINGS_DIR[airframe]
+    rw = objects / rw_folder
     if not rw.is_dir():
-        return None, f"{rw_folder}/ not installed in {matches[0].name} (RealWings not set up for this airframe)"
+        return None, (f"{rw_folder}/ not installed in {objects.parent.name} "
+                      f"(RealWings not set up for this airframe)")
     return rw, None
+
+
+def _write_live(airframe, src: Path):
+    """Copy a built OBJ into the airframe's installed objects/ folder, so a build
+    lands in the sim without any linking step. Returns True if it was written."""
+    objects, reason = _find_aircraft_dir(airframe)
+    if objects is None:
+        print(f"  ! {airframe}: not written — {reason}")
+        return False
+    dest = objects / src.name
+    # A leftover symlink from the retired Link-Objects.ps1 workflow points back
+    # at the repo (and, since the dist/ restructure, usually points at a path
+    # that no longer exists). Drop it and write a real file in its place.
+    if dest.is_symlink():
+        print(f"  - {airframe}: replacing stale symlink at {dest.name}")
+        dest.unlink()
+    shutil.copyfile(src, dest)
+    print(f"  -> {dest}")
+    return True
 
 
 def _patch_realwings_after_build(targets, deploying):
@@ -520,7 +599,7 @@ def _stage_plugin(root: Path):
 
 
 def cmd_build(args):
-    cfg = load_config()
+    cfg = load_config(wing=args.wing)
     targets = [args.airframe] if args.airframe else list(OBJ_PATH)
     root = (REPO / args.out) if args.out else DIST
     for af in targets:
@@ -531,10 +610,41 @@ def cmd_build(args):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(text.encode("utf-8"))
         print(f"wrote {_rel(dest)} ({len(text)} bytes)")
+        if args.write:
+            _write_live(af, dest)
     if not args.flat:
         print(f"staged {_rel(_stage_plugin(root))}")
+        if args.write:
+            print("note: the plugin is staged in dist/ only — copy it into "
+                  "<X-Plane>/Resources/plugins/PythonPlugins/ yourself (and delete "
+                  "the stale __pycache__ there).")
     if args.wing == "realwings":
-        _patch_realwings_after_build(targets, deploying=bool(args.deploy))
+        _patch_realwings_after_build(targets, deploying=bool(args.write))
+
+
+def cmd_patch_realwings(args):
+    """Patch/preview/revert the installed RealWings mod's baked wingtip lights.
+    Same operation `build --wing realwings --write` runs, exposed on its own for
+    tuning and reversal without a rebuild."""
+    import patch_realwings as P  # lazy: patch_realwings imports build_objs
+    if args.root:
+        roots = [(args.airframe or "?", Path(args.root))]
+    else:
+        targets = [args.airframe] if args.airframe else list(OBJ_PATH)
+        roots = []
+        for af in targets:
+            rw, reason = _find_realwings_dir(af)
+            if rw is None:
+                print(f"# {af}: skipped — {reason}")
+                continue
+            roots.append((af, rw))
+        if not roots:
+            raise SystemExit("no installed RealWings folder found — pass --root to "
+                             "point at one explicitly, or set XPLANE_ROOT.")
+    for af, root in roots:
+        print(f"\n# {af}: {root}")
+        P.run(root, dry=args.dry_run, reverse=args.reverse)
+    return 0
 
 
 def _fmt_rec(rec):
@@ -544,7 +654,7 @@ def _fmt_rec(rec):
 
 
 def cmd_check(args):
-    cfg = load_config()
+    cfg = load_config(wing=args.wing)
     af = args.airframe or "a320"
     gen_text = Emitter(cfg, af, args.wing).emit()
     ref_text, ref_src = get_reference(af)
@@ -589,9 +699,10 @@ def main():
     b.add_argument("--flat", action="store_true",
                    help="write bare OBJs side by side instead of the X-Plane tree "
                         "(for diffing/inspection; skips staging the plugin)")
-    b.add_argument("--deploy", action="store_true",
-                   help="this build is going live: also patch the installed "
-                        "RealWings mod in X-Plane (only affects --wing realwings)")
+    b.add_argument("--write", action="store_true",
+                   help="this build goes live: also write each OBJ into the "
+                        "installed ToLiss aircraft's objects/ folder in X-Plane "
+                        "(auto-located), and with --wing realwings patch the mod")
     b.set_defaults(func=cmd_build)
     c = sub.add_parser("check", help="normalized round-trip check vs reference OBJ")
     c.add_argument("--airframe", choices=list(OBJ_PATH))
@@ -600,6 +711,19 @@ def main():
     c.add_argument("--category", help="only compare lights under this category dataref")
     c.add_argument("-v", "--verbose", action="store_true", help="list only-in-reference too")
     c.set_defaults(func=cmd_check)
+    p = sub.add_parser("patch-realwings",
+                       help="patch the installed RealWings mod's baked wingtip "
+                            "lights in place (also run by build --wing realwings "
+                            "--write)")
+    p.add_argument("--airframe", choices=list(OBJ_PATH),
+                   help="airframe whose RealWings folder to patch (default: all "
+                        "installed)")
+    p.add_argument("--root", help="RealWings folder (default: auto-locate in the "
+                                  "X-Plane install)")
+    p.add_argument("--dry-run", action="store_true", help="preview only")
+    p.add_argument("--reverse", action="store_true",
+                   help="restore originals from .bak")
+    p.set_defaults(func=cmd_patch_realwings)
     args = ap.parse_args()
     sys.exit(args.func(args) or 0)
 

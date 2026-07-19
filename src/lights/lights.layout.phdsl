@@ -3,7 +3,7 @@
 // ============================================================================
 // Mounts (verbatim transform-snippet files) and per-airframe fixtures: the
 // lights, their positions/directions, and gating. Appearance lives in
-// lights.style. Full syntax spec: phase_ii/dsl.md.
+// lights.style.phdsl. Full syntax spec: docs/dsl.md.
 //
 // `airframe X extends Y` starts from Y's fixtures; overrides target lights by
 // NAME: `<fixture> <group> <light> { pos: ...; }` (labels like nav_marker#up
@@ -87,6 +87,10 @@ airframe a320 {
     category: landing;
     mount: gear_left;
     pos: 0.149 -0.03 -0.06;
+    // (+x right, +y up, +z aft)
+    offset: 0 0 0;
+    @realwings { offset: -0.05 -0.2 -0.2; }  
+    @durantula { offset: 0 0 0; }   // TODO: measure the Durantula delta
     landing_bb { index: 0;  dir: -0.053 -0.987 -0.151; }
     landing_main { pos: 0.151 0.002 -0.055;  index: 0;  dir: 0.033 -0.99 -0.134; }
     landing_mid { pos: 0.151 0.002 -0.055;  index: 0;  dir: 0.253 -0.99 -0.134; }
@@ -96,6 +100,9 @@ airframe a320 {
     category: landing;
     mount: gear_right;
     pos: -0.133 -0.025 -0.063;
+    offset: 0 0 0;
+    @realwings { offset: 0.08 -0.18 -0.2; }   // TODO: measure the RealWings delta
+    @durantula { offset: 0 0 0; }   // TODO: measure the Durantula delta
     landing_bb { index: 1;  dir: 0.053 -0.987 -0.151; }
     landing_main { pos: -0.135 0.007 -0.059;  index: 1;  dir: -0.033 -0.99 -0.134; }
     landing_mid { pos: -0.135 0.007 -0.059;  index: 1;  dir: -0.253 -0.99 -0.134; }

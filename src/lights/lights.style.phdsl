@@ -2,7 +2,7 @@
 // ToLiss Photon Lighting — Phase II stylesheet (appearance)
 // ============================================================================
 // Palettes, category->original-palette mapping, and reusable light types.
-// Placement lives in lights.layout. Full syntax spec: phase_ii/dsl.md.
+// Placement lives in lights.layout.phdsl. Full syntax spec: docs/dsl.md.
 //
 // Conditional values use @<axis-value> blocks (nesting = AND); the applicable
 // declaration with the most conditions wins, equal-specificity conflicts are
@@ -13,8 +13,9 @@
 axis profile: halogen xenon led;
 axis side: port starboard;
 axis swatch: bb sp;   // billboard vs spill, from the light class suffix
+axis wing: stock durantula realwings;   // wing mod, fixed per build by --wing
 
-// -- PALETTES: rgb per colour; @bb/@sp override when swatches differ --
+// -- PALETTES: rgb per color; @bb/@sp override when swatches differ --
 palette led {
   white: 0.66 0.91 1;
   red: 1 0.03 0;
@@ -43,7 +44,7 @@ categories {
   logo: halogen;
 }
 
-// -- LIGHT TYPES (appearance): class + colour + intensity + cone --
+// -- LIGHT TYPES (appearance): class + color + intensity + cone --
 light nav_tail_bb {
   class: airplane_nav_bb;
   color: white;
@@ -59,7 +60,7 @@ light nav_tail_sp {
   cone: 0.13;
   dir: -0.003 -0.153 0.988;
 }
-light nav_base {   // mixin: wingtip nav colours (port red / starboard green)
+light nav_base {   // mixin: wingtip nav colors (port red / starboard green)
   color: red;
   @starboard { color: green; }
 }
@@ -150,9 +151,9 @@ light logo_pm {
 light landing_bb {
   class: airplane_landing_bb;
   color: white;
-  intensity: 4000;
-  @led { intensity: 6000; }
-  cone: 0.96;
+  intensity: 8000;
+  @led { intensity: 10000; }
+  cone: 0.2;
 }
 light landing_main {
   class: airplane_landing_pm;

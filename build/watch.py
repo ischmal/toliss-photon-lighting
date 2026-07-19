@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Rebuild the OBJ files whenever the light config (or its mount / raw snippets)
-change. Pair with tools/Link-Objects.ps1 so edits go live in X-Plane on save —
+change. Add --write so each rebuild also lands in the live X-Plane install —
 just reload the aircraft in the sim after each rebuild.
 
 Stdlib only: a lightweight mtime poll (no watchdog dependency).
@@ -9,6 +9,8 @@ Stdlib only: a lightweight mtime poll (no watchdog dependency).
 Usage:
     python build/watch.py                     # watch; rebuild all 3 airframes (stock)
                                               #   into dist/
+    python build/watch.py --write             # ...and install into X-Plane on
+                                              #   every save (the live-iteration loop)
     python build/watch.py --wing durantula    # build a specific wing variant
     python build/watch.py --out .scratch/out  # build to a folder instead of dist/
     python build/watch.py --airframe a320     # only one airframe
@@ -23,8 +25,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CONFIGS = [REPO / "src" / "lights" / "lights.style",
-           REPO / "src" / "lights" / "lights.layout"]
+CONFIGS = [REPO / "src" / "lights" / "lights.style.phdsl",
+           REPO / "src" / "lights" / "lights.layout.phdsl"]
 BUILDER = REPO / "build" / "build_objs.py"
 PARSER = REPO / "build" / "photon_dsl.py"
 WATCH_FILES = CONFIGS + [BUILDER, PARSER, REPO / "src" / "plugin" / "PI_ToLissPhoton.py"]
@@ -55,6 +57,8 @@ def build(args) -> bool:
         cmd += ["--airframe", args.airframe]
     if args.out:
         cmd += ["--out", args.out]
+    if args.write:
+        cmd += ["--write"]
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
     ts = time.strftime("%H:%M:%S")
     if r.returncode == 0:
@@ -73,11 +77,16 @@ def main():
     ap.add_argument("--wing", choices=["stock", "durantula", "realwings"], default="stock")
     ap.add_argument("--airframe", choices=["a319", "a320", "a321"])
     ap.add_argument("--out", help="build to this dir instead of dist/")
+    ap.add_argument("--write", action="store_true",
+                    help="also install each rebuild into the live X-Plane aircraft "
+                         "folders (reload the aircraft in-sim to see it)")
     ap.add_argument("--interval", type=float, default=1.0, help="poll seconds (default 1)")
     ap.add_argument("--once", action="store_true", help="build once and exit")
     args = ap.parse_args()
 
-    dest = args.out or "dist/ (needs Link-Objects.ps1 for live sim)"
+    dest = args.out or "dist/"
+    if args.write:
+        dest += " + live X-Plane install"
     scope = args.airframe or "all airframes"
     watched = " + ".join(c.name for c in CONFIGS if c.exists())
     print(f"watching {watched} + src/lights/{{mounts,raw}} + src/plugin")

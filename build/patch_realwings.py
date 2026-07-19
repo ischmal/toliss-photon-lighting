@@ -11,88 +11,138 @@ safely re-homed into lights_out.
 
 This patcher instead rewrites each baked light *in place* into a ToLiss
 parametric light gated by the ToLissPhoton datarefs — same X/Y/Z, so it keeps
-RealWings' exact position and animation, but gains Photon's original/LED colour
+RealWings' exact position and animation, but gains Photon's original/LED color
 switching. The original line is preserved (commented) for reversibility.
 
-Pair this with:  build_objs.py build --wing realwings   (omits Photon's own
-lights_out wingtip nav/strobe, which RealWings' geometry supersedes).
+There is no CLI here; drive it through the builder, which also auto-locates the
+installed mod folder:
 
-Usage:
-    python build/patch_realwings.py --root "<...>/RealWings320"   # patch in place
-    python build/patch_realwings.py --root <dir> --dry-run        # preview only
-    python build/patch_realwings.py --root <dir> --reverse        # restore .bak
+    python build/build_objs.py build --wing realwings --write    # build + patch
+    python build/build_objs.py patch-realwings --airframe a320 --dry-run
+    python build/build_objs.py patch-realwings --airframe a320 --reverse
 
-NOTE: intensity / direction / cone are seeded from Photon's stock A320 wingtip
-values and are the parameters most likely to want in-sim tuning; colours come
-straight from the Photon palette. Positions are preserved exactly (not rounded).
+`--wing realwings` omits Photon's own lights_out wingtip nav/strobe, which
+RealWings' geometry supersedes; those same omitted fixtures are what SOURCE
+below reads its parameters from.
+
+NOTE: every emitted parameter except position comes from the DSL (see SOURCE).
+Positions are RealWings' own and are preserved verbatim, not rounded.
 """
 from __future__ import annotations
 
-import argparse
 import shutil
-import sys
 from pathlib import Path
 
 import build_objs as B
 
 MARKER = "# >>> Photon RealWings"
 
-# Baked RealWings class -> how to render it as a Photon parametric light.
-#   cat    : ToLissPhoton category dataref
-#   cls    : ToLiss parametric light class (bb billboard / pm spill)
-#   color  : Photon palette colour name
-#   side   : 'left'/'right'/None (None = infer from x sign, for strobes)
-#   inten  : (original, led) candela
-#   cone   : dot-product cutoff
-CONVERT = {
-    "airplane_nav_left_size":  dict(cat="nav",    cls="airplane_nav_bb", color="red",
-                                     side="left",  inten=(5000, 6000), cone=0.2, index=0),
-    "airplane_nav_right_size": dict(cat="nav",    cls="airplane_nav_bb", color="green",
-                                     side="right", inten=(4000, 5000), cone=0.2, index=0),
-    "airplane_strobe_size":    dict(cat="strobe", cls="airplane_strobe_bb", color="white",
-                                     side=None,    inten=(30000, 30000), cone=0.0, index=0),
-    "airplane_strobe_sp":      dict(cat="strobe", cls="airplane_strobe_pm", color="white",
-                                     side=None,    inten=(8000, 8000), cone=0.091, index=0),
+# Baked RealWings light class -> the Photon light it should render as, named as a
+# path into the DSL: <fixture> <group> <light type> in lights.layout.phdsl.
+#
+# Nothing about the light's appearance is duplicated here. Class, color,
+# intensity, cone, direction, the category dataref, and the original-branch
+# palette are all resolved out of the config through build_objs' own resolvers,
+# so editing lights.style.phdsl / lights.layout.phdsl moves these lights too.
+#
+# The source fixtures (wing_nav / wing_strobe) are the ones `--wing realwings`
+# omits from lights_out — RealWings supersedes their geometry, so reusing their
+# parameters is what keeps the patched lights consistent with stock Photon.
+#
+#   side: which side of the mirrored source fixture to resolve as; None = infer
+#         from the sign of the baked light's own X (RealWings bakes one light
+#         class for both wingtips and distinguishes them only by position).
+SOURCE = {
+    "airplane_nav_left_size":  dict(fixture="wing_nav", group="fence",
+                                    type="nav_beam", side="port"),
+    "airplane_nav_right_size": dict(fixture="wing_nav", group="fence",
+                                    type="nav_beam", side="starboard"),
+    "airplane_strobe_size":    dict(fixture="wing_strobe", group="fence",
+                                    type="strobe_beam", side=None),
+    "airplane_strobe_sp":      dict(fixture="wing_strobe", group="fence",
+                                    type="strobe_spill", side=None),
 }
-# Outward beam directions borrowed from Photon's stock A320 wingtip lights.
-DIRS = {
-    ("airplane_nav_bb", "left"):     [-0.574, 0, -0.819],
-    ("airplane_nav_bb", "right"):    [0.574, 0, -0.819],
-    ("airplane_strobe_bb", "left"):  [-0.707, 0, -0.707],
-    ("airplane_strobe_bb", "right"): [0.707, 0, -0.707],
-    ("airplane_strobe_pm", "left"):  [-0.895, -0.094, -0.436],
-    ("airplane_strobe_pm", "right"): [0.895, -0.094, -0.436],
-}
+
+# The airframe whose wingtip parameters seed the patch. RealWings' baked lights
+# carry no airframe marker, and the A319/A321 wingtip fixtures are inherited from
+# the A320 unchanged (only the sharklet nav_spill position is overridden), so one
+# airframe covers all three.
+SOURCE_AIRFRAME = "a320"
 
 
 def num(x):
     return B.fmt(x) if isinstance(x, float) else str(x)
 
 
-def photon_block(cls_size, x, y, z, indent, palettes):
-    c = CONVERT[cls_size]
-    side = c["side"] or ("left" if float(x) < 0 else "right")
-    cls = c["cls"]
-    d = DIRS[(cls, side)]
-    sw = B.swatch_for(cls)
-    pos = f"{x} {y} {z}"
+def resolve_source(cfg, cls_size):
+    """Resolve a baked RealWings class to (category, merged-light-properties) by
+    walking SOURCE's <fixture> <group> <type> path into the DSL. The returned
+    props are the light type's declarations overlaid with the layout's per-light
+    overrides — the same merge Emitter.light_line does."""
+    src = SOURCE[cls_size]
+    af = B.resolve_airframe(cfg, SOURCE_AIRFRAME)
+    try:
+        fixture = af["fixtures"][src["fixture"]]
+    except KeyError:
+        raise SystemExit(f"patch-realwings: fixture {src['fixture']!r} not found in "
+                         f"airframe {SOURCE_AIRFRAME} — SOURCE is out of sync with "
+                         f"lights.layout.phdsl")
+    groups = [g for g in fixture.get("groups", []) if g.get("name") == src["group"]]
+    if len(groups) != 1:
+        raise SystemExit(f"patch-realwings: expected exactly one group named "
+                         f"{src['group']!r} in {src['fixture']}, found {len(groups)}")
+    lights = [l for l in groups[0]["lights"] if l.get("type") == src["type"]]
+    if len(lights) != 1:
+        raise SystemExit(f"patch-realwings: expected exactly one {src['type']!r} in "
+                         f"{src['fixture']}/{src['group']}, found {len(lights)}")
+    light = lights[0]
+    merged = {**cfg["lightTypes"][light["type"]],
+              **{k: v for k, v in light.items() if k != "type"}}
+    return fixture["gating"]["category"], merged
+
+
+def photon_block(cfg, cls_size, x, y, z, indent):
+    """Render one baked light as an original/LED pair of Photon parametric lights
+    at RealWings' exact position."""
+    src = SOURCE[cls_size]
+    category, merged = resolve_source(cfg, cls_size)
+    # RealWings bakes one strobe class for both wingtips; the port/starboard
+    # distinction is only recoverable from the position it baked in.
+    side = src["side"] or ("port" if float(x) < 0 else "starboard")
+    cls = merged["class"]
+    swatch = B.swatch_for(cls)
+
+    # The layout defines the port side; the starboard copy is the emitter's
+    # mirror — negate the X component of the direction (same rule as
+    # Emitter.light_line). Position is RealWings' own, so it is never mirrored.
+    d = [B.rnd(v) for v in merged["dir"]]
+    if side == "starboard":
+        d = [-d[0], d[1], d[2]]
     dirs = " ".join(num(v) for v in d)
-    lines = [f"{indent}{MARKER} — was {cls_size} (edit intensity/dir/cone to taste)"]
-    for branch, palette_name in (("original", "xenon" if c["cat"] in ("strobe", "beacon") else "halogen"),
-                                 ("led", "led")):
-        rgb = " ".join(B.fmt(v) for v in palettes[palette_name][c["color"]][sw])
-        inten = c["inten"][0 if branch == "original" else 1]
+    index = B.pick_side(merged.get("index", 0), side)
+    cname = B.pick_side(merged.get("color", "white"), side)
+
+    lines = [f"{indent}{MARKER} — {cls_size} -> "
+             f"{src['fixture']}/{src['group']}/{src['type']} ({side}); "
+             f"edit it in lights.style.phdsl / lights.layout.phdsl"]
+    # The original (dataref=0) branch's palette is the category's, exactly as the
+    # OBJ emitter picks it — not a second copy of the categories table.
+    original_palette = cfg["categories"][category]["original"]
+    for branch, profile in (("original", original_palette), ("led", "led")):
+        rgb = " ".join(B.fmt(v) for v in cfg["palettes"][profile][cname][swatch])
+        inten = B.resolve_field(merged.get("intensity", 0), profile, side)
+        cone = B.rnd(B.resolve_field(merged["cone"], profile, side))
         hide = "1 1" if branch == "original" else "0 0"
-        lp = (f"{indent}\tLIGHT_PARAM {cls} {pos} {rgb} {c['index']} "
-              f"{inten}cd {dirs} {num(c['cone'])}")
+        lp = (f"{indent}\tLIGHT_PARAM {cls} {x} {y} {z} {rgb} {index} "
+              f"{int(round(inten))}cd {dirs} {num(cone)}")
         lines += [f"{indent}ANIM_begin",
-                  f"{indent}\tANIM_hide {hide} ToLissPhoton/exterior/{c['cat']}",
+                  f"{indent}\tANIM_hide {hide} ToLissPhoton/exterior/{category}",
                   lp,
                   f"{indent}ANIM_end"]
     return lines
 
 
-def patch_file(path: Path, palettes, dry=False):
+def patch_file(path: Path, cfg, dry=False):
     raw = path.read_text(encoding="utf-8", errors="replace")
     nl = "\r\n" if "\r\n" in raw else "\n"
     lines = raw.replace("\r\n", "\n").split("\n")
@@ -103,11 +153,11 @@ def patch_file(path: Path, palettes, dry=False):
     for line in lines:
         s = line.strip()
         tok = s.split()
-        if len(tok) >= 5 and tok[0] == "LIGHT_PARAM" and tok[1] in CONVERT:
+        if len(tok) >= 5 and tok[0] == "LIGHT_PARAM" and tok[1] in SOURCE:
             indent = line[: len(line) - len(line.lstrip())]
             x, y, z = tok[2], tok[3], tok[4]
             out.append(f"{indent}#{s}")  # keep original, commented
-            out.extend(photon_block(tok[1], x, y, z, indent, palettes))
+            out.extend(photon_block(cfg, tok[1], x, y, z, indent))
             n += 1
         else:
             out.append(line)
@@ -135,37 +185,31 @@ def realwings_objs(root: Path):
             head = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if any(c in head for c in CONVERT):
+        if any(c in head for c in SOURCE):
             yield p
 
 
 def run(root: Path, dry=False, reverse=False):
-    """Patch (or reverse) every RealWings OBJ under `root`. Reusable entry point
-    shared by this script's CLI and build_realwings.py's one-shot wrapper."""
+    """Patch (or reverse) every RealWings OBJ under `root`. Entry point shared by
+    build_objs' `patch-realwings` subcommand and its post-build --write hook."""
     if not root.exists():
-        sys.exit(f"not found: {root}")
+        raise SystemExit(f"not found: {root}")
 
     if reverse:
-        total = sum(reverse_bak(b) for b in sorted(root.rglob("*.obj.bak")))
+        baks = sorted(root.rglob("*.obj.bak"))
+        if dry:
+            for b in baks:
+                print(f"  < {b.with_suffix('').name}: would restore from .bak")
+            print(f"would restore {len(baks)} file(s)")
+            return len(baks)
+        total = sum(reverse_bak(b) for b in baks)
         print(f"restored {total} file(s)")
-        return
-    palettes = B.load_config()["palettes"]
+        return total
+    cfg = B.load_config(wing="realwings")  # patching the mod == the realwings build
     objs = list(realwings_objs(root))
     if not objs:
-        sys.exit("no RealWings OBJs with baked wingtip lights found under root")
-    total = sum(patch_file(p, palettes, dry=dry) for p in objs)
+        raise SystemExit("no RealWings OBJs with baked wingtip lights found under root")
+    total = sum(patch_file(p, cfg, dry=dry) for p in objs)
     print(f"{'would patch' if dry else 'patched'} {total} light(s) across "
           f"{len(objs)} file(s)")
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Photon-ify RealWings wingtip lights")
-    ap.add_argument("--root", required=True, help="folder to scan for RealWings OBJs")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--reverse", action="store_true", help="restore originals from .bak")
-    args = ap.parse_args()
-    run(Path(args.root), dry=args.dry_run, reverse=args.reverse)
-
-
-if __name__ == "__main__":
-    main()
+    return total

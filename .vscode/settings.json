@@ -1,0 +1,12 @@
+{
+  // The Photon light DSL (src/lights/*.phdsl) has no grammar of its own yet, so
+  // borrow SCSS's: it already handles // and /* */ comments, `name: value;`
+  // declarations, { } blocks, numbers, and @<axis-value> condition blocks.
+  // See docs/dsl.md § 7 "Editor support".
+  "files.associations": {
+    "*.phdsl": "scss"
+  },
+  // SCSS's validator flags our bare light references (`strobe_tail_bb;`) as
+  // declarations with a missing value. They're valid DSL — false positives only.
+  "scss.validate": false
+}
