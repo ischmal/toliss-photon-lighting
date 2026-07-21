@@ -14,6 +14,11 @@ axis profile: halogen xenon led;
 axis side: port starboard;
 axis swatch: bb sp;   // billboard vs spill, from the light class suffix
 axis wing: stock durantula realwings;   // wing mod, fixed per build by --wing
+// Which RealWings wingtip OBJ a light was baked into: fence (=CEO) vs sharklet
+// (=NEO). Used ONLY by patch_realwings.py on the @realwings wingtip offset —
+// the two ship as separate mod OBJs (Main.obj vs MainNEO.obj) and can need
+// different placement corrections. Never emitted; the patcher picks by filename.
+axis wingtip: fence sharklet;
 
 // -- PALETTES: rgb per color; @bb/@sp override when swatches differ --
 palette led {

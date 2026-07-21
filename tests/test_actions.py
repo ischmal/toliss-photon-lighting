@@ -23,6 +23,17 @@ sys.path.insert(0, str(REPO))
 from installer import actions, payload
 
 RELEASE_DIR: Path | None = None
+FAKE_PLUGIN_DIR: Path | None = None
+
+# Distinct bytes per arch so tests can assert each .xpl lands verbatim. Stand-ins
+# for the real compiled binaries — the installer tests care about placement and
+# byte-fidelity, not that these are valid X-Plane plugins, so no C++ toolchain is
+# needed to run the suite.
+FAKE_XPL = {
+    "win_x64": b"MZ  fake win ToLissPhoton.xpl\n",
+    "mac_x64": b"\xcf\xfa\xed\xfe  fake mac ToLissPhoton.xpl\n",
+    "lin_x64": b"\x7fELF  fake lin ToLissPhoton.xpl\n",
+}
 
 
 class _NullLog:
@@ -30,20 +41,32 @@ class _NullLog:
         pass
 
 
+def _make_fake_plugin(dirpath: Path):
+    """A fake native fat-plugin folder — <arch>/ToLissPhoton.xpl for all three
+    platforms — so the multi-arch install path is exercised without the C++ build."""
+    for arch, data in FAKE_XPL.items():
+        p = dirpath / arch / "ToLissPhoton.xpl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+
 def setUpModule():
-    global RELEASE_DIR
+    global RELEASE_DIR, FAKE_PLUGIN_DIR
     RELEASE_DIR = Path(tempfile.mkdtemp(prefix="photon_release_"))
+    FAKE_PLUGIN_DIR = Path(tempfile.mkdtemp(prefix="photon_plugin_"))
+    _make_fake_plugin(FAKE_PLUGIN_DIR)
     subprocess.run(
         [sys.executable, str(REPO / "build" / "make_release.py"),
-         "--out", str(RELEASE_DIR)],
+         "--out", str(RELEASE_DIR), "--plugin-dir", str(FAKE_PLUGIN_DIR)],
         check=True, cwd=REPO, capture_output=True, text=True,
     )
     payload.PAYLOAD_DIR = RELEASE_DIR / "payload"
 
 
 def tearDownModule():
-    if RELEASE_DIR is not None:
-        shutil.rmtree(RELEASE_DIR, ignore_errors=True)
+    for d in (RELEASE_DIR, FAKE_PLUGIN_DIR):
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class FakeAircraft:
@@ -121,16 +144,13 @@ class InstallUninstallTests(unittest.TestCase):
         self.assertFalse((self.fa.objects / "Photon Backup Files").exists())
         self.assertIsNone(actions.read_manifest(self.fa.objects))
 
-    def test_plugin_staged_and_stale_pycache_cleared(self):
-        plugin_dest = (self.fa.xplane_root / "Resources" / "plugins"
-                       / "PythonPlugins" / "PI_ToLissPhoton.py")
-        pycache = plugin_dest.parent / "__pycache__"
-        pycache.mkdir(parents=True)
-        (pycache / "stale.pyc").write_bytes(b"stale")
-
+    def test_native_plugin_installed_for_all_arches(self):
         actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
-        self.assertTrue(plugin_dest.is_file())
-        self.assertFalse(pycache.exists())
+        plugin_root = (self.fa.xplane_root / "Resources" / "plugins" / "ToLissPhoton")
+        for arch, data in FAKE_XPL.items():
+            xpl = plugin_root / arch / "ToLissPhoton.xpl"
+            self.assertTrue(xpl.is_file(), f"missing {arch} .xpl")
+            self.assertEqual(xpl.read_bytes(), data)
 
 
 class RealWingsPatchTests(unittest.TestCase):
@@ -197,6 +217,32 @@ class RealWingsPatchTests(unittest.TestCase):
         # nothing changed: mod still patched, .bak still there
         self.assertEqual(self.mod_obj.read_text(encoding="utf-8"), patched_mod)
         self.assertTrue(bak.exists())
+
+
+class PluginCurrentTests(unittest.TestCase):
+    """plugin_is_current gates whether the X-Plane-running warning is skipped:
+    if the installed plugin already matches, an install only rewrites OBJs
+    (safe while loaded)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_plugincur_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fa = FakeAircraft(self.tmp)
+        self.log = _NullLog()
+        self.plugin_root = (self.fa.xplane_root / "Resources" / "plugins" / "ToLissPhoton")
+
+    def test_false_when_plugin_absent(self):
+        self.assertFalse(actions.plugin_is_current(self.fa.xplane_root))
+
+    def test_true_after_install(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(actions.plugin_is_current(self.fa.xplane_root))
+
+    def test_false_when_installed_plugin_differs(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        # one arch's .xpl replaced by an older build => no longer current
+        (self.plugin_root / "win_x64" / "ToLissPhoton.xpl").write_bytes(b"# older build\n")
+        self.assertFalse(actions.plugin_is_current(self.fa.xplane_root))
 
 
 if __name__ == "__main__":

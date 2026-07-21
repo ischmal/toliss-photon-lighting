@@ -62,6 +62,8 @@ axis profile: halogen xenon led;
 axis side:    port starboard;
 axis swatch:  bb sp;            // billboard vs spill, derived from the light class
 axis wing:    stock durantula realwings;   // wing mod, fixed per build by --wing
+axis wingtip: fence sharklet;   // RealWings CEO vs NEO mod OBJ — used ONLY on the
+                                // @realwings wingtip offset (see §offset below)
 ```
 
 Anywhere a declaration can appear, `@<axis-value> { ... }` scopes the
@@ -212,12 +214,49 @@ Note the difference from `pos`: light positions are **mount-local** and are the
 same across wing mods; `offset` moves the mount itself. Editing the fixture `pos`
 would also only move lights that don't declare their own.
 
-Deliberate limits: `offset` is translation-only, may vary by `side` and `wing`
-but not by `profile`/`swatch` (one fixture spans every profile branch — the
-build rejects it), and is unsupported on a `raw` fixture, whose block is copied
-verbatim. Rotations and animation keyframes stay in the mount snippet: they are
+Deliberate limits: `offset` is translation-only, may vary by `side`, `wing`, and
+`wingtip` (the last only on the RealWings-omitted wingtip fixtures — the emitter
+rejects a `@fence`/`@sharklet` offset on a fixture it actually emits) but not by
+`profile`/`swatch` (one fixture spans every profile branch — the build rejects
+it), and is unsupported on a `raw` fixture, whose block is copied verbatim. Rotations and animation keyframes stay in the mount snippet: they are
 frozen rigging lifted from ToLiss and are not what differs between wing mods.
 A mod needing a different *rotation* is what the per-variant mount slot is for.
+
+**`offset` on an `omit`ted fixture — the RealWings wingtip case.** `wing_nav` and
+`wing_strobe` are `omit: realwings` (RealWings bakes its *own* wingtip lights into
+its OBJs, so Photon emits none there), yet they still carry a `@realwings
+{ offset }`. That offset is **not** emitted as an `ANIM_trans` — instead
+`build/patch_realwings.py` reads it (via `load_config(wing="realwings")`, which
+resolves `@realwings` onto the fixture) and **adds it to RealWings' baked X/Y/Z**,
+mirroring X per side exactly as the emitter would. This is the *same* "mod lights
+in the wrong place" knob, just applied by the patcher because RealWings owns the
+geometry. Frame difference: the emitter's `ANIM_trans` is aircraft-coordinate,
+but the patcher adds into the baked light's **mount-local** position (deep inside
+RealWings' wing-flex animation), which is what keeps the light glued to the
+wingtip through flex. A zero offset is a byte-for-byte pass-through.
+
+CEO and NEO ship as **separate** RealWings OBJs (`Main.obj` vs `MainNEO.obj`) and
+can need different corrections, so the offset is split by the **`wingtip` axis**
+(`axis wingtip: fence sharklet;`, `fence` = CEO, `sharklet` = NEO):
+
+```
+// on wing_nav / wing_strobe (omit: realwings)
+offset: 0 0 0;                          // stock/durantula: no shift
+@realwings {
+  offset: 0 0 0;                        // NEO / sharklet OBJ: correct as baked
+  @fence { offset: 0.08 -0.15 0; }      // CEO OBJ: the correction
+}
+```
+
+`wingtip` is a **free** axis but appears *only* here: the emitter never resolves
+these fixtures (they're omitted for RealWings) and no other property conditions on
+`@fence`/`@sharklet`, so nothing else expands over it. `patch_realwings.py` picks
+the value by the mod OBJ's filename (`…NEO.obj → sharklet`, else `fence`) and, per
+airframe, honours a319/a321 `extends` overrides of the offset (appearance is
+inherited unchanged, so only placement varies). Don't confuse the `@fence`/
+`@sharklet` *conditions* with the `group fence`/`group sharklet` blocks in the same
+fixtures — same words, unrelated: the groups are the (omitted) stock lights, the
+conditions select the CEO/NEO correction.
 - **Labels** (`type#label`) name a light within its group so selectors can
   target it; required only when the same type appears twice in one group
   (`#up/#down`, `#left/#right`).

@@ -3,10 +3,11 @@
 ToLiss Photon Lighting — Installer.
 
 A zero-dependency, cross-platform interactive installer. Walks: launch ->
-X-Plane directory -> requirements check -> aircraft selection -> action ->
-perform -> complete, with real keyboard navigation (arrows / ENTER / ESC /
-number keys / typing) via installer/tui.py, real detection via
-installer/detect.py, and real filesystem writes via installer/actions.py.
+X-Plane directory -> aircraft selection -> action -> perform -> complete, with
+real keyboard navigation (arrows / ENTER / ESC / number keys / typing) via
+installer/tui.py, real detection via installer/detect.py, and real filesystem
+writes via installer/actions.py. The plugin it installs is the compiled native
+`.xpl` — no XPPython3/Python prerequisite.
 
 Run from anywhere — payload/ is resolved relative to this file, not CWD:
     python install.py [--dry-run] [--xplane-root PATH]
@@ -25,7 +26,7 @@ from pathlib import Path
 from installer import actions, detect, payload
 from installer import tui
 from installer.constants import (
-    AIRFRAMES, PHOTON_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS, XPPYTHON3_URL,
+    AIRFRAMES, PHOTON_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS,
 )
 from installer.log import Log
 from installer.tui import C, Back, flash, menu, render, text_prompt
@@ -125,43 +126,6 @@ def screen_xplane():
         return roots[choice]
 
 
-# ─── screen 2a: requirements (XPPython3) ──────────────────────────────────────
-def screen_requirements(root: Path):
-    while True:
-        if detect.detect_xppython3(root):
-            LOG.write("requirement OK: XPPython3 present")
-            return
-        LOG.write("requirement MISSING: XPPython3 not found", "WARN")
-        para = [
-            f"{C.RED}{C.BOLD}WARNING: XPPython3 was NOT found!{C.RESET}",
-            "",
-            f"{C.BR_WHITE}The installer could not locate XPPython3 in your X-Plane"
-            f" plugins.{C.RESET}",
-            f"{C.BR_WHITE}It is required — ToLiss Photon will not operate without"
-            f" it.{C.RESET}",
-            f"{C.DIM}Looked in: {root / 'Resources' / 'plugins' / 'XPPython3'}{C.RESET}",
-            "",
-        ]
-        options = [
-            "Open XPPython3's download page in my browser",
-            "Check my X-Plane /plugins/ folder again",
-            "Ignore and continue anyway",
-        ]
-        choice = menu(STAGE_ROOT, "Step 1b.  Check requirements", "", options,
-                      header_lines=para)
-        if choice == 0:
-            webbrowser.open(XPPYTHON3_URL)
-            flash(STAGE_ROOT, [
-                f"{C.GREEN}Opened XPPython3's download page in your browser.{C.RESET}",
-                f"{C.DIM}Install it into {root / 'Resources' / 'plugins'}, then"
-                f" choose 'Check again'.{C.RESET}"])
-        elif choice == 1:
-            continue
-        else:
-            LOG.write("user chose to ignore missing XPPython3", "WARN")
-            return
-
-
 # ─── screen 3: aircraft selection (table) ─────────────────────────────────────
 _AC_TITLES = ("Folder Name", "Aircraft", "Photon Version")
 _AC_GAP = 4  # spaces between columns
@@ -243,6 +207,12 @@ def screen_aircraft(xplane_root: Path):
 
 
 # ─── screen 4: aircraft action ────────────────────────────────────────────────
+def _paren(label: str, note: str) -> str:
+    """An option label with a dark-gray parenthetical note appended, so the
+    incidental detail reads as secondary to the action itself."""
+    return f"{label}  {C.BR_BLACK}({note}){C.RESET}"
+
+
 def _action_label(ac: dict, wing: str) -> str:
     base = WING_ACTION_LABEL[wing]
     if not ac["photon"]:
@@ -252,15 +222,13 @@ def _action_label(ac: dict, wing: str) -> str:
         # OBJ marker gone (an aircraft update reverted our edit) though the
         # manifest survived — the on-disk OBJ is stock, so this is a fresh redo.
         if same_wing:
-            return f"{base}  (reinstall — update reverted it)"
-        current = WING_LABEL[ac["wing"] or "stock"]
-        return f"{base}  (switch from {current})"
+            return _paren(base, "reinstall — update reverted it")
+        return _paren(base, f"switch from {WING_LABEL[ac['wing'] or 'stock']}")
     if same_wing:
         if ac["photon"] != VERSION:
-            return f"Reinstall / Upgrade  (v{ac['photon']} → v{VERSION})"
-        return f"Reinstall  (already v{VERSION})"
-    current = WING_LABEL[ac["wing"] or "stock"]
-    return f"{base}  (switch from {current})"
+            return _paren("Reinstall / Upgrade", f"v{ac['photon']} → v{VERSION}")
+        return _paren("Reinstall", f"already v{VERSION}")
+    return _paren(base, f"switch from {WING_LABEL[ac['wing'] or 'stock']}")
 
 
 def screen_action(ac: dict):
@@ -272,33 +240,49 @@ def screen_action(ac: dict):
         if key == "uninstall":
             label = "Uninstall"
             if not ac["photon"]:
-                options.append(f"{label}  (nothing installed)")
+                options.append(_paren(label, "nothing installed"))
                 disabled.add(i)
                 continue
             options.append(label)
         else:
             options.append(_action_label(ac, key))
+    # When Photon is already installed, default the highlight to the currently-
+    # installed wing variant (e.g. Durantula → its own option) so a reinstall
+    # lands on the obvious choice; a fresh install defaults to the first option.
+    default_idx = 0
+    if ac["photon"]:
+        w = ac["wing"] or "stock"
+        if w in WINGS:
+            default_idx = WINGS.index(w)
     choice = menu(STAGE_CONFIGURE, step,
                   f"Select an action for ToLiss Photon v{VERSION}:", options,
-                  disabled=disabled)
+                  disabled=disabled, index=default_idx)
     action = keys[choice]
     LOG.write(f"action chosen: {action} on {ac['folder']}")
     return action
 
 
 # ─── X-Plane-running guard ─────────────────────────────────────────────────────
-def screen_check_not_running():
-    """OBJ writes/reloads mid-session misbehave — warn if X-Plane looks live."""
+def screen_check_not_running(ac: dict, action: str, xplane_root: Path):
+    """Warn if X-Plane looks live — but only when this run needs to replace the
+    loaded plugin binary. Overwriting the aircraft OBJs mid-session is safe
+    (X-Plane loads them into memory and releases the files); the plugin is the
+    one thing risky to swap while running. So if the installed plugin is already
+    current (an OBJ-only reinstall/upgrade), skip the warning entirely."""
     while True:
         if not detect.xplane_running():
+            return
+        if action != "uninstall" and actions.plugin_is_current(xplane_root):
+            LOG.write("X-Plane running, but the plugin is already current — this "
+                      "run only rewrites OBJs (safe while loaded); skipping warning")
             return
         LOG.write("X-Plane appears to be running", "WARN")
         para = [
             f"{C.YELLOW}{C.BOLD}X-Plane appears to be running.{C.RESET}",
             "",
-            f"{C.BR_WHITE}Installing while X-Plane is open can leave lighting files"
-            f" in a bad state.{C.RESET}",
-            f"{C.BR_WHITE}Please close X-Plane before continuing.{C.RESET}",
+            f"{C.BR_WHITE}This install adds or updates the ToLiss Photon plugin, which"
+            f" X-Plane loads at startup.{C.RESET}",
+            f"{C.BR_WHITE}Please close X-Plane so the change takes effect cleanly.{C.RESET}",
             "",
         ]
         options = ["I've closed it — check again", "Continue anyway (not recommended)"]
@@ -319,7 +303,7 @@ def screen_plugin_disposition(ac: dict, xplane_root: Path) -> bool:
         return False
     options = ["Leave the plugin installed (recommended)", "Remove it too"]
     choice = menu(STAGE_CONFIGURE, "Step 3c.  No other aircraft use ToLiss Photon",
-                 "The PI_ToLissPhoton.py plugin is shared across aircraft. Remove it too?",
+                 "The ToLiss Photon plugin is shared across aircraft. Remove it too?",
                  options)
     return choice == 1
 
@@ -382,7 +366,20 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
 
 
 # ─── screen 6: complete ───────────────────────────────────────────────────────
-def screen_complete(action: str, success: bool):
+def _complete_summary(ac: dict, action: str, success: bool) -> str:
+    """One-line recap of what just happened, e.g. 'ToLiss Photon v0.4
+    (Durantula) installed in ToLiss A321.'"""
+    if not success:
+        verb = "Uninstall" if action == "uninstall" else "Installation"
+        return f"{C.YELLOW}{verb} did not complete — see the installer log for details.{C.RESET}"
+    if action == "uninstall":
+        return (f"{C.BR_WHITE}ToLiss Photon removed from {ac['name']} — original"
+                f" lighting restored.{C.RESET}")
+    return (f"{C.BR_WHITE}ToLiss Photon v{VERSION} ({WING_LABEL[action]}) installed in"
+            f" {ac['name']}.{C.RESET}")
+
+
+def screen_complete(ac: dict, action: str, success: bool):
     if not success:
         verb = "Uninstall" if action == "uninstall" else "Installation"
         title = f"Step 5.  {verb} failed"
@@ -390,12 +387,14 @@ def screen_complete(action: str, success: bool):
         title = "Step 5.  Uninstall complete"
     else:
         title = "Step 5.  Installation complete"
+    summary = _complete_summary(ac, action, success)
     options = ["Exit installer", "Modify another aircraft", "Open installer log",
               "Find ToLiss Photon online"]
     while True:
         try:
-            choice = menu(STAGE_COMPLETE, title,
-                         "What would you like to do next:", options)
+            choice = menu(STAGE_COMPLETE, title, "",
+                         header_lines=[summary, "", "What would you like to do next:", ""],
+                         options=options)
         except Back:
             return "restart"
         if choice == 0:
@@ -447,18 +446,15 @@ def main():
     try:
         screen_launch()
         xplane_root = Path(args.xplane_root) if args.xplane_root else None
-        if xplane_root is not None:
-            screen_requirements(xplane_root)  # CLI-provided root skips picking, not checking
         while True:
             try:
                 if xplane_root is None:
                     xplane_root = screen_xplane()
-                    screen_requirements(xplane_root)
                 ac = screen_aircraft(xplane_root)
                 action = screen_action(ac)
-                screen_check_not_running()
+                screen_check_not_running(ac, action, xplane_root)
                 success = screen_perform(ac, action, xplane_root)
-                nxt = screen_complete(action, success)
+                nxt = screen_complete(ac, action, success)
                 if nxt == "exit":
                     break
                 if nxt == "restart":

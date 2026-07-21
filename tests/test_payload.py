@@ -1,8 +1,9 @@
 """Tests for installer/payload.py's two modes. The dev-tree fallback is what
 lets `python install.py` run straight from the repo (no release built): OBJs
-are generated from the DSL and the plugin comes from src/. Forcing dev mode is
-just pointing PAYLOAD_DIR at a path that doesn't exist, so _bundled() is False
-and _dev_repo() (the repo we're running in) takes over.
+are generated from the DSL and the native plugin comes from the CMake build
+output under src/native/build/. Forcing dev mode is just pointing PAYLOAD_DIR at
+a path that doesn't exist, so _bundled() is False and _dev_repo() (the repo we're
+running in) takes over.
 
 Run: python -m unittest discover -s tests -v
 """
@@ -43,10 +44,18 @@ class DevModePayloadTests(unittest.TestCase):
                 self.assertIn("ANIM_begin", text)
                 self.assertIn("ToLissPhoton/exterior/", text)
 
-    def test_plugin_comes_from_src(self):
-        p = payload.plugin_path()
-        self.assertEqual(p, REPO / "src" / "plugin" / "PI_ToLissPhoton.py")
-        self.assertGreater(len(payload.plugin_bytes()), 0)
+    def test_plugin_comes_from_native_build(self):
+        # Dev mode resolves the native fat-plugin folder at the CMake build output.
+        # It only exists once the .xpl is built; assert the path either way so the
+        # test is hermetic regardless of whether the native plugin is compiled here.
+        expected = REPO / "src" / "native" / "build" / "ToLissPhoton"
+        if expected.is_dir():
+            self.assertEqual(payload.plugin_src_root(), expected)
+            self.assertTrue(payload.plugin_files())
+            self.assertTrue(payload.plugin_arches())
+        else:
+            with self.assertRaises(payload.PayloadError):
+                payload.plugin_src_root()
 
     def test_dsl_dir_points_at_repo_build(self):
         self.assertEqual(payload.dsl_dir(), REPO / "build")

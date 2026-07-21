@@ -32,7 +32,7 @@ Format at a glance:
     }
 
 Resolution rule (deliberately NOT the CSS cascade): for a concrete context
-(profile, side, swatch, wing), the applicable declaration with the MOST
+(profile, side, swatch, wingtip, wing), the applicable declaration with the MOST
 conditions wins; two different values at equal specificity are an error. A later
 declaration with the IDENTICAL condition set replaces an earlier one — that is
 what `extends` (light mixins and airframe overrides) relies on.
@@ -57,8 +57,11 @@ class DslError(Exception):
 MISSING = object()
 
 # canonical nesting order when re-encoding conditional values into the
-# schema-3 nested-dict shapes resolve_field / pick_side already understand
-AXIS_ORDER = ("profile", "swatch", "side")
+# schema-3 nested-dict shapes resolve_field / pick_side already understand.
+# `wingtip` (fence/sharklet) is free but appears ONLY on the RealWings @realwings
+# offset, which the emitter never resolves (those fixtures are omit: realwings) —
+# patch_realwings.py resolves it. Placing it before `side` nests it wingtip-major.
+AXIS_ORDER = ("profile", "swatch", "wingtip", "side")
 
 # Axes NOT in AXIS_ORDER are *pre-bound*: fixed for a whole build, so they are
 # supplied as a base context at load time and act as a filter on @-conditions
@@ -563,15 +566,21 @@ def _vec3(v, where):
     return v
 
 
+_OFFSET_AXIS_KEYS = {"port", "starboard", "fence", "sharklet"}
+
+
 def _offset_value(v, where):
-    """A fixture offset is a translation, so it may vary by side but not by
-    profile or swatch (one emitted fixture spans every profile branch)."""
+    """A fixture offset is a translation, so it may vary by side (@port/@starboard),
+    by wing (@realwings — pre-bound, filtered out before we get here) and by
+    wingtip (@fence/@sharklet, RealWings-only, consumed by patch_realwings.py) —
+    but not by profile or swatch (one emitted fixture spans every profile branch).
+    Surviving side/wingtip conditions come through as a (possibly nested) dict."""
     if isinstance(v, dict):
-        extra = set(v) - {"port", "starboard"}
+        extra = set(v) - _OFFSET_AXIS_KEYS
         if extra:
             raise DslError(f"{where}: offset may vary by side (@port/@starboard) "
-                           f"and wing variant only, not by {sorted(extra)}")
-        return {k: _vec3(x, f"{where}.{k}") for k, x in v.items()}
+                           f"and wingtip (@fence/@sharklet) only, not by {sorted(extra)}")
+        return {k: _offset_value(x, f"{where}.{k}") for k, x in v.items()}
     return _vec3(v, where)
 
 

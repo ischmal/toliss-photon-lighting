@@ -375,12 +375,14 @@ class Back(Exception):
 
 
 def menu(stage, step, prompt, options, *, back="go back", cont="continue",
-         header_lines=None, allow_back=True, disabled=None):
+         header_lines=None, allow_back=True, disabled=None, index=0):
     """Arrow/number-navigable menu rendered through the layout engine. Returns the
     chosen index; raises Back on ESC. `header_lines` are static (non-selectable)
-    rows drawn above the options (used for the aircraft table columns)."""
+    rows drawn above the options (used for the aircraft table columns). `index`
+    is the initially-highlighted option (clamped, and advanced off a disabled
+    row)."""
     disabled = disabled or set()
-    idx = 0
+    idx = index if 0 <= index < len(options) else 0
     while idx in disabled:
         idx = (idx + 1) % len(options)
     while True:

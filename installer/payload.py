@@ -18,16 +18,21 @@ at a fixture):
 
 Bundled `payload/` layout (built by build/make_release.py):
     payload/objs/<stock|durantula|realwings>/<obj filename>
-    payload/plugin/PI_ToLissPhoton.py
+    payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl   (arch = win_x64|mac_x64|lin_x64)
     payload/dsl/build/{build_objs,photon_dsl,patch_realwings}.py
     payload/dsl/src/lights/*.phdsl
+
+The plugin is the compiled native `.xpl` (no XPPython3/Python at runtime). It is a
+fat plugin: the folder can carry one `.xpl` per platform side by side, and X-Plane
+loads the subfolder matching the host OS. In dev mode it comes from the CMake build
+output under `src/native/build/` (so the native plugin must be built first).
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-from installer.constants import AIRFRAMES
+from installer.constants import AIRFRAMES, PLUGIN_FOLDER, XPL_NAME
 
 # installer/payload.py -> installer/ -> the dir holding install.py. In a release
 # that dir holds payload/; in the repo it *is* the repo root (holds build/, src/).
@@ -97,20 +102,42 @@ def _import_build_objs(repo: Path):
     return B
 
 
-# ─── plugin ────────────────────────────────────────────────────────────────────
-def plugin_path() -> Path:
+# ─── plugin (native fat-plugin folder) ──────────────────────────────────────────
+def plugin_src_root() -> Path:
+    """The source `ToLissPhoton/` fat-plugin folder to install. Bundled: under
+    payload/plugin/; dev: the CMake build output under src/native/build/ (so the
+    native plugin has to be built first)."""
     if _bundled():
-        p = PAYLOAD_DIR / "plugin" / "PI_ToLissPhoton.py"
+        p = PAYLOAD_DIR / "plugin" / PLUGIN_FOLDER
+        hint = "this release bundle is incomplete"
     else:
         repo = _dev_repo()
-        p = (repo / "src" / "plugin" / "PI_ToLissPhoton.py") if repo else None
-    if not p or not p.is_file():
-        raise PayloadError(f"missing plugin source: {p}")
+        p = (repo / "src" / "native" / "build" / PLUGIN_FOLDER) if repo else None
+        hint = ("build the native plugin first — see src/native/README.md "
+                "(e.g. cmake --build src/native/build --config Release)")
+    if not p or not p.is_dir():
+        raise PayloadError(f"native plugin folder not found: {p} — {hint}")
     return p
 
 
-def plugin_bytes() -> bytes:
-    return plugin_path().read_bytes()
+def plugin_files() -> list[tuple[str, Path]]:
+    """Every file in the fat-plugin folder as (folder-relative POSIX path, absolute
+    source) — normally `<arch>/ToLissPhoton.xpl` for each built platform. Copied
+    verbatim into <X-Plane>/Resources/plugins/ToLissPhoton/ at install time."""
+    root = plugin_src_root()
+    files = [(p.relative_to(root).as_posix(), p)
+             for p in sorted(root.rglob("*")) if p.is_file()]
+    if not files:
+        raise PayloadError(f"native plugin folder is empty (no .xpl built?): {root}")
+    return files
+
+
+def plugin_arches() -> list[str]:
+    """Platform arch subfolders that actually contain a `.xpl` (win_x64/mac_x64/
+    lin_x64), for reporting which platforms this bundle ships."""
+    root = plugin_src_root()
+    return sorted(d.name for d in root.iterdir()
+                  if d.is_dir() and (d / XPL_NAME).is_file())
 
 
 # ─── RealWings live-patch toolchain ────────────────────────────────────────────

@@ -16,7 +16,8 @@ from pathlib import Path
 
 from installer import payload
 from installer.constants import (
-    AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME, PLUGIN_REL, REALWINGS_DIR, VERSION,
+    AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME, PLUGIN_DIR_REL, PLUGIN_FOLDER,
+    REALWINGS_DIR, VERSION,
 )
 
 
@@ -126,13 +127,14 @@ def _import_patch_realwings():
     return P
 
 
-def _patch_realwings(rw_dir: Path, dry_run: bool, log) -> int:
+def _patch_realwings(rw_dir: Path, airframe: str, dry_run: bool, log) -> int:
     P = _import_patch_realwings()
     buf = io.StringIO()
     n = 0
     with contextlib.redirect_stdout(buf):
         try:
-            n = P.run(rw_dir, dry=dry_run) or 0
+            # airframe selects per-airframe RealWings offset overrides in the DSL
+            n = P.run(rw_dir, airframe=airframe, dry=dry_run) or 0
         except SystemExit as e:
             log.write(f"realwings patch: {e}", "WARN")
     for line in buf.getvalue().splitlines():
@@ -152,6 +154,27 @@ def _patch_realwings_reverse(rw_dir: Path, dry_run: bool, log) -> int:
     for line in buf.getvalue().splitlines():
         log.write(f"[realwings] {line}")
     return n
+
+
+# ─── plugin state ────────────────────────────────────────────────────────────
+def plugin_is_current(xplane_root) -> bool:
+    """True if the native plugin already installed in X-Plane is byte-identical to
+    the one this installer would write (every bundled `.xpl` present and matching).
+    When so, a (re)install only rewrites the aircraft OBJs — which X-Plane loads
+    into memory and releases, so overwriting them mid-session is safe — and nothing
+    needs to touch the loaded plugin binary (a locked `.xpl`), the only thing
+    genuinely unsafe to replace while running."""
+    dest_root = Path(xplane_root) / PLUGIN_DIR_REL
+    if not dest_root.is_dir():
+        return False
+    try:
+        for rel, src in payload.plugin_files():
+            dest = dest_root / rel
+            if not dest.is_file() or dest.read_bytes() != src.read_bytes():
+                return False
+        return True
+    except (OSError, payload.PayloadError):
+        return False
 
 
 # ─── install / uninstall ───────────────────────────────────────────────────────
@@ -193,7 +216,7 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
     if wing == "realwings":
         rw_dir = objects / REALWINGS_DIR[airframe]
         if rw_dir.is_dir():
-            n = _patch_realwings(rw_dir, dry_run, log)
+            n = _patch_realwings(rw_dir, airframe, dry_run, log)
             manifest["realwings_dir"] = str(rw_dir)
             manifest["realwings_patched"] = True
             steps.append(f"Patched {n} RealWings wingtip light(s) in {rw_dir.name}")
@@ -214,14 +237,15 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
         else:
             log.write(f"previous realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
 
-    plugin_dest = Path(xplane_root) / PLUGIN_REL
-    log.write(f"writing plugin {plugin_dest} (dry_run={dry_run})")
-    if not dry_run:
-        _atomic_write_bytes(plugin_dest, payload.plugin_bytes())
-        pycache = plugin_dest.parent / "__pycache__"
-        if pycache.is_dir():
-            shutil.rmtree(pycache, ignore_errors=True)
-    steps.append("Staged plugin PI_ToLissPhoton.py → Resources\\plugins\\PythonPlugins")
+    plugin_root = Path(xplane_root) / PLUGIN_DIR_REL
+    arches = payload.plugin_arches()
+    log.write(f"writing native plugin -> {plugin_root} "
+              f"({', '.join(arches)}; dry_run={dry_run})")
+    for rel, src in payload.plugin_files():
+        if not dry_run:
+            _atomic_write_bytes(plugin_root / rel, src.read_bytes())
+    steps.append(f"Installed ToLiss Photon plugin [{', '.join(arches)}] → "
+                 f"Resources\\plugins\\{PLUGIN_FOLDER}")
 
     manifest.update(version=VERSION, wing=wing,
                     installed_at=_dt.datetime.now().isoformat(timespec="seconds"))
@@ -282,10 +306,10 @@ def uninstall(ac: dict, xplane_root: Path, log, dry_run: bool = False,
     steps.append(f"Removed {BACKUP_DIRNAME} and manifest")
 
     if remove_plugin:
-        plugin_dest = Path(xplane_root) / PLUGIN_REL
-        log.write(f"removing shared plugin {plugin_dest} (dry_run={dry_run})")
-        if plugin_dest.is_file() and not dry_run:
-            plugin_dest.unlink()
-        steps.append("Removed shared plugin (no other airframe uses Photon)")
+        plugin_root = Path(xplane_root) / PLUGIN_DIR_REL
+        log.write(f"removing shared plugin {plugin_root} (dry_run={dry_run})")
+        if plugin_root.is_dir() and not dry_run:
+            shutil.rmtree(plugin_root, ignore_errors=True)
+        steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
 
     return steps

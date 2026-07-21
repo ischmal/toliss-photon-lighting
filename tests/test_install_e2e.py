@@ -1,9 +1,9 @@
 """End-to-end smoke test: drive install.py's real state machine (launch ->
-requirements -> aircraft -> action -> perform -> complete) with a scripted key
-sequence against a fake X-Plane tree, in --dry-run so nothing is written.
-Confirms the screens are wired together correctly — detect.py feeding
-screen_aircraft, actions.py feeding screen_perform, etc. — as one process,
-not just each module in isolation.
+aircraft -> action -> perform -> complete) with a scripted key sequence against
+a fake X-Plane tree, in --dry-run so nothing is written. Confirms the screens
+are wired together correctly — detect.py feeding screen_aircraft, actions.py
+feeding screen_perform, etc. — as one process, not just each module in
+isolation.
 
 msvcrt.getwch() reads the real console, not redirected stdin, so this drives
 the flow in-process via a monkeypatched tui.read_key rather than a subprocess
@@ -14,6 +14,7 @@ Run: python -m unittest discover -s tests -v
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -29,22 +30,30 @@ import install
 from installer import detect, payload, tui
 
 RELEASE_DIR: Path | None = None
+FAKE_PLUGIN_DIR: Path | None = None
 
 
 def setUpModule():
-    global RELEASE_DIR
+    global RELEASE_DIR, FAKE_PLUGIN_DIR
     RELEASE_DIR = Path(tempfile.mkdtemp(prefix="photon_release_e2e_"))
+    # A fake native fat-plugin folder so make_release doesn't need the C++ build.
+    FAKE_PLUGIN_DIR = Path(tempfile.mkdtemp(prefix="photon_plugin_e2e_"))
+    for arch in ("win_x64", "mac_x64", "lin_x64"):
+        p = FAKE_PLUGIN_DIR / arch / "ToLissPhoton.xpl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(f"fake {arch} ToLissPhoton.xpl\n".encode())
     subprocess.run(
         [sys.executable, str(REPO / "build" / "make_release.py"),
-         "--out", str(RELEASE_DIR)],
+         "--out", str(RELEASE_DIR), "--plugin-dir", str(FAKE_PLUGIN_DIR)],
         check=True, cwd=REPO, capture_output=True, text=True,
     )
     payload.PAYLOAD_DIR = RELEASE_DIR / "payload"
 
 
 def tearDownModule():
-    if RELEASE_DIR is not None:
-        shutil.rmtree(RELEASE_DIR, ignore_errors=True)
+    for d in (RELEASE_DIR, FAKE_PLUGIN_DIR):
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class ScriptedKeys:
@@ -62,7 +71,7 @@ class InstallFlowE2ETest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_e2e_"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.xp = self.tmp / "X-Plane 12"
-        (self.xp / "Resources" / "plugins" / "XPPython3").mkdir(parents=True)
+        (self.xp / "Resources" / "plugins").mkdir(parents=True)
         ac = self.xp / "Aircraft" / "ToLissA320_V1p3p2"
         objects = ac / "objects"
         objects.mkdir(parents=True)
@@ -138,6 +147,44 @@ class InstallFlowE2ETest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.obj_path.read_text(encoding="utf-8"), original)
         self.assertFalse((self.objects / "Photon Backup Files").exists())
+
+
+def _plain(s: str) -> str:
+    return re.sub(r"\033\[[0-9;]*m", "", s)
+
+
+class CompleteSummaryTests(unittest.TestCase):
+    def test_install_summary(self):
+        s = _plain(install._complete_summary({"name": "ToLiss A321"}, "durantula", True))
+        self.assertEqual(s, "ToLiss Photon v0.4 (Durantula) installed in ToLiss A321.")
+
+    def test_stock_install_summary(self):
+        s = _plain(install._complete_summary({"name": "ToLiss A320"}, "stock", True))
+        self.assertEqual(s, "ToLiss Photon v0.4 (Default) installed in ToLiss A320.")
+
+    def test_uninstall_summary(self):
+        s = _plain(install._complete_summary({"name": "ToLiss A319"}, "uninstall", True))
+        self.assertIn("removed from ToLiss A319", s)
+
+    def test_failure_summary(self):
+        s = _plain(install._complete_summary({"name": "x"}, "stock", False))
+        self.assertIn("did not complete", s)
+
+
+class ActionLabelTests(unittest.TestCase):
+    def test_parenthetical_is_dark_gray(self):
+        ac = {"photon": "0.3", "wing": "durantula", "stale": False}
+        label = install._action_label(ac, "durantula")
+        self.assertIn(tui.C.BR_BLACK, label)          # the note is dark gray
+        self.assertIn("v0.3 → v0.4", _plain(label))   # an upgrade reinstall
+
+    def test_switch_wing_label(self):
+        ac = {"photon": "0.4", "wing": "durantula", "stale": False}
+        self.assertIn("switch from Durantula", _plain(install._action_label(ac, "stock")))
+
+    def test_fresh_install_has_no_parenthetical(self):
+        ac = {"photon": None, "wing": None, "stale": False}
+        self.assertNotIn("(", install._action_label(ac, "stock"))
 
 
 if __name__ == "__main__":

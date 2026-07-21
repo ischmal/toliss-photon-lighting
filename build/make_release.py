@@ -2,22 +2,29 @@
 """
 Build the ToLiss Photon installer release bundle.
 
-Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the plugin,
-so the end-user installer never needs the DSL toolchain to *generate*
-lighting. The RealWings live patch is the one exception — it rewrites the
-user's already-installed RealWings mod files in place, at install time, so it
-can't be pre-baked the same way; a small copy of the DSL toolchain
-(build_objs.py, photon_dsl.py, patch_realwings.py + the two .phdsl files) is
-bundled under payload/dsl/ for that one purpose.
+Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the compiled
+native plugin, so the end-user installer never needs the DSL toolchain to
+*generate* lighting nor a C++ toolchain to build the plugin. The RealWings live
+patch is the one exception — it rewrites the user's already-installed RealWings
+mod files in place, at install time, so it can't be pre-baked the same way; a
+small copy of the DSL toolchain (build_objs.py, photon_dsl.py, patch_realwings.py
++ the two .phdsl files) is bundled under payload/dsl/ for that one purpose.
+
+The plugin is the native `.xpl` (no XPPython3/Python at runtime). It is a fat
+plugin: `--plugin-dir` points at a `ToLissPhoton/` folder holding one
+`<arch>/ToLissPhoton.xpl` per platform. Locally only the arch you compiled is
+present; a full multi-platform release is assembled in CI from the per-OS build
+matrix (all three `<arch>/` dirs merged into one folder) — see
+.github/workflows/release.yml and src/native/README.md.
 
 Usage:
-    python build/make_release.py [--out DIR] [--zip]
+    python build/make_release.py [--out DIR] [--plugin-dir DIR] [--zip]
 
 Output (default --out release/, gitignored like dist/):
     release/install.py
     release/installer/...
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
-    release/payload/plugin/PI_ToLissPhoton.py
+    release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl
     release/payload/dsl/...
 """
 from __future__ import annotations
@@ -32,12 +39,14 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "build"))
 sys.path.insert(0, str(REPO))
 import build_objs as B  # noqa: E402
-from installer.constants import VERSION, WINGS  # noqa: E402
+from installer.constants import PLUGIN_FOLDER, VERSION, WINGS, XPL_NAME  # noqa: E402
 
 INSTALLER_ENTRY = REPO / "install.py"
 INSTALLER_PKG = REPO / "installer"
 DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py"]
 DSL_CONFIG_FILES = ["lights.style.phdsl", "lights.layout.phdsl"]
+# Default location of the compiled native fat-plugin folder (CMake build output).
+DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
 
 
 def build_objs_payload(payload: Path):
@@ -51,11 +60,28 @@ def build_objs_payload(payload: Path):
             print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
 
 
-def stage_plugin(payload: Path):
-    dest = payload / "plugin" / "PI_ToLissPhoton.py"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(B.PLUGIN_SRC, dest)
-    print(f"  staged payload/{dest.relative_to(payload)}")
+def stage_plugin(payload: Path, plugin_dir: Path):
+    """Copy the compiled native fat-plugin folder into the bundle. Each platform's
+    build produces one <arch>/ToLissPhoton.xpl; a full release carries all three
+    side by side (CI merges the per-OS build matrix). Locally only the arch you
+    built is present — fine for a single-platform test bundle."""
+    if not plugin_dir.is_dir():
+        raise SystemExit(
+            f"native plugin folder not found: {plugin_dir}\n"
+            f"Build it first (see src/native/README.md), e.g.:\n"
+            f"  cmake --build src/native/build --config Release\n"
+            f"or pass --plugin-dir at a ToLissPhoton/ folder holding "
+            f"<arch>/{XPL_NAME} for each platform.")
+    arches = sorted(d.name for d in plugin_dir.iterdir()
+                    if d.is_dir() and (d / XPL_NAME).is_file())
+    if not arches:
+        raise SystemExit(f"no {XPL_NAME} found under {plugin_dir}/*/ — "
+                         f"build the native plugin first")
+    dest_root = payload / "plugin" / PLUGIN_FOLDER
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    shutil.copytree(plugin_dir, dest_root)
+    print(f"  staged payload/plugin/{PLUGIN_FOLDER}/ (arches: {', '.join(arches)})")
 
 
 def stage_dsl_toolchain(payload: Path):
@@ -98,6 +124,9 @@ def make_zip(out: Path) -> Path:
 def main():
     ap = argparse.ArgumentParser(description="Build the ToLiss Photon installer release bundle")
     ap.add_argument("--out", default="release", help="output dir (default: release/)")
+    ap.add_argument("--plugin-dir", default=str(DEFAULT_PLUGIN_DIR),
+                    help="native fat-plugin folder holding <arch>/%s "
+                         "(default: the CMake build output under src/native/build/)" % XPL_NAME)
     ap.add_argument("--zip", action="store_true", help="also zip the release folder")
     args = ap.parse_args()
 
@@ -108,10 +137,14 @@ def main():
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
+    plugin_dir = Path(args.plugin_dir)
+    if not plugin_dir.is_absolute():
+        plugin_dir = REPO / plugin_dir
+
     payload = out / "payload"
     print(f"building release v{VERSION} -> {out}")
     build_objs_payload(payload)
-    stage_plugin(payload)
+    stage_plugin(payload, plugin_dir)
     stage_dsl_toolchain(payload)
     stage_installer(out)
 

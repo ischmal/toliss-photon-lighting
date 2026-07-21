@@ -62,6 +62,19 @@ class MenuTests(unittest.TestCase):
                 with self.assertRaises(tui.Back):
                     tui.menu(0, "step", "prompt", ["one", "two"])
 
+    def test_index_sets_initial_highlight(self):
+        with _SwapReadKey([tui.KEY_ENTER]):  # ENTER selects the initially-lit row
+            with redirect_stdout(io.StringIO()):
+                choice = tui.menu(0, "step", "prompt", ["a", "b", "c"], index=2)
+        self.assertEqual(choice, 2)
+
+    def test_index_advances_off_a_disabled_initial_row(self):
+        with _SwapReadKey([tui.KEY_ENTER]):
+            with redirect_stdout(io.StringIO()):
+                choice = tui.menu(0, "step", "prompt", ["a", "b", "c"],
+                                  index=1, disabled={1})
+        self.assertNotEqual(choice, 1)
+
     def test_disabled_option_is_skipped_by_arrow_navigation(self):
         # start on 0, but 0 is disabled -> initial idx snaps to 1; DOWN then
         # skips disabled index 2, wrapping to 0... rather than depend on wrap

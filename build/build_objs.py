@@ -5,8 +5,9 @@ ToLiss Photon Lighting — OBJ generator (Phase II).
 Reads the declarative light config — the CSS-like DSL pair src/lights/lights.style.phdsl
 (appearance) + src/lights/lights.layout.phdsl (placement), parsed by photon_dsl.py; the
 legacy reference/legacy/lights.poc.jsonc is used only if the DSL files are absent
-— and emits the X-Plane lights_out3xx_XP12.obj files into dist/ (the installable
-X-Plane tree; `build` also stages the plugin there, so dist/ is a complete drop-in).
+— and emits the X-Plane lights_out3xx_XP12.obj files into dist/. dist/ is OBJs
+only; the plugin is now the native .xpl (src/native/), built and installed
+separately (see src/native/README.md), not staged here.
 
 Also verifies a generated airframe against the frozen hand-authored golden in
 reference/photon/ with a NORMALIZED (not byte-exact) compare: both sides are
@@ -24,8 +25,8 @@ additionally installs each built OBJ straight into the live X-Plane install, at
 <X-Plane 12>/Aircraft/ToLissA3XX*/objects/, which is auto-located. This replaces
 the old Link-Objects.ps1 symlink workflow (removed): `build --write`, or
 `watch.py --write` to do it on every save. Any leftover symlink from that
-workflow is replaced with a real file. The plugin is only ever staged into
-dist/; copy it into Resources/plugins/PythonPlugins/ yourself.
+workflow is replaced with a real file. This installs OBJs only — the native
+plugin (src/native/) is built and installed on its own (src/native/README.md).
 
 `--wing realwings` with `--write` also patches the installed RealWings mod's
 baked wingtip lights in place (patch_realwings.py) — one command, no separate
@@ -44,10 +45,12 @@ See docs/design.md for the data model and docs/dsl.md for the config syntax.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -56,10 +59,8 @@ CONFIG = REPO / "reference" / "legacy" / "lights.poc.jsonc"  # legacy fallback
 CONFIG_STYLE = REPO / "src" / "lights" / "lights.style.phdsl"
 CONFIG_LAYOUT = REPO / "src" / "lights" / "lights.layout.phdsl"
 
-DIST = REPO / "dist"                       # generated installable tree
+DIST = REPO / "dist"                       # generated installable tree (OBJs only)
 GOLDEN = REPO / "reference" / "photon"     # frozen hand-authored `check` reference
-PLUGIN_SRC = REPO / "src" / "plugin" / "PI_ToLissPhoton.py"
-PLUGIN_DEST = Path("Resources") / "plugins" / "PythonPlugins" / "PI_ToLissPhoton.py"
 
 # airframe key -> (aircraft folder in the X-Plane tree, obj filename)
 OBJ_PATH = {
@@ -377,10 +378,18 @@ class Emitter:
         keyframes are frozen rigging lifted from ToLiss and are not what varies
         between wing mods; a mod that needs different *rotation* is what the
         per-variant mount snippet slot is still there for."""
-        off = fixture.get("offset")
+        off = pick_side(fixture.get("offset"), side or "port")
         if not off:
             return body
-        v = [rnd(x) for x in pick_side(off, side or "port")]
+        if isinstance(off, dict):
+            # a @fence/@sharklet (wingtip) offset is patch_realwings-only — it
+            # keys the RealWings mod-OBJ correction and has no meaning on a
+            # fixture the emitter actually emits (which OBJ would it pick?).
+            raise SystemExit(
+                "offset: @fence/@sharklet (wingtip) conditions are only valid "
+                "on the RealWings-omitted wingtip fixtures (wing_nav / "
+                f"wing_strobe under @realwings); an emitted fixture resolved {off!r}")
+        v = [rnd(x) for x in off]
         if mirror and side == "starboard":
             v = [-v[0], v[1], v[2]]
         if v == [0.0, 0.0, 0.0]:
@@ -552,6 +561,47 @@ def _find_realwings_dir(airframe):
     return rw, None
 
 
+# CRASH LESSON (2026-07-20): watch.py --write auto-reloads the aircraft (via
+# PI_PhotonDevReload) right after installing a rebuild, and that reload's
+# sim/operation/reload_aircraft call runs SYNCHRONOUSLY, reading this exact OBJ
+# (and, for --wing realwings, the RealWings mod's Main.obj) off disk while it
+# runs. If the NEXT edit is saved fast enough, watch.py's next cycle can start
+# rewriting that same file WHILE X-Plane is still mid-read of the previous one.
+# A plain write (the old `shutil.copyfile` / `path.write_text` here) can then
+# hand X-Plane a torn/half-written file — not a parse error, a native crash in
+# X-Plane's OBJ8 loader (reported: worked N times, crashed on the next save;
+# N varied because it depends on save-cadence vs. the reload's variable
+# duration). atomic_write_bytes below removes the precondition entirely: a
+# concurrent reader always gets the complete old file or the complete new one,
+# never a mix, regardless of timing. (The plugin's own state guard — Trigger()
+# ignoring a retrigger while state != ST_IDLE — prevents a second REENTRANT
+# reload_aircraft call, but does nothing to protect the file bytes themselves;
+# that's this function's job.)
+def atomic_write_bytes(dest: Path, data: bytes, attempts: int = 20,
+                       retry_delay: float = 0.15) -> None:
+    """Write `data` to `dest` via a same-directory temp file + os.replace, so it
+    can never be observed half-written. Windows can transiently deny a rename
+    over a file another process still has open for reading (no
+    FILE_SHARE_DELETE) — that's the expected, self-resolving case here (X-Plane's
+    read finishes well under a second), so failures are retried briefly rather
+    than surfaced as an error; the analogous transient WinError 5 on rmtree is
+    the same story (see make_release.py's OneDrive/AV note)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    err = None
+    for _ in range(attempts):
+        try:
+            os.replace(tmp, dest)
+            return
+        except OSError as e:
+            err = e
+            time.sleep(retry_delay)
+    with contextlib.suppress(OSError):
+        tmp.unlink()
+    raise err
+
+
 def _write_live(airframe, src: Path):
     """Copy a built OBJ into the airframe's installed objects/ folder, so a build
     lands in the sim without any linking step. Returns True if it was written."""
@@ -562,11 +612,12 @@ def _write_live(airframe, src: Path):
     dest = objects / src.name
     # A leftover symlink from the retired Link-Objects.ps1 workflow points back
     # at the repo (and, since the dist/ restructure, usually points at a path
-    # that no longer exists). Drop it and write a real file in its place.
+    # that no longer exists); atomic_write_bytes's os.replace overwrites the
+    # symlink's own directory entry (never follows it), so no separate unlink
+    # is needed — just note it for the log.
     if dest.is_symlink():
         print(f"  - {airframe}: replacing stale symlink at {dest.name}")
-        dest.unlink()
-    shutil.copyfile(src, dest)
+    atomic_write_bytes(dest, src.read_bytes())
     print(f"  -> {dest}")
     return True
 
@@ -586,16 +637,7 @@ def _patch_realwings_after_build(targets, deploying):
             print(f"\n# {af}: RealWings patch skipped — {reason}")
             continue
         print(f"\n# {af}: patching RealWings wingtip lights under {rw}")
-        P.run(rw)
-
-
-def _stage_plugin(root: Path):
-    """Copy the plugin source into the built tree so dist/ is a complete drop-in.
-    dist/ is generated end-to-end; the plugin is edited at src/plugin/."""
-    dest = root / PLUGIN_DEST
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(PLUGIN_SRC, dest)
-    return dest
+        P.run(rw, airframe=af)
 
 
 def cmd_build(args):
@@ -607,17 +649,13 @@ def cmd_build(args):
         folder, fname = OBJ_PATH[af]
         # mirror the X-Plane tree: <root>/A320/objects/lights_out320_XP12.obj
         dest = root / folder / "objects" / fname if not args.flat else root / fname
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(text.encode("utf-8"))
+        atomic_write_bytes(dest, text.encode("utf-8"))
         print(f"wrote {_rel(dest)} ({len(text)} bytes)")
         if args.write:
             _write_live(af, dest)
     if not args.flat:
-        print(f"staged {_rel(_stage_plugin(root))}")
-        if args.write:
-            print("note: the plugin is staged in dist/ only — copy it into "
-                  "<X-Plane>/Resources/plugins/PythonPlugins/ yourself (and delete "
-                  "the stale __pycache__ there).")
+        print("note: dist/ holds OBJs only — the plugin is now the native .xpl "
+              "(src/native/), built + installed separately (see src/native/README.md).")
     if args.wing == "realwings":
         _patch_realwings_after_build(targets, deploying=bool(args.write))
 
@@ -643,7 +681,7 @@ def cmd_patch_realwings(args):
                              "point at one explicitly, or set XPLANE_ROOT.")
     for af, root in roots:
         print(f"\n# {af}: {root}")
-        P.run(root, dry=args.dry_run, reverse=args.reverse)
+        P.run(root, airframe=af, dry=args.dry_run, reverse=args.reverse)
     return 0
 
 

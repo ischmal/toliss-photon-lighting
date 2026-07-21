@@ -133,6 +133,22 @@ airframe a320 {
     mirror: true;
     omit: realwings;
     mount: wing_left;  @starboard { mount: wing_right; }
+    // RealWings bakes its own wingtip strobes (hence omit: realwings). This
+    // offset corrects THEIR misplacement in the mod's OBJ — read by
+    // patch_realwings.py and added to the baked position (X mirrored per side).
+    // Not emitted into lights_out; stock/durantula are unaffected. RealWings
+    // ships CEO and NEO as separate OBJs with different placement: @fence is the
+    // CEO wing (reported too high and off on X — TODO: measure in-sim), the
+    // @realwings base is NEO/sharklet, which is correct as baked (leave 0).
+    offset: 0 0 0;                          // stock/durantula: no shift
+    @realwings {
+      offset: 0 0 0;                        // NEO / sharklet OBJ: correct as baked
+      // CEO OBJ: RealWings bakes nav & strobe in each other's spots. This offset
+      // moves the strobe onto the (old) nav spot; wing_nav's @fence does the
+      // reverse — together they swap the two. = (nav_baked - strobe_baked) + the
+      // fine-tune that had been on wing_nav.  X: Y: Up (+) / Down (-) Z:
+      @fence { offset: -0.078 -0.041 0.138; }
+    }
     group fence {
       hide: 1 1 anim/SHARK;
       pos: -0.29 0.031 -1.008;
@@ -155,6 +171,18 @@ airframe a320 {
     mirror: true;
     omit: realwings;
     mount: wing_left;  @starboard { mount: wing_right; }
+    // Corrects RealWings' baked wingtip nav placement — see wing_strobe above.
+    // @fence = CEO (TODO measure); @realwings base = NEO/sharklet (correct, 0).
+    // Read by patch_realwings.py, not emitted here.
+    offset: 0 0 0;                          // stock/durantula: no shift
+    @realwings {
+      offset: 0 0 0;                        // NEO / sharklet OBJ: correct as baked
+      // CEO OBJ: RealWings bakes nav & strobe in each other's spots. This offset
+      // moves the nav onto the (old) strobe spot; wing_strobe's @fence does the
+      // reverse — together they swap the two. = (strobe_baked - nav_baked) + the
+      // fine-tune that had been on wing_strobe.  X: Y: Up (+) / Down (-) Z:
+      @fence { offset: 0.028 -0.024 -0.038; }
+    }
     group fence {
       hide: 1 1 anim/SHARK;
       pos: -0.194 0.021 -1.205;

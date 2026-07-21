@@ -17,17 +17,14 @@ _A330-900 support is in progress. A340 support is planned, but I unforunately do
 **1. Download the latest release archive from the [Releases](../../releases) page and unzip it.**
 * The repository itself does not contain ready-to-install files — they are generated (see [Building from source](#building-from-source)).
 
-**2. Download and install [XPPython3 v4.7](https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html)**
-* After installing for the first time, open X-Plane 12 and load into the simulator to complete the first-time install process.
-
-**3. Copy the `Resources` folder into your root `X-Plane 12` directory.**
+**2. Copy the `Resources` folder into your root `X-Plane 12` directory.**
 * When asked if you want to overwrite existing files, select **Yes**.
-* This installs the Python script that enables light selection and controls beacon/strobe timing.
+* This installs the ToLiss Photon plugin, which enables light selection and controls beacon/strobe timing. It's a native plugin — **no XPPython3 or other add-on is required**.
 
-**4. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
+**3. Copy the `objects` folder for each aircraft into the corresponding `X-Plane 12\Aircraft\ToLissA3__V_p_p_` folder.**
 * When asked if you want to overwrite existing files, select **Yes**.
 
-**5. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
+**4. Reload or relaunch in a supported ToLiss aircraft. A ToLiss Photon configuration sub-menu should now appear in the Plugins menu.**
 
 ## Building from source
 The aircraft `.obj` files are generated from a small CSS-like config, not edited by hand.
@@ -38,9 +35,11 @@ python build/build_objs.py check          # verify against the reference OBJs
 python build/watch.py                     # rebuild on save
 ```
 
-`dist/` is what you install (or zip for a release). Everything hand-authored lives in
-`src/` — the light config in [src/lights/](src/lights/) and the plugin in
-[src/plugin/](src/plugin/). See [docs/dsl.md](docs/dsl.md) for the config syntax.
+`dist/` holds the generated OBJs you install (or zip for a release). Everything
+hand-authored lives in `src/` — the light config in [src/lights/](src/lights/) and the
+native plugin (compiled to a `.xpl`) in [src/native/](src/native/). See
+[docs/dsl.md](docs/dsl.md) for the config syntax and [src/native/README.md](src/native/README.md)
+for building the plugin.
 
 # Features
 * Complete rework of exterior lighting for supported ToLiss aircraft
@@ -112,13 +111,11 @@ To make billboard lights convincing, they need to have a defined direction. When
 
 ToLiss Photon modifies every single light in the .OBJ and specifies a light direction for everything except the upper and lower beacons (as they are truly visible from 360 degrees). It also uses custom DataRefs to offer a different appearance for halogen/Xenon lights and LED lights.
 
-The strobe and beacon flashing is controlled using a Lua script. The script has a function that executes every frame and overrides specific DataRefs set by ToLiss that control light intensity for both the beacon and the strobe. By default, ToLiss uses a sine wave (or similar equation) to control the brightness of the beacon, which means it smoothly fades in and out. While this kind of fading _can_ occur with halogen bulbs as they quickly warm and cool, the beacon is not halogen. It's either a Xenon flash-tube or LED. Neither option produces anything like the perceptible fade-in/fade-out you see.
+The strobe and beacon flashing is controlled by the ToLiss Photon plugin. It runs a function every frame that overrides specific DataRefs set by ToLiss that control light intensity for both the beacon and the strobe. By default, ToLiss uses a sine wave (or similar equation) to control the brightness of the beacon, which means it smoothly fades in and out. While this kind of fading _can_ occur with halogen bulbs as they quickly warm and cool, the beacon is not halogen. It's either a Xenon flash-tube or LED. Neither option produces anything like the perceptible fade-in/fade-out you see.
 
 ### Components
 * Aircraft .obj files: Modifies light colors, positioning, and appearance.
-* Lua (via FlyWithLua): Controls beacon and flash behavior.
-* Python (via XPPython3): Used for the GUI, Plugins sub-menu, and profile saving/loading.
-  * _I would have preferred to just use Lua, but FlyWithLua cannot create usable DataRefs for the .obj files nor can it create a sub-menu in Plugins._
+* ToLiss Photon plugin: Controls beacon/strobe flash behavior, provides the custom DataRefs the .obj files read for their halogen/Xenon vs. LED appearance, and adds the Plugins sub-menu and per-livery profile saving/loading. It's a compiled native plugin, so it needs **no XPPython3, FlyWithLua, or other add-on**.
 
 ## Other Recommended Mods
 * [KOSP Project](https://store.x-plane.org/KOSP-PROJECT--A319-A320-A321-Full-Soundscape_p_1773.html) for audio

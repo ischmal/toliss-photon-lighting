@@ -33,7 +33,12 @@ WING_ACTION_LABEL = {
 
 BACKUP_DIRNAME = "Photon Backup Files"
 MANIFEST_NAME = "photon_manifest.json"
-PLUGIN_REL = Path("Resources") / "plugins" / "PythonPlugins" / "PI_ToLissPhoton.py"
 
-XPPYTHON3_URL = "https://xppython3.readthedocs.io/en/latest/usage/installation_plugin.html"
+# The native plugin is a compiled fat-plugin folder holding one .xpl per platform:
+#   Resources/plugins/ToLissPhoton/<arch>/ToLissPhoton.xpl   (arch = win_x64|mac_x64|lin_x64)
+# X-Plane loads the subfolder matching the host OS. No XPPython3/Python needed.
+PLUGIN_FOLDER = "ToLissPhoton"
+XPL_NAME = "ToLissPhoton.xpl"
+PLUGIN_DIR_REL = Path("Resources") / "plugins" / PLUGIN_FOLDER
+
 PHOTON_URL = "https://github.com/"  # placeholder — the eventual release page

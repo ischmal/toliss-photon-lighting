@@ -1,7 +1,7 @@
-"""Detection: X-Plane root candidates, XPPython3 presence, aircraft scan, and
-Photon install-status probing. Pure(ish) functions over the filesystem so they
-can be unit-tested against a fake tree without a terminal — no TUI imports
-here.
+"""Detection: X-Plane root candidates, aircraft scan, and Photon install-status
+probing. Pure(ish) functions over the filesystem so they can be unit-tested
+against a fake tree without a terminal — no TUI imports here. (The native plugin
+needs no XPPython3, so there is no runtime-prerequisite check anymore.)
 """
 from __future__ import annotations
 
@@ -134,11 +134,6 @@ def xplane_candidates(log=None) -> list[Path]:
             consider(base / name, "common install dir")
 
     return found
-
-
-def detect_xppython3(root) -> bool:
-    """XPPython3 ships as Resources/plugins/XPPython3/."""
-    return (Path(root) / "Resources" / "plugins" / "XPPython3").is_dir()
 
 
 def xplane_running() -> bool:

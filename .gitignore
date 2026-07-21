@@ -25,3 +25,9 @@ CLAUDE.md
 # ── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+
+# ── Native plugin (.xpl) ────────────────────────────────────────────────────
+# The X-Plane SDK is a third-party download (developer.x-plane.com), not ours to
+# commit; CMake build tree is generated. See src/native/README.md.
+src/native/SDK/
+src/native/build/
