@@ -67,6 +67,19 @@ OBJ_PATH = {
     "a319": ("A319", "lights_out319_XP12.obj"),
     "a320": ("A320", "lights_out320_XP12.obj"),
     "a321": ("A321", "lights_out321_XP12.obj"),
+    "a339": ("A339", "ExternalLights_XP12.obj"),
+}
+
+# airframe key -> supported wing-mod variants for that airframe. Source of truth
+# for which --wing values may be built/installed: resolve_mount()'s fallback to
+# an arbitrary mount variant when the requested one is missing would otherwise
+# silently ship stock content for an airframe with no such wing mod (e.g. a339
+# has no Durantula/RealWings variants at all) instead of erroring.
+SUPPORTED_WINGS = {
+    "a319": ("stock", "durantula", "realwings"),
+    "a320": ("stock", "durantula", "realwings"),
+    "a321": ("stock", "durantula", "realwings"),
+    "a339": ("stock",),
 }
 
 HEADER = "I\n800\nOBJ\n\nGLOBAL_cockpit_lit\nPOINT_COUNTS\t0\t0\t0\t0\n"
@@ -476,6 +489,20 @@ def parse_records(text: str):
     return records
 
 
+def project_positions(records):
+    """Collapse parse_records() output to a SET of (class, pos, index, dir),
+    dropping gate_path/rgb/intensity/cone and multiplicity. For `check --against
+    --positions-only`: eyeballing "does every original light have a Photon
+    counterpart at the same place", independent of gating structure (Photon wraps
+    every fixture in an extra ToLissPhoton/exterior/<category> ANIM_hide the
+    original file never had, which would show up as an all-gates-differ false
+    positive under the normal gate-path-sensitive compare) or appearance tuning
+    (each Photon light also emits twice — once per halogen/xenon and led branch —
+    which a set naturally collapses to one)."""
+    return {(cls, pos, index, d)
+            for (gate, cls, pos, rgb, index, inten, d, cone) in records}
+
+
 def get_reference(airframe: str) -> str:
     """The canonical Photon reference is the frozen hand-authored OBJ in
     reference/photon/ — a checked-in fixture, deliberately NOT the build output.
@@ -504,8 +531,11 @@ AIRCRAFT_GLOB = {
     "a319": "ToLissA319*",
     "a320": "ToLissA320*",
     "a321": "ToLissA321*",
+    "a339": "ToLissA339*",
 }
-# airframe -> RealWings mod subfolder under the aircraft's objects/
+# airframe -> RealWings mod subfolder under the aircraft's objects/. No entry for
+# an airframe means it has no wing mods at all (e.g. a339) — _find_realwings_dir
+# reports that as a normal "skip", not a crash.
 REALWINGS_DIR = {
     "a319": "RealWings319",
     "a320": "RealWings320",
@@ -550,10 +580,12 @@ def _find_aircraft_dir(airframe):
 def _find_realwings_dir(airframe):
     """Auto-locate an airframe's installed RealWings mod folder in X-Plane.
     Returns (path, None) on success or (None, reason) if it can't be found."""
+    rw_folder = REALWINGS_DIR.get(airframe)
+    if rw_folder is None:
+        return None, f"{airframe} has no wing mods (no RealWings variant exists for it)"
     objects, reason = _find_aircraft_dir(airframe)
     if objects is None:
         return None, reason
-    rw_folder = REALWINGS_DIR[airframe]
     rw = objects / rw_folder
     if not rw.is_dir():
         return None, (f"{rw_folder}/ not installed in {objects.parent.name} "
@@ -642,7 +674,14 @@ def _patch_realwings_after_build(targets, deploying):
 
 def cmd_build(args):
     cfg = load_config(wing=args.wing)
-    targets = [args.airframe] if args.airframe else list(OBJ_PATH)
+    if args.airframe:
+        if args.wing not in SUPPORTED_WINGS[args.airframe]:
+            raise SystemExit(
+                f"{args.airframe} has no {args.wing!r} wing-mod variant "
+                f"(supported: {', '.join(SUPPORTED_WINGS[args.airframe])})")
+        targets = [args.airframe]
+    else:
+        targets = [af for af in OBJ_PATH if args.wing in SUPPORTED_WINGS[af]]
     root = (REPO / args.out) if args.out else DIST
     for af in targets:
         text = Emitter(cfg, af, args.wing).emit()
@@ -695,9 +734,38 @@ def cmd_check(args):
     cfg = load_config(wing=args.wing)
     af = args.airframe or "a320"
     gen_text = Emitter(cfg, af, args.wing).emit()
-    ref_text, ref_src = get_reference(af)
     gen = parse_records(gen_text)
+
+    if args.against:
+        ref_path = Path(args.against)
+        if not ref_path.is_file():
+            raise SystemExit(f"--against {ref_path}: not a file")
+        ref_text = ref_path.read_text(encoding="utf-8", errors="replace")
+        ref_src = str(_rel(ref_path))
+    else:
+        if args.positions_only:
+            raise SystemExit("--positions-only only makes sense together with --against")
+        ref_text, ref_src = get_reference(af)
     ref = parse_records(ref_text)
+
+    if args.positions_only:
+        proj_gen, proj_ref = project_positions(gen), project_positions(ref)
+        only_gen, only_ref = proj_gen - proj_ref, proj_ref - proj_gen
+        print(f"airframe {af} — positions-only compare against: {ref_src}")
+        print(f"  reference lights : {len(proj_ref)}")
+        print(f"  generated lights : {len(proj_gen)}")
+        print(f"  matched          : {len(proj_gen & proj_ref)}")
+        print(f"  only in generated (BUGS?)                : {len(only_gen)}")
+        print(f"  only in reference (missing from Photon?) : {len(only_ref)}")
+        if only_gen:
+            print("\n  --- only in GENERATED ---")
+            for cls, pos, index, d in sorted(only_gen):
+                print(f"    {cls} pos{pos} i{index} dir{d}")
+        if only_ref:
+            print("\n  --- only in REFERENCE (not yet in Photon?) ---")
+            for cls, pos, index, d in sorted(only_ref):
+                print(f"    {cls} pos{pos} i{index} dir{d}")
+        return 0 if not only_gen else 1
 
     if args.category:
         def keep(rec):
@@ -748,6 +816,14 @@ def main():
                    help="wing-mod variant")
     c.add_argument("--category", help="only compare lights under this category dataref")
     c.add_argument("-v", "--verbose", action="store_true", help="list only-in-reference too")
+    c.add_argument("--against", help="compare against an arbitrary OBJ file instead of the "
+                                     "frozen reference/photon golden (e.g. a .scratch/ "
+                                     "original) — for authoring an airframe that has no "
+                                     "golden yet")
+    c.add_argument("--positions-only", action="store_true",
+                   help="with --against, ignore class/rgb/intensity/cone and only compare "
+                        "(class, pos, index, dir) — for 'did I transcribe every light at "
+                        "the right place', independent of Photon's own appearance tuning")
     c.set_defaults(func=cmd_check)
     p = sub.add_parser("patch-realwings",
                        help="patch the installed RealWings mod's baked wingtip "

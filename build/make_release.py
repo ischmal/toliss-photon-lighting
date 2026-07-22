@@ -5,10 +5,12 @@ Build the ToLiss Photon installer release bundle.
 Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the compiled
 native plugin, so the end-user installer never needs the DSL toolchain to
 *generate* lighting nor a C++ toolchain to build the plugin. The RealWings live
-patch is the one exception — it rewrites the user's already-installed RealWings
-mod files in place, at install time, so it can't be pre-baked the same way; a
-small copy of the DSL toolchain (build_objs.py, photon_dsl.py, patch_realwings.py
-+ the two .phdsl files) is bundled under payload/dsl/ for that one purpose.
+patch is one exception — it rewrites the user's already-installed RealWings mod
+files in place, at install time, so it can't be pre-baked the same way; the
+skin-glow redirect (patch_glow.py) is another, rewriting ToLiss's own mesh OBJs in
+place. A small copy of the DSL toolchain (build_objs.py, photon_dsl.py,
+patch_realwings.py, patch_glow.py + the two .phdsl files) is bundled under
+payload/dsl/ for those purposes.
 
 The plugin is the native `.xpl` (no XPPython3/Python at runtime). It is a fat
 plugin: `--plugin-dir` points at a `ToLissPhoton/` folder holding one
@@ -43,16 +45,25 @@ from installer.constants import PLUGIN_FOLDER, VERSION, WINGS, XPL_NAME  # noqa:
 
 INSTALLER_ENTRY = REPO / "install.py"
 INSTALLER_PKG = REPO / "installer"
-DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py"]
+DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py",
+                       "patch_glow.py"]
 DSL_CONFIG_FILES = ["lights.style.phdsl", "lights.layout.phdsl"]
 # Default location of the compiled native fat-plugin folder (CMake build output).
 DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
 
 
 def build_objs_payload(payload: Path):
+    """Builds every (airframe, wing) combo that airframe actually supports —
+    B.SUPPORTED_WINGS, not a blind WINGS x OBJ_PATH cross product. Without that
+    guard, an airframe with no wing mods (e.g. a339) would still build a
+    "durantula"/"realwings" OBJ: resolve_mount()'s fallback to whatever mount
+    variant exists would silently emit a byte-identical copy of the stock OBJ
+    under those names instead of erroring."""
     for wing in WINGS:
         cfg = B.load_config(wing=wing)
         for airframe, (_folder, fname) in B.OBJ_PATH.items():
+            if wing not in B.SUPPORTED_WINGS[airframe]:
+                continue
             text = B.Emitter(cfg, airframe, wing).emit()
             dest = payload / "objs" / wing / fname
             dest.parent.mkdir(parents=True, exist_ok=True)

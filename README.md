@@ -10,8 +10,9 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 * **ToLiss Airbus A319**
 * **ToLiss Airbus A320** (NEO & CEO)
 * **ToLiss Airbus A321** (CEO & NEO)
-  
-_A330-900 support is in progress. A340 support is planned, but I unforunately don't own it._
+* **ToLiss Airbus A330-900** _(in testing — not yet released; no wing-mod support, since none exist for this airframe)_
+
+_A340 support is planned, but I unfortunately don't own it._
 
 # Installation
 **1. Download the latest release archive from the [Releases](../../releases) page and unzip it.**

@@ -7,7 +7,9 @@ at a fixture):
 * **Bundled** (a shipped release): read the pre-built `payload/` directory that
   sits next to `install.py`, resolved relative to this file — never CWD, so the
   installer runs from any directory (Downloads, a USB stick, or inside
-  X-Plane/Resources/plugins/).
+  X-Plane/Resources/plugins/). A frozen **loose** snapshot instead reads a
+  `data/` folder next to the executable (same layout) — see
+  `_default_payload_dir` and `build/make_exe.py --loose`.
 
 * **Dev tree** (running `install.py` straight from the repo, where no `payload/`
   has been built): fall back to the repo's own build system — generate each OBJ
@@ -32,12 +34,33 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from installer.constants import AIRFRAMES, PLUGIN_FOLDER, XPL_NAME
+from installer.constants import AIRFRAMES, PLUGIN_FOLDER, WINGS_FOR, XPL_NAME
 
 # installer/payload.py -> installer/ -> the dir holding install.py. In a release
 # that dir holds payload/; in the repo it *is* the repo root (holds build/, src/).
 ROOT = Path(__file__).resolve().parent.parent
-PAYLOAD_DIR = ROOT / "payload"
+
+
+def _default_payload_dir() -> Path:
+    """Where the installable artifacts live by default.
+
+    A frozen **loose** snapshot (`build/make_exe.py --loose`) ships the installer
+    and its files as separate items: `<installer>.exe` beside a plainly-named
+    `data/` folder. When such a folder sits next to the executable it wins, so the
+    exe reads the real files on disk (the tester can see/swap them). Absent that,
+    fall back to `ROOT/payload`: for a frozen **self-contained** exe that is the
+    copy PyInstaller embedded under its extraction dir; running from source (or
+    under tests, which repoint PAYLOAD_DIR at a fixture) it is the repo/release
+    root. `getattr(sys, "frozen", ...)` is only ever True in a PyInstaller build,
+    so source and test runs always take the `ROOT/payload` branch unchanged."""
+    if getattr(sys, "frozen", False):
+        loose = Path(sys.executable).resolve().parent / "data"
+        if loose.is_dir():
+            return loose
+    return ROOT / "payload"
+
+
+PAYLOAD_DIR = _default_payload_dir()
 
 
 class PayloadError(Exception):
@@ -81,7 +104,17 @@ def obj_path(wing: str, airframe: str) -> Path:
 def obj_text(wing: str, airframe: str) -> str:
     """The OBJ text to install: read from the bundle, or generated on the fly
     from the DSL in a dev checkout. Both go through the same build_objs.Emitter,
-    so the two modes are byte-identical."""
+    so the two modes are byte-identical.
+
+    Checked against WINGS_FOR before either path runs: in bundled mode a missing
+    file already fails via obj_path(), but the dev-mode path below calls the
+    Emitter directly, and resolve_mount()'s fallback to whatever mount variant
+    exists would otherwise silently emit an airframe's stock content under an
+    unsupported wing's name (e.g. a339 has no Durantula/RealWings mount at all)
+    instead of erroring — this keeps both modes equally strict."""
+    if wing not in WINGS_FOR[airframe]:
+        raise PayloadError(f"{airframe} has no {wing!r} wing-mod variant "
+                           f"(supported: {', '.join(WINGS_FOR[airframe])})")
     if _bundled():
         return obj_path(wing, airframe).read_text(encoding="utf-8", errors="replace")
     repo = _dev_repo()

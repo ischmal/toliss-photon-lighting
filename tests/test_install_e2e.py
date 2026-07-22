@@ -27,7 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import install
-from installer import detect, payload, tui
+from installer import actions, detect, payload, tui
 
 RELEASE_DIR: Path | None = None
 FAKE_PLUGIN_DIR: Path | None = None
@@ -54,6 +54,11 @@ def tearDownModule():
     for d in (RELEASE_DIR, FAKE_PLUGIN_DIR):
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
+
+
+class _NullLog:
+    def write(self, msg, level="INFO"):
+        pass
 
 
 class ScriptedKeys:
@@ -147,6 +152,105 @@ class InstallFlowE2ETest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.obj_path.read_text(encoding="utf-8"), original)
         self.assertFalse((self.objects / "Photon Backup Files").exists())
+
+
+class A339ActionScreenTests(unittest.TestCase):
+    """a339 (A330-900) has no wing mods — screen_action must build its option
+    list from WINGS_FOR[airframe], not the global WINGS, so Durantula/RealWings
+    never appear for it."""
+
+    def test_action_screen_offers_only_stock_and_uninstall(self):
+        ac = {"folder": "ToLissA339_V1p0p4", "airframe": "a339", "ac_ver": "1.0.4",
+              "name": "ToLiss A330-900", "photon": "0.4", "wing": "stock", "stale": False}
+        old_read_key, old_log = tui.read_key, install.LOG
+        # If Durantula/RealWings leaked in, option 2 would be "Durantula" and
+        # this key sequence would select the wrong action.
+        tui.read_key = ScriptedKeys(["2"])
+        install.LOG = _NullLog()
+        try:
+            with redirect_stdout(io.StringIO()):
+                action = install.screen_action(ac)
+        finally:
+            tui.read_key = old_read_key
+            install.LOG = old_log
+        self.assertEqual(action, "uninstall")
+
+
+class CloseXPlaneWaitTests(unittest.TestCase):
+    """screen_check_not_running now holds until X-Plane is closed and then
+    proceeds on its own, rather than erroring out mid-install. Regression guard
+    for the reported 'installer just failed: file in use' bug: auto-poll while
+    the sim is up, ESC backs out a step, ENTER overrides."""
+
+    def setUp(self):
+        self._old = dict(running=detect.xplane_running,
+                         current=actions.plugin_is_current,
+                         rkt=tui.read_key_timeout, log=install.LOG)
+        install.LOG = _NullLog()
+        # Defaults: the plugin differs (so the wait is genuinely needed) and no
+        # key is pressed (timeout) — each test overrides what it exercises.
+        actions.plugin_is_current = lambda root: False
+        tui.read_key_timeout = lambda timeout: None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        detect.xplane_running = self._old["running"]
+        actions.plugin_is_current = self._old["current"]
+        tui.read_key_timeout = self._old["rkt"]
+        install.LOG = self._old["log"]
+
+    def _running_then_closed(self, values):
+        seq = list(values)
+        detect.xplane_running = lambda: seq.pop(0) if seq else False
+
+    def _run(self, action="stock"):
+        with redirect_stdout(io.StringIO()):
+            return install.screen_check_not_running({}, action, Path("/xp"))
+
+    def test_returns_automatically_once_xplane_closes(self):
+        self._running_then_closed([True, True, False])
+        polls = {"n": 0}
+
+        def _rkt(timeout):
+            polls["n"] += 1
+            return None  # nothing pressed — the loop rechecks the process
+
+        tui.read_key_timeout = _rkt
+        self._run()                       # returns without raising
+        self.assertGreaterEqual(polls["n"], 1)  # it polled while running
+
+    def test_esc_backs_out_a_step(self):
+        detect.xplane_running = lambda: True
+        tui.read_key_timeout = lambda timeout: tui.KEY_ESC
+        with self.assertRaises(tui.Back):
+            self._run()
+
+    def test_enter_continues_anyway(self):
+        detect.xplane_running = lambda: True
+        tui.read_key_timeout = lambda timeout: tui.KEY_ENTER
+        self._run()  # returns (no raise) despite X-Plane still "running"
+
+    def test_no_wait_when_plugin_already_current(self):
+        detect.xplane_running = lambda: True
+        actions.plugin_is_current = lambda root: True
+        polls = {"n": 0}
+        tui.read_key_timeout = lambda timeout: polls.__setitem__("n", polls["n"] + 1)
+        self._run()
+        self.assertEqual(polls["n"], 0)  # OBJ-only reinstall never enters the wait
+
+    def test_uninstall_waits_even_if_plugin_current(self):
+        # uninstall may remove the plugin, so it must still wait for the sim.
+        self._running_then_closed([True, False])
+        actions.plugin_is_current = lambda root: True
+        polls = {"n": 0}
+
+        def _rkt(timeout):
+            polls["n"] += 1
+            return None
+
+        tui.read_key_timeout = _rkt
+        self._run(action="uninstall")
+        self.assertGreaterEqual(polls["n"], 1)
 
 
 def _plain(s: str) -> str:

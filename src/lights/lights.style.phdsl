@@ -204,6 +204,14 @@ light taxi_pm {
   cone: 0.866;
   dir: 0.087 -0.996 0;
 }
+light taxi_bb {
+  class: airplane_taxi_bb;
+  color: white;
+  intensity: 8000;
+  @led { intensity: 10000; }
+  cone: 0.2;
+  dir: 0.087 -0.996 0;
+}
 light rwy_bb {
   class: airplane_generic_bb;
   color: white;
@@ -230,4 +238,18 @@ light wing_pm {
   intensity: 30000;
   @led { intensity: 40000; }
   cone: 0.924;
+}
+// A339 wing/ice-inspection scan lights are fuselage-mounted and must throw a
+// FOCUSED beam onto the wing. Reusing wing_pm's near-omni cone (0.924) sprayed
+// the adjacent fuselage instead — hence a dedicated type: much narrower cone +
+// a downward tilt so the beam lands on the wing's upper surface. The dir is
+// mount-local (the scan mounts rotate it outboard/aft about vertical, which
+// leaves the -y downtilt intact). All three knobs — cone, downtilt, intensity
+// — are starting points; tune in-sim.
+light wing_scan_pm extends wing_pm {
+  cone: 0.6;
+  dir: 0 -0.2 -0.98;
+}
+light wing_scan_bb extends wing_bb {
+  dir: 0 -0.2 -0.98;
 }

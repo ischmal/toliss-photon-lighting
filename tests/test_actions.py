@@ -10,6 +10,7 @@ Run: python -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -74,9 +75,10 @@ class FakeAircraft:
     original (non-Photon) lights_out OBJ already in place, as if freshly
     installed from ToLiss."""
 
-    def __init__(self, tmp: Path, airframe="a320", fname="lights_out320_XP12.obj"):
+    def __init__(self, tmp: Path, airframe="a320", fname="lights_out320_XP12.obj",
+                folder="ToLissA320_V1p3p2"):
         self.xplane_root = tmp / "X-Plane 12"
-        self.folder = self.xplane_root / "Aircraft" / "ToLissA320_V1p3p2"
+        self.folder = self.xplane_root / "Aircraft" / folder
         self.objects = self.folder / "objects"
         self.objects.mkdir(parents=True)
         self.obj_path = self.objects / fname
@@ -219,6 +221,92 @@ class RealWingsPatchTests(unittest.TestCase):
         self.assertTrue(bak.exists())
 
 
+class A339InstallTests(unittest.TestCase):
+    """a339 (A330-900) has no wing mods — WINGS_FOR only ever offers "stock" in
+    the installer UI — but install()/uninstall() themselves are airframe-generic,
+    so a plain stock round trip should work exactly like the A3xx ones above."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_a339_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fa = FakeAircraft(self.tmp, airframe="a339", fname="ExternalLights_XP12.obj",
+                               folder="ToLissA339_V1p0p4")
+        self.log = _NullLog()
+
+    def test_install_writes_marker_and_backs_up_original(self):
+        original = self.fa.obj_path.read_text(encoding="utf-8")
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(any("Backed up" in s for s in steps))
+        installed = self.fa.obj_path.read_text(encoding="utf-8")
+        self.assertIn("ToLissPhoton version: 0.4 wing: stock", installed)
+        backup = self.fa.objects / "Photon Backup Files" / self.fa.obj_path.name
+        self.assertEqual(backup.read_text(encoding="utf-8"), original)
+
+    def test_uninstall_restores_byte_for_byte(self):
+        original = self.fa.obj_path.read_text(encoding="utf-8")
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log)
+        self.assertEqual(self.fa.obj_path.read_text(encoding="utf-8"), original)
+        self.assertFalse((self.fa.objects / "Photon Backup Files").exists())
+
+    # A realistic mesh-OBJ excerpt: two redirected glow regions (12,13) plus one
+    # Photon does NOT drive (0) that must be left reading ToLiss's array.
+    _OLD = "AirbusFBW/ExternalLightBrightnesses"
+    _NEW = "ToLissPhoton/exterior/glow"
+    _MESH = ("I\n800\nOBJ\n\nPOINT_COUNTS 1 0 0 3\n"
+             "\tATTR_light_level\t0\t1\t" + _OLD + "[0]\t5000\n"
+             "\tATTR_light_level\t0\t1\t" + _OLD + "[12]\t5000\n"
+             "\tATTR_light_level\t0\t1\t" + _OLD + "[13]\t5000\n")
+
+    def _write_mesh(self):
+        p = self.fa.objects / "WingL.obj"
+        p.write_text(self._MESH, encoding="utf-8")
+        return p
+
+    def test_install_redirects_skin_glow_and_uninstall_restores(self):
+        mesh = self._write_mesh()
+        original = mesh.read_text(encoding="utf-8")
+
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(any("skin-glow" in s for s in steps))
+
+        patched = mesh.read_text(encoding="utf-8")
+        # driven indices repointed at our dataref; the undriven one untouched
+        self.assertIn(f"{self._NEW}[12]", patched)
+        self.assertIn(f"{self._NEW}[13]", patched)
+        self.assertIn(f"{self._OLD}[0]", patched)
+        self.assertNotIn(f"{self._NEW}[0]", patched)
+
+        # the mesh OBJ is backed up (in the manifest + on disk) as the true original
+        manifest = actions.read_manifest(self.fa.objects)
+        self.assertIn("WingL.obj", manifest["backed_up"])
+        backup = self.fa.objects / "Photon Backup Files" / "WingL.obj"
+        self.assertEqual(backup.read_text(encoding="utf-8"), original)
+
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log)
+        self.assertEqual(mesh.read_text(encoding="utf-8"), original)
+
+    def test_reinstall_keeps_true_mesh_backup(self):
+        mesh = self._write_mesh()
+        original = mesh.read_text(encoding="utf-8")
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        # reinstall over the already-redirected mesh: patch is idempotent, backup
+        # must stay the pristine ToLiss original (not the redirected file)
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        backup = self.fa.objects / "Photon Backup Files" / "WingL.obj"
+        self.assertEqual(backup.read_text(encoding="utf-8"), original)
+
+    def test_durantula_wing_unavailable_raises_payload_error(self):
+        """a339 has no wing mods — the installer UI never offers this
+        combination (WINGS_FOR), but calling install() directly with an
+        unsupported wing must still fail loudly rather than silently shipping
+        a stock OBJ under the durantula label. Locks in make_release.py's
+        SUPPORTED_WINGS gate: only objs/stock/ExternalLights_XP12.obj was
+        ever built into the payload for this airframe."""
+        with self.assertRaises(payload.PayloadError):
+            actions.install(self.fa.ac, "durantula", self.fa.xplane_root, self.log)
+
+
 class PluginCurrentTests(unittest.TestCase):
     """plugin_is_current gates whether the X-Plane-running warning is skipped:
     if the installed plugin already matches, an install only rewrites OBJs
@@ -243,6 +331,46 @@ class PluginCurrentTests(unittest.TestCase):
         # one arch's .xpl replaced by an older build => no longer current
         (self.plugin_root / "win_x64" / "ToLissPhoton.xpl").write_bytes(b"# older build\n")
         self.assertFalse(actions.plugin_is_current(self.fa.xplane_root))
+
+
+class PluginRewriteSkipTests(unittest.TestCase):
+    """A reinstall must NOT rewrite an already-identical plugin `.xpl`. X-Plane
+    keeps a loaded `.xpl` memory-mapped and locked, so re-replacing an unchanged
+    one fails with 'file in use' on a running sim for no benefit. Regression:
+    install() used to overwrite it unconditionally, so an OBJ-only reinstall
+    crashed on a running sim even though the guard had (correctly) skipped the
+    'please close X-Plane' wait — the reported 'installer just failed: file in
+    use' bug."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_pluginskip_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fa = FakeAircraft(self.tmp)
+        self.log = _NullLog()
+        self.xpl = (self.fa.xplane_root / "Resources" / "plugins" / "ToLissPhoton"
+                    / "win_x64" / "ToLissPhoton.xpl")
+
+    def test_fresh_install_writes_plugin(self):
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(any("Installed ToLiss Photon plugin" in s for s in steps))
+
+    def test_reinstall_does_not_rewrite_identical_plugin(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        # Stamp a known-old mtime; if the 2nd install re-replaces the file, the
+        # atomic os.replace hands it a fresh (now) mtime instead of preserving this.
+        os.utime(self.xpl, (1_000_000_000, 1_000_000_000))
+        before = self.xpl.stat().st_mtime_ns
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertEqual(self.xpl.stat().st_mtime_ns, before)  # never touched
+        self.assertTrue(any("already current" in s for s in steps))
+        self.assertFalse(any("Installed ToLiss Photon plugin" in s for s in steps))
+
+    def test_reinstall_rewrites_a_differing_plugin(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.xpl.write_bytes(b"# stale older build\n")   # now differs from payload
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(any("Installed ToLiss Photon plugin" in s for s in steps))
+        self.assertEqual(self.xpl.read_bytes(), FAKE_XPL["win_x64"])  # corrected
 
 
 if __name__ == "__main__":

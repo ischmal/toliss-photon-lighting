@@ -228,5 +228,40 @@ class EmitterGuardTests(unittest.TestCase):
             B.Emitter(cfg, "a320", "stock").emit()
 
 
+class A339NoRealWingsTests(unittest.TestCase):
+    """a339 (A330-900) has no wing mods at all — REALWINGS_DIR has no entry for
+    it — so anything that iterates "all airframes" for a RealWings operation
+    must skip it with a message, not KeyError."""
+
+    def test_find_realwings_dir_reports_no_wing_mods(self):
+        rw, reason = B._find_realwings_dir("a339")
+        self.assertIsNone(rw)
+        self.assertIn("no wing mods", reason)
+
+    def test_cmd_patch_realwings_skips_a339_without_crashing(self):
+        class Args:
+            airframe = None
+            root = None
+            dry_run = True
+            reverse = False
+        # Force _xplane_root() to a fake, empty tree so no real aircraft
+        # (this dev machine may have real ones, RealWings or not) leaks into
+        # the test — every airframe, including a339, must come back "not
+        # found", and a339 specifically via its missing REALWINGS_DIR entry
+        # rather than a KeyError.
+        empty_root = Path(tempfile.mkdtemp(prefix="photon_test_norw_"))
+        self.addCleanup(shutil.rmtree, empty_root, ignore_errors=True)
+        (empty_root / "Aircraft").mkdir()
+        saved = B._xplane_root
+        B._xplane_root = lambda: empty_root
+        self.addCleanup(setattr, B, "_xplane_root", saved)
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as ctx:
+                B.cmd_patch_realwings(Args())
+        self.assertNotIsInstance(ctx.exception.__cause__, KeyError)
+        self.assertIn("a339: skipped", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

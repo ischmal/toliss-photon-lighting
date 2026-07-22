@@ -110,6 +110,20 @@ static const char* kSimTimeDataRef     = "sim/time/total_running_time_sec";
 static const char* kStrobeGateDataRef  = "sim/cockpit/electrical/strobe_lights_on";
 static const char* kLiveryIndexDataRef = "sim/aircraft/view/acf_livery_index";
 static const char* kIcaoDataRef        = "sim/aircraft/view/acf_ICAO";
+// Photon's OWN skin-glow array. ToLiss's wing/fuselage/glass meshes carry
+// `ATTR_light_level 0 1 AirbusFBW/ExternalLightBrightnesses[N]` LIT-texture
+// regions that ToLiss's plugin animates with its own strike-and-fade envelope.
+// Photon overrides only the sim's beacon/strobe *ratio* arrays, so without a sync
+// the painted skin keeps ToLiss's soft fade while our billboards go LED-square.
+// ToLiss's ExternalLightBrightnesses array is READ-ONLY to other plugins, so we
+// can't write it. Instead the installer repoints the mesh OBJs' ATTR_light_level
+// lines at THIS array (a plain dataref-token swap — see build/patch_glow.py), and
+// we drive each redirected index from the engine with the same value its billboard
+// gets, so skin and billboard flash in lockstep. Registered at XPluginStart so it
+// exists before the mesh OBJ binds the name (OBJ datarefs bind at load — gotcha #1);
+// sized to cover every redirected index (A339 uses 12..16), unused entries read 0.
+static const char* kGlowArrayDataRef   = "ToLissPhoton/exterior/glow";
+static const int   kGlowArraySize      = 24;
 
 // Superseded files this native .xpl replaces and deletes on startup (see
 // RemoveSupersededFiles): the retired FlyWithLua script(s) (the waveform engine used
@@ -487,6 +501,21 @@ static bool       gStrobeBuilt = false;
 static int        gCurrentBeaconLed = -1, gCurrentStrobeLed = -1;
 static double     gLastActiveBeacon[4] = {-1e9, -1e9, -1e9, -1e9};
 
+// skin-glow sync — see kGlowArrayDataRef. A GlowMap says which glow-array index
+// each engine channel drives; it is airframe-specific (the array's per-index
+// meaning matches ToLiss's own convention, which differs by model), so one is only
+// selected for a matching ICAO. kGlowNone = channel unmapped (that index left at 0).
+// The indices here MUST match build/patch_glow.py's REDIRECT table — the installer
+// only repoints exactly these OBJ regions at our array, and we only drive exactly
+// these entries; a mismatch would leave a redirected region reading a 0 we never set.
+static const int   kGlowNone = -1;
+struct GlowMap { int strobe[4]; int beacon[4]; };
+static XPLMDataRef gGlowArrayRef = nullptr;
+static float       gGlow[kGlowArraySize] = {0};   // backing store the OBJ reads
+static GlowMap     gGlowMap = { {kGlowNone,kGlowNone,kGlowNone,kGlowNone},
+                                {kGlowNone,kGlowNone,kGlowNone,kGlowNone} };
+static bool        gGlowMapActive = false;
+
 // forward decls
 static void UpdateChecks();
 static void ApplyProfileToValues();
@@ -496,6 +525,21 @@ static void UpdateMenuVisibility();
 // ============================= dataref accessors =============================
 static int   ReadCategoryInt(void* refcon)   { return gValues[(int)(intptr_t)refcon]; }
 static float ReadCategoryFloat(void* refcon) { return (float)gValues[(int)(intptr_t)refcon]; }
+
+// Float-array reader for ToLissPhoton/exterior/glow. Read-only to the sim: the
+// engine owns gGlow and updates it every frame; the redirected OBJ ATTR_light_level
+// regions read it back here. Follows the XPLMGetDatavf_f contract — out==null is a
+// size query.
+static int ReadGlowArray(void* /*refcon*/, float* out, int offset, int max) {
+    if (!out) return kGlowArraySize;
+    if (offset < 0) offset = 0;
+    int n = 0;
+    for (int i = 0; i < max && offset + i < kGlowArraySize; ++i) {
+        out[i] = gGlow[offset + i];
+        ++n;
+    }
+    return n;
+}
 
 static int AllLed() {
     for (int i = 0; i < NCAT; ++i) if (gValues[i] != 1) return 0;
@@ -536,6 +580,42 @@ static std::string AircraftIcao() {
     s = s.substr(a, b - a + 1);
     for (char& c : s) c = (char)std::toupper((unsigned char)c);
     return s;
+}
+
+// Which glow-array indices this airframe's engine channels drive. Applies only to
+// the matching ICAO; any other aircraft gets no map (feature off, ToLiss's own glow
+// fade untouched). Indices keep ToLiss's own numbering so the installer's OBJ patch
+// is a minimal per-region token swap (AirbusFBW/ExternalLightBrightnesses[N] ->
+// ToLissPhoton/exterior/glow[N], same N). A339 indices confirmed in-sim (live values
+// watched): strobe [12]=left wingtip, [13]=right wingtip, [14]=tail; beacon
+// [15],[16] = top/bottom (in ExteriorGlass.obj — they ramp with the beacon fade
+// envelope, unlike a strobe's sharp on/off). Keep in sync with build/patch_glow.py.
+static bool GlowMapForIcao(const std::string& icao, GlowMap& out) {
+    out = GlowMap{ {kGlowNone,kGlowNone,kGlowNone,kGlowNone},
+                   {kGlowNone,kGlowNone,kGlowNone,kGlowNone} };
+    if (icao == "A339") {
+        out.strobe[0] = 12;   // engine strobe ch0 = left wingtip
+        out.strobe[1] = 13;   // ch1 = right wingtip
+        out.strobe[2] = 14;   // ch2 = tail
+        out.beacon[0] = 15;   // top + bottom beacon glow (both on the beacon
+        out.beacon[1] = 16;   // waveform; live values ramp 0..1 with the fade)
+        return true;
+    }
+    return false;
+}
+
+// Select the glow map for the loaded aircraft. Our glow array is registered at
+// XPluginStart and always present, so there is nothing to bind here — just pick the
+// per-ICAO index map (or none). When no map applies, clear our array so a previous
+// aircraft's values don't linger (nothing reads them, but keep it tidy).
+static void ResolveGlowMap() {
+    std::string icao = AircraftIcao();
+    gGlowMapActive = GlowMapForIcao(icao, gGlowMap);
+    if (gGlowMapActive) {
+        Log("skin-glow sync active (" + icao + "); driving " + kGlowArrayDataRef);
+    } else {
+        for (float& g : gGlow) g = 0.0f;
+    }
 }
 
 // Read any numeric dataref as a double, regardless of how it is typed. Per
@@ -988,8 +1068,13 @@ static bool IsToLiss() {
 }
 
 static void UpdateMenuVisibility() {
-    if (IsToLiss()) { if (!gMenuCreated) CreatePhotonMenu(); }
-    else            { if (gMenuCreated) DestroyPhotonMenu(); }
+    if (IsToLiss()) {
+        if (!gMenuCreated) CreatePhotonMenu();
+        ResolveGlowMap();   // pick the skin-glow index map for this airframe
+    } else {
+        if (gMenuCreated) DestroyPhotonMenu();
+        gGlowMapActive = false;
+    }
 }
 
 // ============================== waveform engine ==============================
@@ -1018,6 +1103,14 @@ static double SimTime() {
 static int ReadRatios(XPLMDataRef ref, float out[4]) {
     out[0] = out[1] = out[2] = out[3] = 0.0f;
     return XPLMGetDatavf(ref, out, 0, 4);
+}
+
+// Set one element of Photon's own glow array — what the redirected OBJ
+// ATTR_light_level regions read. No-op for an unmapped channel (kGlowNone) or an
+// out-of-range index.
+static void WriteGlow(int idx, float value) {
+    if (idx < 0 || idx >= kGlowArraySize) return;
+    gGlow[idx] = value;
 }
 
 static bool BeaconActive(int index, double sampledValue, double simTime) {
@@ -1062,11 +1155,21 @@ static float EngineLoop(float, float, int, void*) {
         double brightness = gBeaconChannel.Tick(deltaTime);   // tick to keep phase
         float out[4];
         int n = ReadRatios(gBeaconRatioRef, out);
+        float glowVal = 0.0f;   // 0 = beacon off this frame -> skin dark (we own it)
         for (int i = 0; i < n && i < 4; ++i) {
-            if (beaconAlwaysOn) out[i] = 1.0f;
-            else if (BeaconActive(i, out[i], simTime)) out[i] = (float)ClampBrightness(brightness);
+            if (beaconAlwaysOn) { out[i] = 1.0f; glowVal = 1.0f; }
+            else if (BeaconActive(i, out[i], simTime)) {
+                out[i] = (float)ClampBrightness(brightness);
+                glowVal = out[i];
+            }
         }
         XPLMSetDatavf(gBeaconRatioRef, out, 0, 4);
+        // Drive the beacon skin glow(s) with the SAME value the billboards got —
+        // including 0 when off, since our array is the only thing feeding these
+        // regions now (nothing else drives it back down).
+        if (gGlowMapActive)
+            for (int b = 0; b < 4 && gGlowMap.beacon[b] != kGlowNone; ++b)
+                WriteGlow(gGlowMap.beacon[b], glowVal);
     }
 
     // strobe: per-index waveforms, gated on the strobe switch. Tick every channel
@@ -1075,12 +1178,20 @@ static float EngineLoop(float, float, int, void*) {
         float out[4];
         ReadRatios(gStrobeRatioRef, out);
         bool gateOn = StrobeGateOn();
+        float glow[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // 0 = off -> skin dark (we own it)
         for (int index = 0; index < 4; ++index) {
             double value = gStrobeChannel[index].Tick(deltaTime);
-            if (strobeAlwaysOn) out[index] = 1.0f;
-            else if (gateOn)    out[index] = (float)ClampBrightness(value);
+            if (strobeAlwaysOn) { out[index] = 1.0f; glow[index] = 1.0f; }
+            else if (gateOn)    { out[index] = (float)ClampBrightness(value); glow[index] = out[index]; }
         }
         XPLMSetDatavf(gStrobeRatioRef, out, 0, 4);
+        // Skin-glow sync: drive each mapped glow index with the SAME value its
+        // billboard got, so the redirected LIT-texture region flashes in lockstep
+        // instead of keeping ToLiss's soft xenon fade. Unmapped channels/aircraft
+        // are skipped, so no other glow region is disturbed.
+        if (gGlowMapActive)
+            for (int i = 0; i < 4; ++i)
+                if (gGlowMap.strobe[i] != kGlowNone) WriteGlow(gGlowMap.strobe[i], glow[i]);
     }
     return -1.0f;   // every frame
 }
@@ -1198,6 +1309,13 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
         kIsLedDataref, xplmType_Int | xplmType_Float, 0,
         ReadIsLedInt, nullptr, ReadIsLedFloat, nullptr,
         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    // Photon's own skin-glow array (read-only to the sim) — must exist before any
+    // redirected mesh OBJ binds it at load. Float-array accessor: only the
+    // read-float-array slot is set.
+    gGlowArrayRef = XPLMRegisterDataAccessor(
+        kGlowArrayDataRef, xplmType_FloatArray, 0,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, ReadGlowArray, nullptr, nullptr, nullptr, nullptr, nullptr);
     gBeaconDbgRef = XPLMRegisterDataAccessor(
         kBeaconAlwaysOn, xplmType_Int | xplmType_Float, 1,
         ReadBeaconDbgInt, WriteBeaconDbgInt, ReadBeaconDbgFloat, WriteBeaconDbgFloat,
@@ -1237,6 +1355,7 @@ PLUGIN_API void XPluginStop(void) {
     StopEngine();
     DestroyPhotonMenu();
     if (gIsLedRef)     { XPLMUnregisterDataAccessor(gIsLedRef);     gIsLedRef = nullptr; }
+    if (gGlowArrayRef) { XPLMUnregisterDataAccessor(gGlowArrayRef); gGlowArrayRef = nullptr; }
     if (gBeaconDbgRef) { XPLMUnregisterDataAccessor(gBeaconDbgRef); gBeaconDbgRef = nullptr; }
     if (gStrobeDbgRef) { XPLMUnregisterDataAccessor(gStrobeDbgRef); gStrobeDbgRef = nullptr; }
     for (int i = 0; i < NCAT; ++i)

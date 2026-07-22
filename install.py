@@ -26,7 +26,7 @@ from pathlib import Path
 from installer import actions, detect, payload
 from installer import tui
 from installer.constants import (
-    AIRFRAMES, PHOTON_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS,
+    AIRFRAMES, PHOTON_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS_FOR,
 )
 from installer.log import Log
 from installer.tui import C, Back, flash, menu, render, text_prompt
@@ -234,7 +234,8 @@ def _action_label(ac: dict, wing: str) -> str:
 def screen_action(ac: dict):
     step = (f"Step 3.  What would you like to do to {ac['folder']} "
            f"({ac['name']} v{ac['ac_ver']})?")
-    keys = list(WINGS) + ["uninstall"]
+    wings = WINGS_FOR[ac["airframe"]]
+    keys = list(wings) + ["uninstall"]
     options, disabled = [], set()
     for i, key in enumerate(keys):
         if key == "uninstall":
@@ -252,8 +253,8 @@ def screen_action(ac: dict):
     default_idx = 0
     if ac["photon"]:
         w = ac["wing"] or "stock"
-        if w in WINGS:
-            default_idx = WINGS.index(w)
+        if w in wings:
+            default_idx = wings.index(w)
     choice = menu(STAGE_CONFIGURE, step,
                   f"Select an action for ToLiss Photon v{VERSION}:", options,
                   disabled=disabled, index=default_idx)
@@ -263,34 +264,61 @@ def screen_action(ac: dict):
 
 
 # ─── X-Plane-running guard ─────────────────────────────────────────────────────
+POLL_INTERVAL_SECONDS = 2.0  # how often the wait screen rechecks for X-Plane
+
+
 def screen_check_not_running(ac: dict, action: str, xplane_root: Path):
-    """Warn if X-Plane looks live — but only when this run needs to replace the
-    loaded plugin binary. Overwriting the aircraft OBJs mid-session is safe
-    (X-Plane loads them into memory and releases the files); the plugin is the
-    one thing risky to swap while running. So if the installed plugin is already
-    current (an OBJ-only reinstall/upgrade), skip the warning entirely."""
-    while True:
-        if not detect.xplane_running():
-            return
-        if action != "uninstall" and actions.plugin_is_current(xplane_root):
+    """Hold before performing the run until X-Plane is closed, then proceed on
+    its own — but only when this run needs to replace the loaded plugin binary.
+    Overwriting the aircraft OBJs mid-session is safe (X-Plane loads them into
+    memory and releases the files); a loaded `.xpl` is memory-mapped and locked,
+    so it's the one artifact we can't swap while the sim is up. If the installed
+    plugin is already byte-current (an OBJ-only reinstall/upgrade), install()
+    won't touch it at all, so this waits for nothing and returns immediately.
+
+    While X-Plane is up the screen rechecks every POLL_INTERVAL_SECONDS and, the
+    instant it closes, returns automatically. ESC goes back a step (re-choose the
+    action); ENTER is an explicit 'continue anyway' escape hatch."""
+    if action != "uninstall" and actions.plugin_is_current(xplane_root):
+        if detect.xplane_running():
             LOG.write("X-Plane running, but the plugin is already current — this "
-                      "run only rewrites OBJs (safe while loaded); skipping warning")
-            return
-        LOG.write("X-Plane appears to be running", "WARN")
-        para = [
+                      "run only rewrites OBJs (safe while loaded); skipping wait")
+        return
+
+    warned = False
+    tick = 0
+    while detect.xplane_running():
+        if not warned:
+            LOG.write("X-Plane appears to be running — waiting for it to close", "WARN")
+            warned = True
+        dots = "." * (1 + tick % 3)
+        body = [
+            "",
+            tui._step("Step 3b.  Please close X-Plane to continue"),
+            "",
             f"{C.YELLOW}{C.BOLD}X-Plane appears to be running.{C.RESET}",
             "",
             f"{C.BR_WHITE}This install adds or updates the ToLiss Photon plugin, which"
-            f" X-Plane loads at startup.{C.RESET}",
-            f"{C.BR_WHITE}Please close X-Plane so the change takes effect cleanly.{C.RESET}",
+            f" X-Plane loads at startup — X-Plane keeps that file locked while it's"
+            f" open, so the install can't complete until it's closed.{C.RESET}",
             "",
+            f"{C.BR_WHITE}Close X-Plane and the installer will continue automatically."
+            f"{C.RESET}",
+            "",
+            f"{C.DIM}Waiting for X-Plane to close{dots}{C.RESET}",
         ]
-        options = ["I've closed it — check again", "Continue anyway (not recommended)"]
-        choice = menu(STAGE_RUN, "Step 3b.  Check X-Plane isn't running", "",
-                      options, header_lines=para)
-        if choice == 1:
+        render(STAGE_RUN, body, back="go back", cont="continue anyway",
+               cont_key="ENTER", focus=len(body) - 1)
+        k = tui.read_key_timeout(POLL_INTERVAL_SECONDS)
+        if k == tui.KEY_ESC:
+            LOG.write("user backed out of the X-Plane-running wait")
+            raise Back
+        if k == tui.KEY_ENTER:
             LOG.write("user chose to continue with X-Plane apparently running", "WARN")
             return
+        tick += 1
+    if warned:
+        LOG.write("X-Plane closed — installer continuing automatically")
 
 
 # ─── uninstall: shared-plugin disposition ─────────────────────────────────────
@@ -298,7 +326,7 @@ def screen_plugin_disposition(ac: dict, xplane_root: Path) -> bool:
     """Whether to also remove the shared plugin on uninstall. Left installed by
     default (other airframes may use it); only offered when this is the last
     airframe with Photon on it."""
-    if detect.any_other_airframe_has_photon(xplane_root, ac["folder"]):
+    if detect.any_other_airframe_has_photon(xplane_root, ac["path"]):
         LOG.write("other airframes still have Photon — leaving shared plugin in place")
         return False
     options = ["Leave the plugin installed (recommended)", "Remove it too"]
@@ -451,8 +479,13 @@ def main():
                 if xplane_root is None:
                     xplane_root = screen_xplane()
                 ac = screen_aircraft(xplane_root)
-                action = screen_action(ac)
-                screen_check_not_running(ac, action, xplane_root)
+                while True:
+                    action = screen_action(ac)
+                    try:
+                        screen_check_not_running(ac, action, xplane_root)
+                    except Back:
+                        continue  # backed out of the close-X-Plane wait -> reconfigure
+                    break
                 success = screen_perform(ac, action, xplane_root)
                 nxt = screen_complete(ac, action, success)
                 if nxt == "exit":

@@ -1,0 +1,17 @@
+ANIM_begin
+ANIM_trans	3.3687301	-0.41163	-3.6293199	3.3687301	-0.41163	-3.6293199
+ANIM_rotate_begin	0	0	-1	AirbusFBW/WingFlex[1]
+ANIM_rotate_key	1	0
+ANIM_rotate_key	0	0
+ANIM_rotate_key	-1	0.99981131
+ANIM_rotate_end
+	ANIM_begin
+	ANIM_trans	-0.40902999	-1.89218	-1.67044	-0.40902999	-1.89218	-1.67044
+	ANIM_rotate_begin	0	0	-1	AirbusFBW/WingFlex[1]
+	ANIM_rotate_key	-1	0
+	ANIM_rotate_key	0	0
+	ANIM_rotate_key	1	-0.99981131
+	ANIM_rotate_end
+{{lights}}
+	ANIM_end
+ANIM_end

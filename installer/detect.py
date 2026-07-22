@@ -12,7 +12,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from installer.constants import AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME
+import fnmatch
+
+from installer.constants import (
+    AIRFRAME_CFG_IDS, AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME,
+)
+
+_SKUNK_CFG_NAME = "skunkcrafts_updater.cfg"
 
 _MARKER_RE = re.compile(r"ToLissPhoton version:\s*(\S+)\s+wing:\s*(\S+)")
 
@@ -232,38 +238,107 @@ def photon_status(objects: Path):
     return None, None, False
 
 
+def _candidate_folders(ac_dir: Path) -> list[Path]:
+    """Every folder under Aircraft/ (at ANY depth) that could be a ToLiss
+    aircraft. A single os.walk, so it finds installs nested in sub-hangars
+    (Aircraft/My Hangar/…) as cheaply as top-level ones. A folder qualifies if it
+    holds a skunkcrafts_updater.cfg (the primary signal — name/location agnostic),
+    an `.acf` (the canonical X-Plane 'this is an aircraft' marker, so even a
+    cfg-less oddly-named copy is reached), or its name matches a legacy ToLiss glob.
+    Once a folder qualifies we prune its subtree: aircraft aren't nested inside
+    aircraft, so there's no reason to descend into liveries/objects/… (a big speed
+    win on installs with many liveries). Non-ToLiss aircraft qualify here too;
+    _identify_airframe rejects them afterwards."""
+    globs = [g for (g, *_rest) in AIRFRAMES.values()]
+    out, seen = [], set()
+    for dirpath, dirnames, filenames in os.walk(ac_dir):
+        folder = Path(dirpath)
+        if folder == ac_dir:
+            continue
+        lower = [f.lower() for f in filenames]
+        has_cfg = _SKUNK_CFG_NAME in lower
+        has_acf = any(f.endswith(".acf") for f in lower)
+        name_hit = any(fnmatch.fnmatch(folder.name, g) for g in globs)
+        if (has_cfg or has_acf or name_hit) and folder not in seen:
+            seen.add(folder)
+            out.append(folder)
+            dirnames[:] = []   # prune: don't descend into a detected aircraft
+    return out
+
+
+def _identify_airframe(folder: Path) -> str | None:
+    """Which ToLiss airframe a candidate folder is, or None if not one of ours.
+    Reads the skunkcrafts_updater.cfg contents first (module URL, then display
+    name — see AIRFRAME_CFG_IDS), so a renamed folder is still identified. Falls
+    back to the airframe-specific lights OBJ filename (intrinsic to the aircraft's
+    files), then the legacy folder-name glob."""
+    cfg = _read_skunk_cfg(folder)
+    module = cfg.get("module", "").upper()
+    name = cfg.get("name", "").upper()
+    for af, ids in AIRFRAME_CFG_IDS.items():
+        if ids["module"].upper() in module:
+            return af
+    for af, ids in AIRFRAME_CFG_IDS.items():
+        if ids["name"].upper() in name:
+            return af
+    objects = folder / "objects"
+    for af, (_glob, _fld, fname, _pretty) in AIRFRAMES.items():
+        try:
+            if (objects / fname).is_file():
+                return af
+        except OSError:
+            pass
+    for af, (glob_pat, *_rest) in AIRFRAMES.items():
+        if fnmatch.fnmatch(folder.name, glob_pat):
+            return af
+    return None
+
+
 def detect_aircraft(xplane_root, log=None) -> list[dict]:
-    """Scan Aircraft/ for every supported ToLiss airframe folder. Each result:
-    folder, airframe, ac_ver, name, photon (version or None), wing,
-    stale (bool — installed per the manifest but the OBJ marker is gone, e.g. an
-    aircraft update reverted our edit), path."""
+    """Scan Aircraft/ (recursively) for every supported ToLiss airframe. Aircraft
+    are found by content (skunkcrafts_updater.cfg / OBJ filename), not folder name
+    or location, so renamed folders and sub-hangars both work. Each result:
+    folder (path relative to Aircraft/, for a legible label), airframe, ac_ver,
+    name, photon (version or None), wing, stale (bool — installed per the manifest
+    but the OBJ marker is gone, e.g. an aircraft update reverted our edit), path."""
     root = Path(xplane_root)
     found: list[dict] = []
     ac_dir = root / "Aircraft"
     if not ac_dir.is_dir():
         return found
-    for airframe, (glob_pat, _folder, _fname, pretty) in AIRFRAMES.items():
-        for folder in sorted(ac_dir.glob(glob_pat)):
-            objects = folder / "objects"
-            ver, wing, stale = (photon_status(objects) if objects.is_dir()
-                                else (None, None, False))
-            cfg = _read_skunk_cfg(folder)
-            found.append(dict(
-                folder=folder.name, airframe=airframe,
-                ac_ver=cfg.get("version") or "?",
-                name=cfg.get("name") or pretty,
-                photon=ver, wing=wing, stale=stale,
-                path=str(folder),
-            ))
+    for folder in sorted(_candidate_folders(ac_dir)):
+        airframe = _identify_airframe(folder)
+        if airframe is None:
+            if log:
+                log.write(f"skipping non-ToLiss/unrecognised aircraft: {folder}", "DEBUG")
+            continue
+        _glob, _fld, _fname, pretty = AIRFRAMES[airframe]
+        objects = folder / "objects"
+        ver, wing, stale = (photon_status(objects) if objects.is_dir()
+                            else (None, None, False))
+        cfg = _read_skunk_cfg(folder)
+        try:
+            label = str(folder.relative_to(ac_dir))   # "ToLissA320…" or "My Hangar/ToLissA320…"
+        except ValueError:
+            label = folder.name
+        found.append(dict(
+            folder=label, airframe=airframe,
+            ac_ver=cfg.get("version") or "?",
+            name=cfg.get("name") or pretty,
+            photon=ver, wing=wing, stale=stale,
+            path=str(folder),
+        ))
     if log:
         log.write(f"detected {len(found)} ToLiss aircraft under {ac_dir}")
     return found
 
 
-def any_other_airframe_has_photon(xplane_root, exclude_folder: str) -> bool:
+def any_other_airframe_has_photon(xplane_root, exclude_path: str) -> bool:
     """Used by the uninstall flow to decide the shared plugin's fate: leave it
-    installed unless this is the last airframe with Photon on it."""
+    installed unless this is the last airframe with Photon on it. Compares on the
+    full path (not folder name), since nested layouts can have same-named folders
+    in different hangars."""
     for ac in detect_aircraft(xplane_root):
-        if ac["folder"] != exclude_folder and ac["photon"]:
+        if ac["path"] != exclude_path and ac["photon"]:
             return True
     return False

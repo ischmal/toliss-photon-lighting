@@ -144,6 +144,41 @@ def read_key():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def read_key_timeout(timeout: float):
+    """Like read_key(), but wait at most `timeout` seconds for a keypress and
+    return None if none arrives — letting a caller poll something else (e.g. is
+    X-Plane still running?) and re-render between checks while still responding
+    instantly to a keypress. Delegates the actual decode to read_key() once input
+    is known to be waiting, so key handling stays in one place.
+
+    A module-level function like read_key, so tests can monkeypatch it."""
+    import time as _time
+
+    if os.name == "nt":
+        import msvcrt
+
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                return read_key()
+            _time.sleep(0.02)
+        return None
+
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:  # wait for input in raw mode so a single keystroke (not a full line)
+        tty.setraw(fd)  # wakes select; the char stays buffered for read_key()
+        if not select.select([sys.stdin], [], [], timeout)[0]:
+            return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return read_key()
+
+
 # ─── low-level string helpers (ANSI-aware) ────────────────────────────────────
 def _vis_len(s: str) -> int:
     """Printable length, ignoring ANSI escape sequences."""

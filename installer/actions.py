@@ -16,8 +16,8 @@ from pathlib import Path
 
 from installer import payload
 from installer.constants import (
-    AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME, PLUGIN_DIR_REL, PLUGIN_FOLDER,
-    REALWINGS_DIR, VERSION,
+    AIRFRAMES, BACKUP_DIRNAME, GLOW_AIRFRAMES, MANIFEST_NAME, PLUGIN_DIR_REL,
+    PLUGIN_FOLDER, REALWINGS_DIR, VERSION,
 )
 
 
@@ -156,6 +156,31 @@ def _patch_realwings_reverse(rw_dir: Path, dry_run: bool, log) -> int:
     return n
 
 
+# ─── skin-glow live patch (repoint ToLiss's ExternalLightBrightnesses regions) ──
+def _import_patch_glow():
+    dsl = payload.dsl_dir()
+    if not dsl.is_dir():
+        raise ActionError(f"bundled skin-glow patch toolchain missing: {dsl}")
+    if str(dsl) not in sys.path:
+        sys.path.insert(0, str(dsl))
+    import patch_glow as G  # bundled copy — see payload.dsl_dir()
+    return G
+
+
+def _patch_glow(objects: Path, airframe: str, dry_run: bool, log) -> int:
+    G = _import_patch_glow()
+    buf = io.StringIO()
+    n = 0
+    with contextlib.redirect_stdout(buf):
+        try:
+            n = G.run(objects, airframe, dry=dry_run) or 0
+        except SystemExit as e:
+            log.write(f"glow patch: {e}", "WARN")
+    for line in buf.getvalue().splitlines():
+        log.write(f"[glow] {line}")
+    return n
+
+
 # ─── plugin state ────────────────────────────────────────────────────────────
 def plugin_is_current(xplane_root) -> bool:
     """True if the native plugin already installed in X-Plane is byte-identical to
@@ -195,6 +220,44 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
     manifest = read_manifest(objects) or {"version": None, "wing": None,
                                           "installed_at": None, "backed_up": []}
 
+    # Install the shared plugin FIRST. Its `.xpl` is the one artifact X-Plane
+    # locks while loaded — Windows keeps a loaded DLL/`.xpl` memory-mapped and
+    # refuses to overwrite it — so on a running sim this is the step that fails.
+    # Doing it before we touch lights_out means a locked-plugin failure aborts
+    # *before* the version marker is injected into the OBJ. Otherwise a
+    # marked-but-orphaned OBJ (marker written, plugin never copied, manifest
+    # never reached) reads back as a completed install on the next run — the
+    # "installer thinks it succeeded even though it failed" bug.
+    plugin_root = Path(xplane_root) / PLUGIN_DIR_REL
+    arches = payload.plugin_arches()
+    # Only (over)write a plugin `.xpl` that isn't already byte-identical. X-Plane
+    # keeps a loaded `.xpl` memory-mapped and locked, so re-replacing an unchanged
+    # one fails with "file in use" on a running sim for zero benefit — and skipping
+    # it is precisely what lets an OBJ-only reinstall/upgrade run while X-Plane is
+    # open (screen_check_not_running trusts this same plugin_is_current fact to
+    # decide it can skip the "please close X-Plane" wait).
+    wrote_plugin = False
+    for rel, src in payload.plugin_files():
+        dest = plugin_root / rel
+        data = src.read_bytes()
+        try:
+            if dest.is_file() and dest.read_bytes() == data:
+                continue  # identical — leave the (possibly locked) file untouched
+        except OSError:
+            pass  # unreadable dest -> fall through and (re)write it
+        wrote_plugin = True
+        if not dry_run:
+            _atomic_write_bytes(dest, data)
+    if wrote_plugin:
+        log.write(f"wrote native plugin -> {plugin_root} "
+                  f"({', '.join(arches)}; dry_run={dry_run})")
+        steps.append(f"Installed ToLiss Photon plugin [{', '.join(arches)}] → "
+                     f"Resources\\plugins\\{PLUGIN_FOLDER}")
+    else:
+        log.write(f"native plugin already current at {plugin_root} — not rewriting "
+                  f"(avoids locking a loaded .xpl)")
+        steps.append(f"ToLiss Photon plugin already current [{', '.join(arches)}] — kept")
+
     target = objects / fname
     if _backup_once(target, backup_dir, manifest, log, dry_run):
         steps.append(f"Backed up original {fname} → {objects.name}\\{BACKUP_DIRNAME}")
@@ -206,6 +269,22 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
     if not dry_run:
         _atomic_write_bytes(target, text.encode("utf-8"))
     steps.append(f"Installed {fname} ({wing} wing variant) → {objects.name}")
+
+    # Redirect ToLiss's skin-glow LIT-texture regions to Photon's own dataref so the
+    # painted skin flashes in lockstep with the LED billboards (A339 only for now —
+    # see GLOW_AIRFRAMES / patch_glow.REDIRECT / plugin.cpp GlowMapForIcao). Each
+    # affected mesh OBJ is backed up once before patching; uninstall restores it from
+    # that backup via the existing backed_up list, so there is no extra manifest
+    # bookkeeping or .bak file. Gated on GLOW_AIRFRAMES so airframes that don't need
+    # it never even load the patch toolchain (matching the RealWings block).
+    if airframe in GLOW_AIRFRAMES:
+        glow = _import_patch_glow()
+        for f in glow.target_files(objects, airframe):
+            if _backup_once(f, backup_dir, manifest, log, dry_run):
+                steps.append(f"Backed up original {f.name} → {objects.name}\\{BACKUP_DIRNAME}")
+        n = _patch_glow(objects, airframe, dry_run, log)
+        if n:
+            steps.append(f"Redirected {n} skin-glow region(s) to Photon dataref")
 
     # Capture any prior RealWings patch state *before* clearing it, so a
     # switch away from RealWings can undo the in-place mod patch (below).
@@ -236,16 +315,6 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
             steps.append(f"Reversed previous RealWings patch ({n} file(s) restored)")
         else:
             log.write(f"previous realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
-
-    plugin_root = Path(xplane_root) / PLUGIN_DIR_REL
-    arches = payload.plugin_arches()
-    log.write(f"writing native plugin -> {plugin_root} "
-              f"({', '.join(arches)}; dry_run={dry_run})")
-    for rel, src in payload.plugin_files():
-        if not dry_run:
-            _atomic_write_bytes(plugin_root / rel, src.read_bytes())
-    steps.append(f"Installed ToLiss Photon plugin [{', '.join(arches)}] → "
-                 f"Resources\\plugins\\{PLUGIN_FOLDER}")
 
     manifest.update(version=VERSION, wing=wing,
                     installed_at=_dt.datetime.now().isoformat(timespec="seconds"))

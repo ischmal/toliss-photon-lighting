@@ -40,6 +40,29 @@ mounts a321 {
   tail_fus { stock: src/lights/mounts/a321/tail_fus.stock.obj; }
 }
 
+// A330-900 mounts: no wing mods exist for this airframe, so every mount is
+// stock-only. Wingtip nav/strobe sit inside the full 10-level WingFlex[0..9]
+// rotate/counter-rotate chain (wingtip_left/right); landing lights only need
+// the first WingFlex[0]/[1] level (wingroot_left/right). Left/right chains are
+// NOT mirror images of each other in ToLiss's own data (see docs/a339_plan.md
+// §1.3), so each is transcribed verbatim rather than derived.
+mounts a339 {
+  wingroot_left { stock: src/lights/mounts/a339/wingroot_left.stock.obj; }
+  wingroot_right { stock: src/lights/mounts/a339/wingroot_right.stock.obj; }
+  wingtip_left { stock: src/lights/mounts/a339/wingtip_left.stock.obj; }
+  wingtip_right { stock: src/lights/mounts/a339/wingtip_right.stock.obj; }
+  nosegear { stock: src/lights/mounts/a339/nosegear.stock.obj; }
+  nose_turnoff_left { stock: src/lights/mounts/a339/nose_turnoff_left.stock.obj; }
+  nose_turnoff_right { stock: src/lights/mounts/a339/nose_turnoff_right.stock.obj; }
+  nose_to { stock: src/lights/mounts/a339/nose_to.stock.obj; }
+  stab_logo_left { stock: src/lights/mounts/a339/stab_logo_left.stock.obj; }
+  stab_logo_right { stock: src/lights/mounts/a339/stab_logo_right.stock.obj; }
+  scan_left_fwd { stock: src/lights/mounts/a339/scan_left_fwd.stock.obj; }
+  scan_left_aft { stock: src/lights/mounts/a339/scan_left_aft.stock.obj; }
+  scan_right_fwd { stock: src/lights/mounts/a339/scan_right_fwd.stock.obj; }
+  scan_right_aft { stock: src/lights/mounts/a339/scan_right_aft.stock.obj; }
+}
+
 // -- A320: the base airframe --
 airframe a320 {
   fixture tail_nav "Tail Nav" {
@@ -293,5 +316,214 @@ airframe a321 extends a320 {
     wing_pm#left { pos: -1.984 -0.026 1.461; }
     wing_bb#right { pos: 1.941 -0.028 1.419; }
     wing_pm#right { pos: 2.018 -0.026 1.471; }
+  }
+}
+
+// -- A330-900: standalone, NOT extends a320 --
+// Structurally different from the A3xx: WingFlex[0..9] rotate chains (not
+// fence/sharklet), no wing mods (no @realwings/omit), wing-mounted landing
+// lights (no LandingLightLocation gate), logo lights on the PitchTrim chain,
+// dual NAV1/NAV2 bulb positions at the wingtips too. Left/right wingtip
+// nav/strobe positions are transcribed verbatim from ToLiss's own data rather
+// than mirrored (they're not exact mirrors — see docs/a339_plan.md §1.3), so
+// those four fixtures are deliberately separate, non-mirrored pairs; the
+// nav/strobe color (red/green) and side-conditioned intensity that a
+// mirrored fixture would resolve automatically are instead given as explicit
+// unconditioned overrides on the starboard fixture's light references.
+airframe a339 {
+  fixture landing_left "Landing Light Left" {
+    category: landing;
+    mount: wingroot_left;
+    pos: -0.357 0.674 -2.212;
+    landing_bb { index: 0;  dir: 0 -0.05 -0.999; }
+    landing_main { index: 0;  dir: 0 -0.05 -0.999; }
+    landing_mid { index: 0;  dir: 0 -0.05 -0.999; }
+    landing_wide { index: 0;  dir: 0 -0.05 -0.999; }
+  }
+  fixture landing_right "Landing Light Right" {
+    category: landing;
+    mount: wingroot_right;
+    pos: 0.357 0.674 -2.212;
+    landing_bb { index: 1;  dir: 0 -0.05 -0.999; }
+    landing_main { index: 1;  dir: 0 -0.05 -0.999; }
+    landing_mid { index: 1;  dir: 0 -0.05 -0.999; }
+    landing_wide { index: 1;  dir: 0 -0.05 -0.999; }
+  }
+  fixture wingtip_nav_left "Wingtip Nav Left" {
+    category: nav;
+    mount: wingtip_left;
+    group g1 "Nav 1" {
+      hide: 1.5 2.5 AirbusFBW/OHPLightSwitches[2];
+      pos: -1.451 0.252 0.336;
+      nav_marker { dir: -0.819 0 -0.573; }
+      // Bright wingtip billboard — the A320 wingtip fence has this; ToLiss's
+      // stock A339 wingtip did not, hence the dim nav. Seeded from A320's
+      // `light nav_beam` (intensity 5000 / LED 6000, cone 0.2). Tune to taste.
+      nav_beam { dir: -0.819 0 -0.573; }
+      nav_spill { dir: -0.819 0 -0.573; }
+    }
+    group g2 "Nav 2" {
+      hide: -0.5 1.5 AirbusFBW/OHPLightSwitches[2];
+      pos: -1.486 0.248 0.371;
+      nav_marker { dir: -0.819 0 -0.573; }
+      nav_beam { dir: -0.819 0 -0.573; }
+      nav_spill { dir: -0.819 0 -0.573; }
+    }
+  }
+  fixture wingtip_nav_right "Wingtip Nav Right" {
+    category: nav;
+    mount: wingtip_right;
+    // nav_marker/nav_spill extend nav_base, which resolves red/green (and
+    // nav_spill's LED intensity) via @starboard — meaningless on a
+    // non-mirrored fixture (side is never set), so the starboard-equivalent
+    // values are given here explicitly instead.
+    group g1 "Nav 1" {
+      hide: 1.5 2.5 AirbusFBW/OHPLightSwitches[2];
+      pos: 1.457 0.253 0.322;
+      nav_marker { color: green;  dir: 0.819 0 -0.573; }
+      // Explicit green + starboard intensity: @starboard doesn't resolve on a
+      // non-mirrored fixture, so the A320's per-side nav_beam values (starboard
+      // 4000 / LED 5000) are given here directly. Tune to taste.
+      nav_beam { color: green;  intensity: 4000;  @led { intensity: 5000; }  dir: 0.819 0 -0.573; }
+      nav_spill { color: green;  intensity: 1000;  @led { intensity: 3000; }  dir: 0.819 0 -0.573; }
+    }
+    group g2 "Nav 2" {
+      hide: -0.5 1.5 AirbusFBW/OHPLightSwitches[2];
+      pos: 1.488 0.248 0.367;
+      nav_marker { color: green;  dir: 0.819 0 -0.573; }
+      nav_beam { color: green;  intensity: 4000;  @led { intensity: 5000; }  dir: 0.819 0 -0.573; }
+      nav_spill { color: green;  intensity: 1000;  @led { intensity: 3000; }  dir: 0.819 0 -0.573; }
+    }
+  }
+  fixture wingtip_strobe_left "Wingtip Strobe Left" {
+    category: strobe;
+    mount: wingtip_left;
+    pos: -1.564 0.26 0.515;
+    strobe_marker { index: 0;  dir: -0.707 0 -0.707; }
+    // Bright wingtip strobe billboard the A320 has and stock A339 lacked.
+    // Seeded from A320's `light strobe_beam` (intensity 30000, cone 0.01 — a
+    // tight, punchy flash). Widen cone here if it reads too pinpoint. Tune to taste.
+    strobe_beam { index: 0;  dir: -0.707 0 -0.707; }
+    strobe_spill { index: 0;  dir: -0.707 0 -0.707; }
+  }
+  fixture wingtip_strobe_right "Wingtip Strobe Right" {
+    category: strobe;
+    mount: wingtip_right;
+    pos: 1.574 0.261 0.509;
+    strobe_marker { index: 1;  dir: 0.707 0 -0.707; }
+    strobe_beam { index: 1;  dir: 0.707 0 -0.707; }
+    strobe_spill { index: 1;  dir: 0.707 0 -0.707; }
+  }
+  fixture tail_nav "Tail Nav" {
+    category: nav;
+    group g1 "Light 1" {
+      hide: 1.5 2.5 AirbusFBW/OHPLightSwitches[2];
+      pos: -0.06 1.78 32.03;
+      nav_tail_bb;
+      nav_tail_sp { dir: 0 0 1; }
+    }
+    group g2 "Light 2" {
+      hide: -0.5 1.5 AirbusFBW/OHPLightSwitches[2];
+      pos: 0.06 1.78 32.03;
+      nav_tail_bb;
+      nav_tail_sp { dir: 0 0 1; }
+    }
+  }
+  fixture tail_strobe "Tail Strobe" {
+    category: strobe;
+    pos: 0 1.78 32.03;
+    strobe_tail_bb { dir: 0 0 1; }
+    strobe_tail_sp { dir: 0 0 1; }
+  }
+  fixture top_beacon "Top Beacon" {
+    category: beacon;
+    pos: 0 2.85 -4.35;
+    beacon_bb;
+    beacon_pm;
+  }
+  fixture bottom_beacon "Bottom Beacon" {
+    category: beacon;
+    pos: 0 -3.13 -9.3;
+    beacon_bb;
+    beacon_pm;
+  }
+  fixture nose_taxi "Nosegear - Taxi" {
+    category: taxi;
+    mount: nosegear;
+    pos: -0.358 -0.46 -0.242;
+    taxi_pm { dir: 0 -0.05 -0.999; }
+    taxi_bb { dir: 0 -0.05 -0.999; }
+  }
+  fixture nose_to "Nosegear - T.O. Light" {
+    category: to;
+    mount: nose_to;
+    pos: 0.358 -0.46 -0.242;
+    to_bb { dir: 0 -0.05 -0.999; }
+    to_pm { dir: 0 -0.05 -0.999; }
+  }
+  fixture rwyturnoff_left "Runway Turn Off Left" {
+    category: rwyturnoff;
+    mount: nose_turnoff_left;
+    pos: 0 0 0.03;
+    rwy_bb { index: 3;  dir: 0 -0.05 -0.999; }
+    rwy_pm { index: 3;  dir: 0 -0.05 -0.999; }
+  }
+  fixture rwyturnoff_right "Runway Turn Off Right" {
+    category: rwyturnoff;
+    mount: nose_turnoff_right;
+    pos: 0 0 0.03;
+    rwy_bb { index: 4;  dir: 0 -0.05 -0.999; }
+    rwy_pm { index: 4;  dir: 0 -0.05 -0.999; }
+  }
+  fixture logo_left "Logo Light Left" {
+    category: logo;
+    mount: stab_logo_left;
+    pos: 0.02 -0.04 0.01;
+    // Local dirs computed (build helper) so the mount's static -80° rotation
+    // reproduces the A320 logo world aim: bb straight up (0 1 0), pm up-inboard
+    // (0.589 0.805 -0.074). Verify in-sim and tweak.
+    logo_bb { index: 7;  dir: -0.408 0.651 -0.640; }
+    logo_pm { index: 7;  dir: -0.076 0.236 -0.969; }
+  }
+  fixture logo_right "Logo Light Right" {
+    category: logo;
+    mount: stab_logo_right;
+    pos: -0.02 -0.04 0.01;
+    // Mirror of logo_left: dirs computed so the mount reproduces the A320 aim
+    // (bb up, pm up-inboard -0.588 0.805 -0.081). Verify in-sim and tweak.
+    logo_bb { index: 8;  dir: 0.408 0.651 -0.640; }
+    logo_pm { index: 8;  dir: 0.082 0.232 -0.969; }
+  }
+  fixture wing_scan_left_fwd "Wing Scan Left Forward" {
+    category: wing;
+    mount: scan_left_fwd;
+    wing_scan_bb#lower { pos: 0 -0.01 0.01;  index: 1; }
+    wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 1; }
+    wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 1; }
+    wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 1; }
+  }
+  fixture wing_scan_left_aft "Wing Scan Left Aft" {
+    category: wing;
+    mount: scan_left_aft;
+    wing_scan_bb#lower { pos: 0 -0.01 0.01;  index: 1; }
+    wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 1; }
+    wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 1; }
+    wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 1; }
+  }
+  fixture wing_scan_right_fwd "Wing Scan Right Forward" {
+    category: wing;
+    mount: scan_right_fwd;
+    wing_scan_bb#lower { pos: 0 -0.01 0.01;  index: 2; }
+    wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 2; }
+    wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 2; }
+    wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 2; }
+  }
+  fixture wing_scan_right_aft "Wing Scan Right Aft" {
+    category: wing;
+    mount: scan_right_aft;
+    wing_scan_bb#lower { pos: 0 -0.01 0.01;  index: 2; }
+    wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 2; }
+    wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 2; }
+    wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 2; }
   }
 }
