@@ -1,211 +1,164 @@
 #!/usr/bin/env python3
-"""Freeze the installer into a standalone native executable via PyInstaller.
+"""Freeze the installer into a standalone, per-platform installer bundle.
 
-Produces a single self-contained binary that end users double-click — no Python
-required on their machine. Bundles the pre-built release ``payload/`` as data;
-``installer/payload.py`` finds it inside PyInstaller's extraction dir with **no
-code change** (its ``ROOT = Path(__file__).parent.parent`` lands on the _MEI…
-dir, so ``PAYLOAD_DIR`` = ``<_MEI…>/payload`` — verified frozen, including the
-dynamic ``import build_objs`` the RealWings live-patch needs).
+Produces ONE platform bundle for the OS this runs on (PyInstaller cannot
+cross-compile): a folder holding the frozen installer binary, a ``data/`` folder
+holding the files it installs, and a README, packed into a single archive that
+extracts to one tidy folder:
 
-PyInstaller cannot cross-compile: a Windows .exe builds only on Windows, macOS
-only on macOS, Linux only on Linux. Run this once per target OS, or let the
-GitHub Actions matrix in .github/workflows/release.yml build all three.
+    ToLissPhoton-Installer-v<VER>-<Windows|macOS|Linux>[.zip|.tar.gz]
+      └ ToLissPhoton-Installer-v<VER>-<OS>/
+          ToLissPhoton-Installer-v<VER>-<OS>[.exe]   the installer
+          data/                                       objs/ + plugin/<arch> + dsl/
+          README.txt
+
+The binary is *loose* (no embedded payload); at runtime ``installer/payload.py``
+reads the sibling ``data/`` (see ``_default_payload_dir``). ``data/`` carries only
+THIS platform's plugin arch — the payload is built from whatever plugin
+``make_release`` staged, which on each OS runner is just that arch. The
+Python-Universal bundle (all arches) is a separate artifact — see
+``build/make_release.py`` and ``.github/workflows/release.yml``.
+
+Compression per platform: Windows/macOS -> .zip (Finder/Explorer native),
+Linux -> .tar.gz (convention; preserves the exec bit natively). The exec bit is
+also written into the .zip external attrs so macOS extracts a runnable binary.
 
 Usage:
-    python build/make_exe.py [--out release/exe] [--skip-release]
+    python build/make_exe.py [--skip-release] [--format auto|zip|tgz] [--name NAME]
 
---skip-release reuses an existing release/payload instead of rebuilding it
-(the CI job builds the payload as its own step, then passes this flag).
+--skip-release  reuse an existing release/payload instead of rebuilding it (CI
+                builds the payload as its own step, then passes this flag).
+--name          override the bundle base name (default
+                ToLissPhoton-Installer-v<VER>-<OS>).
 """
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import time
 import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "build"))
 from installer.constants import VERSION  # noqa: E402
+import readme as _readme  # noqa: E402  (build/readme.py)
 
-# platform.system() -> release-asset OS tag
-PLATFORM_TAG = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}
-
-# OS-appropriate "this app isn't code-signed" note for the loose-snapshot README.
-_UNSIGNED_NOTE = {
-    "Windows": ('WINDOWS SMARTSCREEN\n'
-                '  The installer is not code-signed, so Windows may show\n'
-                '  "Windows protected your PC". Click  More info  ->  Run anyway.'),
-    "Darwin": ('macOS GATEKEEPER\n'
-               '  The installer is not notarized. If macOS blocks it, right-click\n'
-               '  the app -> Open, or clear the quarantine flag in System Settings.'),
-    "Linux": ('LINUX\n'
-              '  If the file is not executable, run:  chmod +x <installer>'),
-}
+# platform.system() -> pretty OS name used in the bundle/exe filenames + README.
+OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
 
 
-def _loose_readme(exe_name: str, arches: str) -> str:
-    return f"""ToLiss Photon Lighting - Installer  (v{VERSION})
-====================================================
-
-WHAT THIS IS
-  A lighting modification for ToLiss Airbus aircraft (A319/A320/A321) in
-  X-Plane 12. It reshapes the beacon/strobe flash and swaps exterior light
-  colors between an LED and the original look.
-
-  This is the "loose" snapshot: the installer and the files it installs are
-  shipped SEPARATELY. The installer program reads the plainly-named  data/
-  folder that sits next to it. No Python or other prerequisite is required.
-
-HOW TO RUN
-  1. Extract this WHOLE folder out of the zip (keep the .exe and the data/
-     folder together - the installer reads data/ from right beside itself).
-  2. Double-click  {exe_name}
-  3. Follow the on-screen steps (arrow keys / ENTER / ESC to go back). It
-     auto-detects X-Plane 12; pick the aircraft and wing variant and install.
-
-  Close X-Plane before installing.
-
-{_UNSIGNED_NOTE.get(platform.system(), '')}
-
-WHAT'S IN data/
-  objs/     the pre-built light files (3 wing variants x 3 airframes)
-  plugin/   the native X-Plane plugin  (this build: {arches})
-  dsl/      the small toolchain the RealWings live-patch needs at install time
-
-REQUIREMENTS
-  - X-Plane 12 with a ToLiss A319/A320/A321 already installed.
-
-UNINSTALL
-  Re-run the installer and choose the uninstall action for the aircraft;
-  it restores the original files byte-for-byte.
-
-This is a test build. Please report anything that looks off.
-"""
+def _default_format() -> str:
+    return "tgz" if platform.system() == "Linux" else "zip"
 
 
-def build_loose(name: str, payload: Path, do_zip: bool):
-    """Produce a *loose* snapshot: the installer and its files shipped SEPARATELY.
+def _archive(folder: Path, base_name: str, fmt: str, out_dir: Path, exe_name: str) -> Path:
+    """Pack `folder` into out_dir/<base_name>.<ext>, everything nested under a
+    single top-level <base_name>/ dir. The frozen binary is marked executable
+    (0o755) in the archive metadata so Unix extractions are runnable without a
+    manual chmod; Windows ignores it."""
+    if fmt == "zip":
+        dest = out_dir / f"{base_name}.zip"
+        if dest.exists():
+            dest.unlink()
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(folder.rglob("*")):
+                if not f.is_file():
+                    continue
+                arc = str(Path(base_name) / f.relative_to(folder))
+                zi = zipfile.ZipInfo(arc, date_time=time.localtime(f.stat().st_mtime)[:6])
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                mode = 0o755 if f.name == exe_name else 0o644
+                zi.external_attr = (mode & 0xFFFF) << 16
+                zf.writestr(zi, f.read_bytes())
+        return dest
+    # tar.gz — tarfile preserves the on-disk mode; force 0o755 on the binary.
+    dest = out_dir / f"{base_name}.tar.gz"
+    if dest.exists():
+        dest.unlink()
 
-    Freeze the exe WITHOUT embedding the payload, then stage it next to a
-    plainly-named ``data/`` folder (a copy of ``payload/``) + a README. At
-    runtime ``installer/payload.py`` reads that sibling ``data/`` (see
-    ``_default_payload_dir``). Result: release/snapshot/<name>/ (and, with --zip,
-    release/<name>.zip that extracts to one tidy <name>/ folder)."""
-    workdir = REPO / "release" / "_pyinstaller"
-    dist = workdir / "loose_dist"
-    cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--onefile", "--console", "--clean", "--noconfirm",
-        "--name", name,
-        "--paths", str(REPO),            # so `installer` imports
-        # NB: no --add-data — the payload ships beside the exe as data/, not inside.
-        "--distpath", str(dist),
-        "--workpath", str(workdir / "build"),
-        "--specpath", str(workdir),
-        str(REPO / "install.py"),
-    ]
-    print("== freezing (loose: payload ships separately as data/) ==")
-    print("  " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    def _filter(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+        ti.mode = 0o755 if Path(ti.name).name == exe_name else (
+            0o755 if ti.isdir() else 0o644)
+        return ti
 
-    exe_name = name + (".exe" if platform.system() == "Windows" else "")
-    snap = REPO / "release" / "snapshot" / name
-    if snap.exists():
-        shutil.rmtree(snap)
-    snap.mkdir(parents=True)
-    shutil.copy2(dist / exe_name, snap / exe_name)
-    shutil.copytree(payload, snap / "data")
-    arches = ", ".join(sorted(d.name for d in (payload / "plugin").rglob("*")
-                              if d.is_dir() and d.name.endswith("_x64"))) or "(none)"
-    (snap / "README.txt").write_text(_loose_readme(exe_name, arches), encoding="utf-8")
-
-    print(f"\nloose snapshot ready: {snap}")
-    print(f"  {exe_name}: {(snap / exe_name).stat().st_size / 1e6:.1f} MB"
-          f"  +  data/ ({arches})")
-    if do_zip:
-        zip_path = REPO / "release" / f"{name}.zip"
-        if zip_path.exists():
-            zip_path.unlink()
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(snap.rglob("*")):
-                if f.is_file():
-                    zf.write(f, Path(name) / f.relative_to(snap))
-        print(f"zipped -> {zip_path} ({zip_path.stat().st_size / 1e6:.1f} MB)")
+    with tarfile.open(dest, "w:gz") as tf:
+        tf.add(folder, arcname=base_name, filter=_filter)
+    return dest
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Freeze the ToLiss Photon installer")
-    ap.add_argument("--out", default="release/exe", help="output dir (default: release/exe)")
+    ap = argparse.ArgumentParser(description="Build the per-platform installer bundle")
     ap.add_argument("--skip-release", action="store_true",
                     help="reuse an existing release/payload instead of rebuilding it")
-    ap.add_argument("--loose", action="store_true",
-                    help="ship the installer and its files SEPARATELY: freeze the exe "
-                         "without embedding the payload and stage it beside a data/ "
-                         "folder (+ README) as a ready-to-hand-off snapshot")
-    ap.add_argument("--zip", action="store_true",
-                    help="with --loose, also zip the snapshot to release/<name>.zip")
-    ap.add_argument("--exe-name",
-                    help="override the base name of the produced binary (default: "
-                         "ToLissPhoton-Installer-v<VER>-<os>). CI uses this to name "
-                         "the per-OS loose binaries installer_windows / _macos / _linux "
-                         "for the combined all-platform zip (build/make_combined.py).")
+    ap.add_argument("--format", choices=["auto", "zip", "tgz"], default="auto",
+                    help="archive format (default: auto = tgz on Linux, zip elsewhere)")
+    ap.add_argument("--name", help="override the bundle base name "
+                                   "(default ToLissPhoton-Installer-v<VER>-<OS>)")
+    ap.add_argument("--out", default="release", help="output dir for the archive (default: release/)")
     args = ap.parse_args()
 
-    tag = PLATFORM_TAG.get(platform.system(), platform.system().lower())
-    name = args.exe_name or f"ToLissPhoton-Installer-v{VERSION}-{tag}"
+    os_name = OS_NAME.get(platform.system(), platform.system())
+    base_name = args.name or f"ToLissPhoton-Installer-v{VERSION}-{os_name}"
+    exe_name = base_name + (".exe" if platform.system() == "Windows" else "")
+    fmt = _default_format() if args.format == "auto" else args.format
     payload = REPO / "release" / "payload"
 
-    # Build the payload first so the frozen binary always matches the current
-    # DSL sources. (make_release wipes+rebuilds release/; the exe lands in
-    # release/exe afterwards, so it survives.) make_release stages the native
-    # plugin from its default CMake build output (src/native/build/ToLissPhoton),
-    # so that must already be built — in CI, build the payload as a separate step
-    # (passing --plugin-dir with all arches merged) and run this with --skip-release.
+    # Build the payload first so the binary always matches current sources.
+    # (make_release wipes+rebuilds release/; the bundle lands under release/ after.)
     if not args.skip_release:
         print("== building release payload ==")
         subprocess.run([sys.executable, str(REPO / "build" / "make_release.py")], check=True)
     if not payload.is_dir():
-        sys.exit(f"no payload at {payload} — run without --skip-release to build it")
-
-    if args.loose:
-        build_loose(name, payload, do_zip=args.zip)
-        return
+        sys.exit(f"no payload at {payload} - run without --skip-release to build it")
 
     out = Path(args.out)
     if not out.is_absolute():
         out = REPO / out
     out.mkdir(parents=True, exist_ok=True)
     workdir = REPO / "release" / "_pyinstaller"
+    dist = workdir / "loose_dist"
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",            # single self-contained binary
-        "--console",            # the installer IS a terminal TUI — keep the console
-        "--clean", "--noconfirm",
-        "--name", name,
-        "--paths", str(REPO),                             # so `installer` imports
-        "--add-data", f"{payload}{os.pathsep}payload",    # ship the pre-built payload
-        "--distpath", str(out),
+        "--onefile", "--console", "--clean", "--noconfirm",
+        "--name", base_name,
+        "--paths", str(REPO),          # so `installer` imports
+        # NB: no --add-data — payload ships beside the exe as data/, not inside.
+        "--distpath", str(dist),
         "--workpath", str(workdir / "build"),
         "--specpath", str(workdir),
         str(REPO / "install.py"),
     ]
-    print("== freezing ==")
+    print(f"== freezing {base_name} ({os_name}, loose) ==")
     print("  " + " ".join(cmd))
     subprocess.run(cmd, check=True)
 
-    produced = out / (name + (".exe" if platform.system() == "Windows" else ""))
-    print(f"\nexecutable ready: {produced}")
-    if produced.exists():
-        print(f"  size: {produced.stat().st_size / 1e6:.1f} MB")
-    else:
-        sys.exit(f"expected output not found: {produced}")
+    # Stage the bundle folder: <base_name>/{exe, data/, README.txt}
+    stage = out / base_name
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    binary = stage / exe_name
+    shutil.copy2(dist / exe_name, binary)
+    if platform.system() != "Windows":
+        binary.chmod(0o755)
+    shutil.copytree(payload, stage / "data")
+
+    arch = next((d.name for d in (payload / "plugin").rglob("*")
+                 if d.is_dir() and d.name.endswith("_x64")), None)
+    (stage / "README.txt").write_text(  # os_name is the README kind: Windows/macOS/Linux
+        _readme.render(os_name, exe_name=exe_name, arch=arch), encoding="utf-8")
+
+    archive = _archive(stage, base_name, fmt, out, exe_name)
+    print(f"\nplatform bundle ready: {archive}")
+    print(f"  {exe_name}: {binary.stat().st_size / 1e6:.1f} MB  +  data/ ({arch or 'no arch'})")
+    print(f"  archive: {archive.name} ({archive.stat().st_size / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":

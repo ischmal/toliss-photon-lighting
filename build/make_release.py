@@ -22,12 +22,16 @@ matrix (all three `<arch>/` dirs merged into one folder) — see
 Usage:
     python build/make_release.py [--out DIR] [--plugin-dir DIR] [--zip]
 
-Output (default --out release/, gitignored like dist/):
+Output (default --out release/, gitignored like dist/) — the Python-Universal
+bundle (`python install.py`, needs only Python 3.8+, runs on any OS):
     release/install.py
     release/installer/...
+    release/README.txt
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
-    release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl
+    release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl   (all arches in CI)
     release/payload/dsl/...
+With --zip: release/ToLissPhoton-Installer-v<VER>-Python-Universal.zip
+(extracts to one ToLissPhoton-Installer-v<VER>-Python-Universal/ folder).
 """
 from __future__ import annotations
 
@@ -41,10 +45,14 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "build"))
 sys.path.insert(0, str(REPO))
 import build_objs as B  # noqa: E402
+import readme as _readme  # noqa: E402  (build/readme.py)
 from installer.constants import PLUGIN_FOLDER, VERSION, WINGS, XPL_NAME  # noqa: E402
 
 INSTALLER_ENTRY = REPO / "install.py"
 INSTALLER_PKG = REPO / "installer"
+# The loose-.py bundle is the "Python-Universal" release download: readable
+# Python that runs on any OS (its plugin/ is the fat folder with every arch).
+BUNDLE_NAME = f"ToLissPhoton-Installer-v{VERSION}-Python-Universal"
 DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py",
                        "patch_glow.py"]
 DSL_CONFIG_FILES = ["lights.style.phdsl", "lights.layout.phdsl"]
@@ -121,14 +129,22 @@ def stage_installer(out: Path):
     print("staged install.py + installer/")
 
 
+def stage_readme(out: Path):
+    (out / "README.txt").write_text(_readme.render("Python"), encoding="utf-8")
+    print("staged README.txt (Python-Universal)")
+
+
 def make_zip(out: Path) -> Path:
-    zip_path = out.parent / f"ToLissPhoton-installer-v{VERSION}.zip"
+    """Zip the bundle into out/ itself (gitignored, like the other release
+    archives), extracting to one tidy BUNDLE_NAME/ folder. The zip is written
+    into `out`, so it's skipped from its own contents (`f != zip_path`)."""
+    zip_path = out / f"{BUNDLE_NAME}.zip"
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(out.rglob("*")):
-            if f.is_file():
-                zf.write(f, f.relative_to(out.parent))
+            if f.is_file() and f != zip_path:
+                zf.write(f, Path(BUNDLE_NAME) / f.relative_to(out))
     return zip_path
 
 
@@ -158,6 +174,7 @@ def main():
     stage_plugin(payload, plugin_dir)
     stage_dsl_toolchain(payload)
     stage_installer(out)
+    stage_readme(out)
 
     if args.zip:
         zip_path = make_zip(out)

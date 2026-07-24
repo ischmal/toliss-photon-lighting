@@ -3,10 +3,10 @@
 # by hand, and never commit it. Cut releases by building and attaching the ZIP.
 dist/
 
-# release/ is generated end-to-end from build/make_release.py (install.py +
-# installer/ + the 9 pre-built OBJs) — never edit it by hand, never commit it.
+# release/ is generated end-to-end by the build/ tooling (make_release.py +
+# make_exe.py + make_allzip.py): the payload, the four per-platform bundles, and
+# the All-Platforms zip all land here — never edit by hand, never commit it.
 release/
-ToLissPhoton-installer-v*.zip
 
 # ── Local scratch (never committed) ─────────────────────────────────────────
 # Vendored third-party mods (Real Wings — someone else's assets, ~2 GB), old
