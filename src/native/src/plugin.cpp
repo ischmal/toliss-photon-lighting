@@ -441,23 +441,34 @@ static const double kStrobePeriod = 1.0, kStrobeOffset = 0.0;
 
 static std::vector<Pulse> BeaconPulses(bool led) {
     Pulse p;
-    if (led) { p.duration = 0.10; p.shape = Shape::Square; }
+    if (led) { p.duration = 0.11; p.shape = Shape::Square; }
     else     { p.duration = 0.06; p.hold = 0.40; p.shape = Shape::Decay; p.tau = 0.30; }
     return {p};
 }
 
 static std::vector<Pulse> StrobePulses(bool led, int index) {
     auto sq = [](double at, double dur) { Pulse p; p.at = at; p.duration = dur; p.shape = Shape::Square; return p; };
+    // xenon strike-and-decay flash: bright hold then a quick fade (same envelope as the tail)
+    auto decay = [](double at) {
+        Pulse p;
+        p.at = at;
+        p.duration = 0.06;
+        p.hold = 0.40;
+        p.shape = Shape::Decay;
+        p.tau = 0.30;
+        return p;
+    };
     if (led) {
         switch (index) {
-            case 0: case 1: return {sq(0.00, 0.05), sq(0.15, 0.05)};   // double wingtips
-            case 2:         return {sq(0.00, 0.10)};                    // single tail
-            case 3:         return {sq(0.00, 0.08)};                    // single tail
+            case 0: case 1: return {sq(0.00, 0.05), sq(0.11, 0.05)};   // double wingtips
+            case 2:         return {sq(0.00, 0.11)};                    // single tail
+            case 3:         return {sq(0.00, 0.11)};                    // single tail
         }
     } else {
         switch (index) {
-            case 0: case 1: return {sq(0.00, 0.04), sq(0.12, 0.04)};
-            case 2: { Pulse p; p.duration = 0.06; p.hold = 0.40; p.shape = Shape::Decay; p.tau = 0.30; return {p}; }
+            case 0:
+            case 1: return {decay(0.00), decay(0.12)};   // double wingtips, each strike-and-decay
+            case 2:         return {decay(0.00)};
             case 3:         return {sq(0.00, 0.04)};
         }
     }
