@@ -113,13 +113,21 @@ jobs:
           path: ToLissPhoton-installer-v*.zip
           if-no-files-found: error
 
-  # ── native executables, one per OS (PyInstaller can't cross-compile) ─────────
+  # ── the loose per-OS installer binaries (PyInstaller can't cross-compile) ─────
+  # Each is a LOOSE binary (no embedded payload) named installer_<os>; it reads a
+  # sibling data/ folder at runtime. The combined job below drops all three next
+  # to one shared data/. The binary is payload-independent, but make_exe --loose
+  # still stages (and we ignore) a data/ copy, so a plugin is needed to build it —
+  # hence `needs: native` + the payload step.
   exe:
     needs: native
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - { os: windows-latest, name: installer_windows, bin: installer_windows.exe }
+          - { os: macos-latest, name: installer_macos, bin: installer_macos }
+          - { os: ubuntu-latest, name: installer_linux, bin: installer_linux }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -134,24 +142,48 @@ jobs:
           path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
       - name: Install PyInstaller
         run: python -m pip install --upgrade pyinstaller
-      # Stage the payload with the full fat plugin (all three arches) first, then
-      # freeze against it — make_exe --skip-release reuses the release/payload
-      # built here (it can't compile the plugin itself). The installer .exe ships
-      # every arch regardless of which OS it runs on, so every matrix leg needs
-      # the merged folder, not just its own arch.
       - name: Build release payload (fat plugin)
         run: python build/make_release.py --plugin-dir plugin
-      - name: Freeze installer
-        run: python build/make_exe.py --skip-release
+      - name: Freeze loose installer (installer_<os>)
+        run: python build/make_exe.py --skip-release --loose --exe-name ${{ matrix.name }}
       - uses: actions/upload-artifact@v4
         with:
-          name: installer-${{ matrix.os }}
-          path: release/exe/*
+          name: installer-${{ matrix.name }}
+          path: release/snapshot/${{ matrix.name }}/${{ matrix.bin }}
           if-no-files-found: error
 
-  # ── attach everything to a GitHub Release (tag pushes only) ──────────────────
+  # ── assemble the single all-platform zip (data/ + README + 3 installers) ──────
+  combined:
+    needs: [native, exe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download + merge native plugins (all arches)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
+      - name: Download + merge installer binaries (all OSes)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: exes # -> exes/installer_windows.exe, installer_macos, installer_linux
+      - name: Assemble combined zip
+        run: python build/make_combined.py --exes exes --plugin-dir plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: combined-all-platforms
+          path: release/combined/*.zip
+          if-no-files-found: error
+
+  # ── attach the combined zip + the loose-.py bundle to a Release (tags only) ───
   release:
-    needs: [bundle, exe]
+    needs: [bundle, combined]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -161,8 +193,8 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.zip' -o -name 'ToLissPhoton-Installer-*' \) \
-            -exec cp {} dist/ \;
+          # the combined all-platform zip + the separate loose-.py bundle zip
+          find artifacts -type f -name '*.zip' -exec cp {} dist/ \;
           ls -la dist
       - uses: softprops/action-gh-release@v2
         with:

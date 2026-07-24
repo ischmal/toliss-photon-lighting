@@ -31,3 +31,5 @@ __pycache__/
 # commit; CMake build tree is generated. See src/native/README.md.
 src/native/SDK/
 src/native/build/
+docs/phase_ii.md
+docs/design.md

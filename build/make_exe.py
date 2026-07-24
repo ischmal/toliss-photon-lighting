@@ -150,10 +150,15 @@ def main():
                          "folder (+ README) as a ready-to-hand-off snapshot")
     ap.add_argument("--zip", action="store_true",
                     help="with --loose, also zip the snapshot to release/<name>.zip")
+    ap.add_argument("--exe-name",
+                    help="override the base name of the produced binary (default: "
+                         "ToLissPhoton-Installer-v<VER>-<os>). CI uses this to name "
+                         "the per-OS loose binaries installer_windows / _macos / _linux "
+                         "for the combined all-platform zip (build/make_combined.py).")
     args = ap.parse_args()
 
     tag = PLATFORM_TAG.get(platform.system(), platform.system().lower())
-    name = f"ToLissPhoton-Installer-v{VERSION}-{tag}"
+    name = args.exe_name or f"ToLissPhoton-Installer-v{VERSION}-{tag}"
     payload = REPO / "release" / "payload"
 
     # Build the payload first so the frozen binary always matches the current
