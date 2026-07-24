@@ -410,12 +410,15 @@ class Back(Exception):
 
 
 def menu(stage, step, prompt, options, *, back="go back", cont="continue",
-         header_lines=None, allow_back=True, disabled=None, index=0):
+         header_lines=None, footer_lines=None, allow_back=True, disabled=None,
+         index=0):
     """Arrow/number-navigable menu rendered through the layout engine. Returns the
     chosen index; raises Back on ESC. `header_lines` are static (non-selectable)
-    rows drawn above the options (used for the aircraft table columns). `index`
-    is the initially-highlighted option (clamped, and advanced off a disabled
-    row)."""
+    rows drawn above the options (used for the aircraft table columns).
+    `footer_lines` are static rows drawn below the options (used for a status
+    note after an action, so it appears on the same screen instead of a
+    separate flash). `index` is the initially-highlighted option (clamped, and
+    advanced off a disabled row)."""
     disabled = disabled or set()
     idx = index if 0 <= index < len(options) else 0
     while idx in disabled:
@@ -434,6 +437,8 @@ def menu(stage, step, prompt, options, *, back="go back", cont="continue",
                 body.append(f"    {C.BR_BLACK}{i + 1}. {opt}{C.RESET}")
             else:
                 body.append(_option(i, opt, i == idx))
+        if footer_lines:
+            body += list(footer_lines)
         render(stage, body, back=back if allow_back else None, cont=cont,
                focus=opt_start + idx)
         k = read_key()
@@ -457,12 +462,19 @@ def menu(stage, step, prompt, options, *, back="go back", cont="continue",
             raise Back
 
 
-def text_prompt(stage, step, prompt, initial=""):
+def text_prompt(stage, step, prompt, initial="", error: str | None = None):
+    """A single-line text field. `error`, if given, renders as a warning line
+    above the field on the first frame (e.g. 'that path doesn't look right') —
+    it clears itself the moment the user edits the text, so it never lingers
+    once they've started fixing it."""
     buf = list(initial)
     while True:
         shown = "".join(buf)
         field = f"  {C.BR_GREEN}►{C.RESET} {C.BR_WHITE}{shown}{C.RESET}\033[7m \033[0m"
-        body = ["", _step(step), "", prompt, "", field]
+        body = ["", _step(step), "", prompt]
+        if error:
+            body += ["", f"{C.RED}{C.BOLD}⚠ {error}{C.RESET}"]
+        body += ["", field]
         render(stage, body, back="go back", cont="continue", focus=len(body) - 1)
         k = read_key()
         if k == KEY_ENTER:
@@ -470,9 +482,11 @@ def text_prompt(stage, step, prompt, initial=""):
         elif k == KEY_ESC:
             raise Back
         elif k == KEY_BACKSPACE:
+            error = None
             if buf:
                 buf.pop()
         elif len(k) == 1 and k.isprintable():
+            error = None
             buf.append(k)
 
 

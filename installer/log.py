@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,7 +33,14 @@ class Log:
         self.write("user opened installer log")
         try:
             if os.name == "nt":
-                os.startfile(self.path)  # type: ignore[attr-defined]
+                # NOT os.startfile(): a `.log` file frequently has no registered
+                # file association, in which case os.startfile pops Windows'
+                # "How do you want to open this file?" shell dialog (the log never
+                # opens) and that shell interaction disturbs the console — the
+                # reported "opening the log scrolls the header off the top" bug.
+                # notepad.exe is always present, opens any text file regardless of
+                # association, and is a GUI app so it never writes to the console.
+                subprocess.Popen(["notepad.exe", str(self.path)])
             elif sys.platform == "darwin":
                 os.system(f'open "{self.path}"')
             else:

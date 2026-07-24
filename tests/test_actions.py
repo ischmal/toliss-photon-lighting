@@ -22,6 +22,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from installer import actions, payload
+from installer.constants import VERSION
 
 RELEASE_DIR: Path | None = None
 FAKE_PLUGIN_DIR: Path | None = None
@@ -103,7 +104,7 @@ class InstallUninstallTests(unittest.TestCase):
         self.assertTrue(any("Installed" in s for s in steps))
 
         installed = self.fa.obj_path.read_text(encoding="utf-8")
-        self.assertIn("ToLissPhoton version: 0.4 wing: stock", installed)
+        self.assertIn(f"ToLissPhoton version: {VERSION} wing: stock", installed)
 
         backup = self.fa.objects / "Photon Backup Files" / self.fa.obj_path.name
         self.assertEqual(backup.read_text(encoding="utf-8"), original)
@@ -112,7 +113,7 @@ class InstallUninstallTests(unittest.TestCase):
         self.assertIsNone(actions.read_manifest(self.fa.objects))
         actions.install(self.fa.ac, "durantula", self.fa.xplane_root, self.log)
         manifest = actions.read_manifest(self.fa.objects)
-        self.assertEqual(manifest["version"], "0.4")
+        self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(manifest["wing"], "durantula")
         self.assertIn(self.fa.obj_path.name, manifest["backed_up"])
 
@@ -238,7 +239,7 @@ class A339InstallTests(unittest.TestCase):
         steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
         self.assertTrue(any("Backed up" in s for s in steps))
         installed = self.fa.obj_path.read_text(encoding="utf-8")
-        self.assertIn("ToLissPhoton version: 0.4 wing: stock", installed)
+        self.assertIn(f"ToLissPhoton version: {VERSION} wing: stock", installed)
         backup = self.fa.objects / "Photon Backup Files" / self.fa.obj_path.name
         self.assertEqual(backup.read_text(encoding="utf-8"), original)
 

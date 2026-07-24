@@ -182,6 +182,29 @@ def _patch_glow(objects: Path, airframe: str, dry_run: bool, log) -> int:
 
 
 # ─── plugin state ────────────────────────────────────────────────────────────
+_CMP_CHUNK = 1 << 16
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    """Byte-equality that avoids reading file contents whenever it can: a size
+    check first (a different plugin build almost always differs in size, so the
+    common upgrade case is decided from stat() alone, no file opens), then a
+    chunked compare that stops at the first differing block. Unreadable/missing
+    files count as 'not identical' — callers treat that as needs-(re)write."""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with a.open("rb") as fa, b.open("rb") as fb:
+            while True:
+                ca = fa.read(_CMP_CHUNK)
+                if ca != fb.read(_CMP_CHUNK):
+                    return False
+                if not ca:
+                    return True
+    except OSError:
+        return False
+
+
 def plugin_is_current(xplane_root) -> bool:
     """True if the native plugin already installed in X-Plane is byte-identical to
     the one this installer would write (every bundled `.xpl` present and matching).
@@ -193,11 +216,8 @@ def plugin_is_current(xplane_root) -> bool:
     if not dest_root.is_dir():
         return False
     try:
-        for rel, src in payload.plugin_files():
-            dest = dest_root / rel
-            if not dest.is_file() or dest.read_bytes() != src.read_bytes():
-                return False
-        return True
+        return all(_files_identical(dest_root / rel, src)
+                   for rel, src in payload.plugin_files())
     except (OSError, payload.PayloadError):
         return False
 
@@ -239,15 +259,11 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
     wrote_plugin = False
     for rel, src in payload.plugin_files():
         dest = plugin_root / rel
-        data = src.read_bytes()
-        try:
-            if dest.is_file() and dest.read_bytes() == data:
-                continue  # identical — leave the (possibly locked) file untouched
-        except OSError:
-            pass  # unreadable dest -> fall through and (re)write it
+        if _files_identical(dest, src):
+            continue  # identical — leave the (possibly locked) file untouched
         wrote_plugin = True
         if not dry_run:
-            _atomic_write_bytes(dest, data)
+            _atomic_write_bytes(dest, src.read_bytes())
     if wrote_plugin:
         log.write(f"wrote native plugin -> {plugin_root} "
                   f"({', '.join(arches)}; dry_run={dry_run})")

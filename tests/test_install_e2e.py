@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO))
 
 import install
 from installer import actions, detect, payload, tui
+from installer.constants import VERSION
 
 RELEASE_DIR: Path | None = None
 FAKE_PLUGIN_DIR: Path | None = None
@@ -260,11 +261,11 @@ def _plain(s: str) -> str:
 class CompleteSummaryTests(unittest.TestCase):
     def test_install_summary(self):
         s = _plain(install._complete_summary({"name": "ToLiss A321"}, "durantula", True))
-        self.assertEqual(s, "ToLiss Photon v0.4 (Durantula) installed in ToLiss A321.")
+        self.assertEqual(s, f"ToLiss Photon v{VERSION} (Durantula) installed in ToLiss A321.")
 
     def test_stock_install_summary(self):
         s = _plain(install._complete_summary({"name": "ToLiss A320"}, "stock", True))
-        self.assertEqual(s, "ToLiss Photon v0.4 (Default) installed in ToLiss A320.")
+        self.assertEqual(s, f"ToLiss Photon v{VERSION} (Default) installed in ToLiss A320.")
 
     def test_uninstall_summary(self):
         s = _plain(install._complete_summary({"name": "ToLiss A319"}, "uninstall", True))
@@ -279,8 +280,8 @@ class ActionLabelTests(unittest.TestCase):
     def test_parenthetical_is_dark_gray(self):
         ac = {"photon": "0.3", "wing": "durantula", "stale": False}
         label = install._action_label(ac, "durantula")
-        self.assertIn(tui.C.BR_BLACK, label)          # the note is dark gray
-        self.assertIn("v0.3 → v0.4", _plain(label))   # an upgrade reinstall
+        self.assertIn(tui.C.BR_BLACK, label)                  # the note is dark gray
+        self.assertIn(f"v0.3 → v{VERSION}", _plain(label))    # an upgrade reinstall
 
     def test_switch_wing_label(self):
         ac = {"photon": "0.4", "wing": "durantula", "stale": False}

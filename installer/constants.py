@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-VERSION = "0.4"
+VERSION = "0.5"
 
 # airframe key -> (aircraft-folder glob under Aircraft/, X-Plane tree folder,
 # OBJ filename, fallback pretty name if skunkcrafts_updater.cfg is missing).
@@ -77,4 +77,6 @@ PLUGIN_FOLDER = "ToLissPhoton"
 XPL_NAME = "ToLissPhoton.xpl"
 PLUGIN_DIR_REL = Path("Resources") / "plugins" / PLUGIN_FOLDER
 
-PHOTON_URL = "https://github.com/"  # placeholder — the eventual release page
+XPLANE_ORG_URL = ("https://forums.x-plane.org/files/file/"
+                  "100717-toliss-photon-exterior-lighting-mod-for-toliss-a319a320a321")
+GITHUB_URL = "https://github.com/ischmal/toliss-photon-lighting"

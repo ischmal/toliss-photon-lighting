@@ -19,14 +19,16 @@ touching a real X-Plane install.
 from __future__ import annotations
 
 import argparse
+import threading
 import time
 import webbrowser
 from pathlib import Path
 
-from installer import actions, detect, payload
+from installer import actions, config, detect, payload
 from installer import tui
 from installer.constants import (
-    AIRFRAMES, PHOTON_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS_FOR,
+    AIRFRAMES, GITHUB_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS_FOR,
+    XPLANE_ORG_URL,
 )
 from installer.log import Log
 from installer.tui import C, Back, flash, menu, render, text_prompt
@@ -38,6 +40,9 @@ DRY_RUN = False
 
 # Cosmetic per-step reveal delay on the Perform screen (see screen_perform).
 STEP_DELAY = 0.1
+# Cadence of the animated "Working…" ellipsis while the (blocking) filesystem
+# work runs on a worker thread — short enough to read as live, not frozen.
+WORKING_ANIM_INTERVAL = 0.3
 
 
 # ─── screen 1: launch ─────────────────────────────────────────────────────────
@@ -95,33 +100,72 @@ def screen_launch():
 STEP_XPLANE = "Step 1.  Where is X-Plane installed?"
 
 
+def _clean_manual_path(raw: str) -> Path:
+    """Undo the quoting a drag-and-drop of a folder onto the console window
+    often adds (Windows/macOS both wrap a dropped path that contains spaces in
+    double quotes; some shells use single quotes instead) before turning it
+    into a Path — otherwise the literal quote characters end up part of the
+    path and it never validates."""
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
+        s = s[1:-1].strip()
+    return Path(s)
+
+
 def screen_xplane():
     roots = detect.xplane_candidates(LOG)
+
+    remembered = config.load_saved_root()
+    if remembered is not None:
+        try:
+            remembered = remembered.resolve()
+        except OSError:
+            pass
+        if detect._valid_root(remembered):
+            LOG.write(f"remembered X-Plane root still valid: {remembered}")
+            if remembered not in roots:
+                roots = [remembered] + roots
+        else:
+            LOG.write(f"remembered X-Plane root no longer valid, discarding: "
+                      f"{remembered}", "WARN")
+            config.clear_saved_root()
+            remembered = None
+
     if not roots:
         LOG.write("no X-Plane install auto-detected", "WARN")
+    default_idx = roots.index(remembered) if remembered in roots else 0
+
     while True:
-        options = [str(r) for r in roots] + ["Somewhere else…"]
+        labels = [str(r) + (f"  {C.DIM}(last used){C.RESET}" if r == remembered else "")
+                 for r in roots]
+        options = labels + ["Somewhere else…"]
         choice = menu(STAGE_ROOT, STEP_XPLANE,
-                     "Please select your root X-Plane 12 folder:", options)
+                     "Please select your root X-Plane 12 folder:", options,
+                     index=default_idx)
         if choice == len(roots):  # Somewhere else…
-            try:
-                manual = text_prompt(
-                    STAGE_ROOT, STEP_XPLANE,
-                    "Manually specify your X-Plane 12 folder below:")
-            except Back:
-                continue
-            if not manual:
-                continue
-            p = Path(manual)
-            if not detect._valid_root(p):
-                flash(STAGE_ROOT, [
-                    f"{C.RED}That doesn't look like an X-Plane 12 folder:{C.RESET} {manual}",
-                    f"{C.DIM}Expected an Aircraft/ and a Resources/ folder inside it.{C.RESET}",
-                ])
-                LOG.write(f"manual X-Plane path rejected: {manual}", "WARN")
-                continue
-            LOG.write(f"selected X-Plane (manual): {p}")
-            return p
+            manual = ""
+            error = None
+            while True:
+                try:
+                    manual = text_prompt(
+                        STAGE_ROOT, STEP_XPLANE,
+                        "Manually specify your X-Plane 12 folder below:",
+                        initial=manual, error=error)
+                except Back:
+                    break  # back to the root menu, same options
+                if not manual:
+                    error = None
+                    continue
+                p = _clean_manual_path(manual)
+                if not detect._valid_root(p):
+                    LOG.write(f"manual X-Plane path rejected: {manual}", "WARN")
+                    error = (f"'{p}' doesn't look like an X-Plane 12 folder — "
+                            f"expected an Aircraft/ and a Resources/ folder inside it.")
+                    continue
+                LOG.write(f"selected X-Plane (manual): {p}")
+                config.save_root(p)
+                return p
+            continue
         LOG.write(f"selected X-Plane: {roots[choice]}")
         return roots[choice]
 
@@ -140,9 +184,13 @@ def _aircraft_cells(ac: dict) -> tuple[str, str, tuple[str, str]]:
     if ac.get("stale"):
         c3 = (f"Needs reinstall (v{ac['photon']})", C.BR_YELLOW)
     elif ac["photon"]:
-        tag = f"v{ac['photon']}" + (f" ({WING_LABEL.get(ac['wing'], ac['wing'])})"
-                                    if ac["wing"] else "")
-        c3 = (tag, C.BR_GREEN)
+        wing_note = (f" ({WING_LABEL.get(ac['wing'], ac['wing'])})"
+                    if ac["wing"] else "")
+        if ac["photon"] != VERSION:
+            c3 = (f"Update available (v{ac['photon']} → v{VERSION}){wing_note}",
+                  C.BR_CYAN)
+        else:
+            c3 = (f"v{ac['photon']}{wing_note}", C.BR_GREEN)
     else:
         c3 = ("Not installed", C.DIM)
     return c1, c2, c3
@@ -191,19 +239,24 @@ def _aircraft_option(ac: dict, cols: tuple[int, int, int]) -> str:
 
 
 def screen_aircraft(xplane_root: Path):
-    aircraft = detect.detect_aircraft(xplane_root, LOG)
-    if not aircraft:
-        flash(STAGE_AIRCRAFT, [
-            f"{C.RED}No compatible ToLiss aircraft found under{C.RESET}",
-            f"{C.DIM}{xplane_root / 'Aircraft'}{C.RESET}"])
-        raise Back
-    cols = _aircraft_columns(aircraft)
-    options = [_aircraft_option(ac, cols) for ac in aircraft]
-    choice = menu(STAGE_AIRCRAFT, "Step 2.  Which aircraft do you wish to modify?",
-                  "Select a supported aircraft:", options,
-                  header_lines=_aircraft_header(cols))
-    LOG.write(f"selected aircraft: {aircraft[choice]['folder']}")
-    return aircraft[choice]
+    while True:
+        aircraft = detect.detect_aircraft(xplane_root, LOG)
+        if not aircraft:
+            flash(STAGE_AIRCRAFT, [
+                f"{C.RED}No compatible ToLiss aircraft found under{C.RESET}",
+                f"{C.DIM}{xplane_root / 'Aircraft'}{C.RESET}"])
+            raise Back
+        cols = _aircraft_columns(aircraft)
+        options = [_aircraft_option(ac, cols) for ac in aircraft]
+        options.append(f"{C.BR_BLACK}Refresh list…{C.RESET}")
+        choice = menu(STAGE_AIRCRAFT, "Step 2.  Which aircraft do you wish to modify?",
+                      "Select a supported aircraft:", options,
+                      header_lines=_aircraft_header(cols))
+        if choice == len(aircraft):  # Refresh list… -> redo detection from scratch
+            LOG.write("user requested aircraft list refresh")
+            continue
+        LOG.write(f"selected aircraft: {aircraft[choice]['folder']}")
+        return aircraft[choice]
 
 
 # ─── screen 4: aircraft action ────────────────────────────────────────────────
@@ -279,10 +332,18 @@ def screen_check_not_running(ac: dict, action: str, xplane_root: Path):
     While X-Plane is up the screen rechecks every POLL_INTERVAL_SECONDS and, the
     instant it closes, returns automatically. ESC goes back a step (re-choose the
     action); ENTER is an explicit 'continue anyway' escape hatch."""
+    # Render feedback BEFORE the (occasionally slow, e.g. on a network drive)
+    # byte-for-byte plugin comparison below — otherwise the previous screen
+    # sits frozen with no feedback while it runs, and looks like a hang.
+    render(STAGE_RUN, ["", tui._step("Step 3b.  Checking installed plugin…"), "",
+                       f"{C.DIM}Comparing the installed plugin against this release…{C.RESET}"])
     if action != "uninstall" and actions.plugin_is_current(xplane_root):
-        if detect.xplane_running():
-            LOG.write("X-Plane running, but the plugin is already current — this "
-                      "run only rewrites OBJs (safe while loaded); skipping wait")
+        # No process check here on purpose: it would only refine a log message,
+        # and spawning tasklist/ps costs ~0.5-3 s — the bulk of what made this
+        # screen feel slow. Whether or not X-Plane is up, this run only rewrites
+        # OBJs (safe while loaded), so the wait is skipped either way.
+        LOG.write("plugin already current — this run only rewrites OBJs (safe "
+                  "even while X-Plane is running); skipping the close-X-Plane wait")
         return
 
     warned = False
@@ -340,23 +401,52 @@ def screen_plugin_disposition(ac: dict, xplane_root: Path) -> bool:
 def screen_perform(ac: dict, action: str, xplane_root: Path):
     verb = "Uninstalling…" if action == "uninstall" else "Installing…"
     title = tui._step("Step 4.  " + verb)
-    render(STAGE_RUN, ["", title, "", f"  {C.DIM}Working…{C.RESET}"])
 
-    error = None
-    steps: list[str] = []
-    try:
-        if action == "uninstall":
-            remove_plugin = screen_plugin_disposition(ac, xplane_root)
-            steps = actions.uninstall(ac, xplane_root, LOG, dry_run=DRY_RUN,
-                                      remove_plugin=remove_plugin)
-        else:
-            steps = actions.install(ac, action, xplane_root, LOG, dry_run=DRY_RUN)
-    except actions.ActionError as e:
-        error = str(e)
-        LOG.write(f"ACTION FAILED: {e}", "ERROR")
-    except OSError as e:
-        error = f"unexpected filesystem error: {e}"
-        LOG.write(f"ACTION FAILED: {e}", "ERROR")
+    # Any interactive prompt must run on the main thread BEFORE the spinner owns
+    # it (the animation loop below reads no keys). screen_plugin_disposition may
+    # raise Back — let it propagate to the flow, unchanged.
+    remove_plugin = False
+    if action == "uninstall":
+        remove_plugin = screen_plugin_disposition(ac, xplane_root)
+
+    # The real filesystem work is synchronous and can take a beat (backing up
+    # OBJs, RealWings/glow patching, plugin copy), during which a static
+    # "Working…" looks hung. Run it on a worker thread and animate the ellipsis
+    # on the main thread so the screen visibly stays alive.
+    result: dict = {}
+
+    def _work():
+        try:
+            if action == "uninstall":
+                result["steps"] = actions.uninstall(
+                    ac, xplane_root, LOG, dry_run=DRY_RUN, remove_plugin=remove_plugin)
+            else:
+                result["steps"] = actions.install(
+                    ac, action, xplane_root, LOG, dry_run=DRY_RUN)
+        except actions.ActionError as e:
+            result["error"] = str(e)
+            LOG.write(f"ACTION FAILED: {e}", "ERROR")
+        except OSError as e:
+            result["error"] = f"unexpected filesystem error: {e}"
+            LOG.write(f"ACTION FAILED: {e}", "ERROR")
+        except BaseException as e:  # never let the worker vanish silently — that
+            result["exc"] = e       # would render as a (false) success; re-raised below
+
+    worker = threading.Thread(target=_work, daemon=True)
+    worker.start()
+    tick = 0
+    while True:  # renders at least once, then animates until the work finishes
+        dots = ("." * (1 + tick % 3)).ljust(3)
+        render(STAGE_RUN, ["", title, "", f"  {C.DIM}Working{dots}{C.RESET}"])
+        worker.join(WORKING_ANIM_INTERVAL)  # wakes early the instant work finishes
+        if not worker.is_alive():
+            break
+        tick += 1
+
+    if "exc" in result:
+        raise result["exc"]  # unexpected error: propagate as before, no false success
+    steps: list[str] = result.get("steps", [])
+    error = result.get("error")
 
     # Reveal each completed step one at a time so the run reads as a deliberate,
     # step-by-step process instead of an instant flash. Purely cosmetic — the
@@ -416,28 +506,33 @@ def screen_complete(ac: dict, action: str, success: bool):
     else:
         title = "Step 5.  Installation complete"
     summary = _complete_summary(ac, action, success)
-    options = ["Exit installer", "Modify another aircraft", "Open installer log",
-              "Find ToLiss Photon online"]
+    options = ["Exit installer", "Modify another aircraft", "View installer log…",
+              "Open X-Plane.org Page…", "Open GitHub Project…"]
+    note = None
     while True:
-        try:
-            choice = menu(STAGE_COMPLETE, title, "",
-                         header_lines=[summary, "", "What would you like to do next:", ""],
-                         options=options)
-        except Back:
-            return "restart"
+        # The install/uninstall this screen reports on already happened — there
+        # is no "previous step" to rewind to, so ESC/back is disabled here
+        # rather than restarting the whole installer (unlike every other
+        # screen, which only steps back one stage).
+        choice = menu(STAGE_COMPLETE, title, "",
+                     header_lines=[summary, "", "What would you like to do next:", ""],
+                     footer_lines=(["", note] if note else None),
+                     options=options, allow_back=False)
+        note = None
         if choice == 0:
             return "exit"
         if choice == 1:
             return "again"
         if choice == 2:
             err = LOG.open_in_editor()
-            flash(STAGE_COMPLETE, [
-                f"{C.RED}Could not open log: {err}{C.RESET}" if err
-                else f"{C.GREEN}Opened installer log:{C.RESET}",
-                f"{C.DIM}{LOG.path}{C.RESET}"])
+            note = (f"{C.RED}Could not view installer log: {err}{C.RESET}" if err
+                   else f"{C.BR_BLACK}Viewed installer log: {LOG.path}{C.RESET}")
         elif choice == 3:
-            webbrowser.open(PHOTON_URL)
-            flash(STAGE_COMPLETE, [f"{C.GREEN}Opened ToLiss Photon's page in your browser.{C.RESET}"])
+            webbrowser.open(XPLANE_ORG_URL)
+            note = f"{C.BR_BLACK}Opened the X-Plane.org page in your browser.{C.RESET}"
+        elif choice == 4:
+            webbrowser.open(GITHUB_URL)
+            note = f"{C.BR_BLACK}Opened the GitHub project in your browser.{C.RESET}"
 
 
 # ─── exit ─────────────────────────────────────────────────────────────────────
@@ -475,29 +570,44 @@ def main():
         screen_launch()
         xplane_root = Path(args.xplane_root) if args.xplane_root else None
         while True:
-            try:
-                if xplane_root is None:
+            # ─ Step 1: X-Plane root ─ ESC here exits (there's no earlier real
+            # step to fall back to — the launch screen already had its own
+            # ESC-exits-immediately handling).
+            if xplane_root is None:
+                try:
                     xplane_root = screen_xplane()
-                ac = screen_aircraft(xplane_root)
-                while True:
-                    action = screen_action(ac)
-                    try:
-                        screen_check_not_running(ac, action, xplane_root)
-                    except Back:
-                        continue  # backed out of the close-X-Plane wait -> reconfigure
+                except Back:
                     break
-                success = screen_perform(ac, action, xplane_root)
+
+            # ─ Step 2: aircraft selection ─ ESC here is the ONE place that
+            # legitimately steps all the way back to Step 1 (a different root
+            # may have different aircraft under it).
+            try:
+                ac = screen_aircraft(xplane_root)
+            except Back:
+                xplane_root = None
+                continue
+
+            # ─ Step 3+: configure / run / complete for this aircraft ─ every
+            # ESC from here only steps back ONE stage, never back to Step 1.
+            while True:
+                try:
+                    action = screen_action(ac)
+                except Back:
+                    break  # -> Step 2 (aircraft selection), same root
+                try:
+                    screen_check_not_running(ac, action, xplane_root)
+                except Back:
+                    continue  # -> re-choose the action, still Step 3
+                try:
+                    success = screen_perform(ac, action, xplane_root)
+                except Back:
+                    continue  # backed out of a sub-prompt (e.g. uninstall
+                              # plugin disposition) -> re-choose the action
                 nxt = screen_complete(ac, action, success)
                 if nxt == "exit":
-                    break
-                if nxt == "restart":
-                    xplane_root = None
-                # "again" -> back to aircraft selection with the same root
-            except Back:
-                if xplane_root is not None:
-                    xplane_root = None
-                    continue
-                break
+                    raise SystemExit(_quit())
+                break  # "again" -> Step 2 (aircraft selection), same root
         raise SystemExit(_quit())
     except KeyboardInterrupt:
         raise SystemExit(_quit())
