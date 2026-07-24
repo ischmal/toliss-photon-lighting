@@ -1,0 +1,959 @@
+// ============================================================================
+// ToLiss Photon Lighting — Phase II config (schema v3) — SUPERSEDED
+// ============================================================================
+// !! This file has been replaced by the DSL pair lights.style + lights.layout
+// !! (see dsl.md). It is kept as a frozen reference of the migration source;
+// !! the build only reads it if the DSL files are missing. DO NOT EDIT.
+// ============================================================================
+// Arranged by concern: palettes -> categories (which profile is "original") ->
+// lightTypes (appearance: class + color + per-profile intensity + cone) ->
+// mounts -> airframes (placement + gating). Objects with 2+ properties are
+// one-per-line; number arrays and single-property objects stay inline.
+// color is stated explicitly on every light type (nav wingtips are per-side).
+//
+// Verify:  python build/build_objs.py check --airframe a320
+{
+  "schema": 3,
+  // -- PALETTES: rgb per profile (halogen/xenon/led) x color x bb/sp --
+  "palettes": {
+    "led": {
+      "white": {
+        "bb": [0.66, 0.91, 1],
+        "sp": [0.66, 0.91, 1]
+      },
+      "red": {
+        "bb": [1, 0.03, 0],
+        "sp": [1, 0.03, 0]
+      },
+      "green": {
+        "bb": [0.06, 1, 0],
+        "sp": [0.06, 1, 0]
+      }
+    },
+    "halogen": {
+      "white": {
+        "bb": [1, 0.7, 0.44],
+        "sp": [1, 0.7, 0.44]
+      },
+      "red": {
+        "bb": [1, 0.15, 0.07],
+        "sp": [1, 0.15, 0.07]
+      },
+      "green": {
+        "bb": [0.12, 0.77, 0.25],
+        "sp": [0.12, 0.77, 0.25]
+      }
+    },
+    "xenon": {
+      "white": {
+        "bb": [0.45, 0.45, 1],
+        "sp": [0.75, 0.75, 1]
+      },
+      "red": {
+        "bb": [1, 0.03, 0.05],
+        "sp": [1, 0.03, 0.05]
+      }
+    }
+  },
+  // -- CATEGORIES: `original` = palette for the dataref=0 branch --
+  "categories": {
+    "nav": { "original": "halogen" },
+    "strobe": { "original": "xenon" },
+    "beacon": { "original": "xenon" },
+    "landing": { "original": "halogen" },
+    "taxi": { "original": "halogen" },
+    "to": { "original": "halogen" },
+    "rwyturnoff": { "original": "halogen" },
+    "wing": { "original": "halogen" },
+    "logo": { "original": "halogen" }
+  },
+  // -- LIGHT TYPES (appearance): class + color + per-profile intensity + cone --
+  "lightTypes": {
+    "nav_tail_bb": {
+      "class": "airplane_nav_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 600,
+        "led": 600
+      },
+      "cone": 0.1,
+      "dir": [0, 0, 1]
+    },
+    "nav_tail_sp": {
+      "class": "airplane_nav_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 600,
+        "led": 1000
+      },
+      "cone": 0.13,
+      "dir": [-0.003, -0.153, 0.988]
+    },
+    "nav_marker": {
+      "class": "airplane_nav_bb",
+      "color": {
+        "port": "red",
+        "starboard": "green"
+      },
+      "intensity": {
+        "halogen": 50,
+        "led": 60
+      },
+      "cone": 0.1
+    },
+    "nav_beam": {
+      "class": "airplane_nav_bb",
+      "color": {
+        "port": "red",
+        "starboard": "green"
+      },
+      "intensity": {
+        "halogen": {
+          "port": 5000,
+          "starboard": 4000
+        },
+        "led": {
+          "port": 6000,
+          "starboard": 5000
+        }
+      },
+      "cone": 0.2
+    },
+    "nav_spill": {
+      "class": "airplane_nav_pm",
+      "color": {
+        "port": "red",
+        "starboard": "green"
+      },
+      "intensity": {
+        "halogen": 1000,
+        "led": {
+          "port": 4000,
+          "starboard": 3000
+        }
+      },
+      "cone": 0.5
+    },
+    "strobe_tail_bb": {
+      "class": "airplane_strobe_bb",
+      "color": "white",
+      "intensity": {
+        "xenon": 14000,
+        "led": 14000
+      },
+      "cone": 0.087,
+      "dir": [0.001, -0.174, 0.985],
+      "index": 2
+    },
+    "strobe_tail_sp": {
+      "class": "airplane_strobe_pm",
+      "color": "white",
+      "intensity": {
+        "xenon": 6000,
+        "led": 6000
+      },
+      "cone": 0.091,
+      "dir": [0, -0.174, 0.985],
+      "index": 2
+    },
+    "strobe_marker": {
+      "class": "airplane_strobe_bb",
+      "color": "white",
+      "intensity": {
+        "xenon": 300,
+        "led": 300
+      },
+      "cone": 0.2
+    },
+    "strobe_beam": {
+      "class": "airplane_strobe_bb",
+      "color": "white",
+      "intensity": {
+        "xenon": 30000,
+        "led": 30000
+      },
+      "cone": 0.01
+    },
+    "strobe_spill": {
+      "class": "airplane_strobe_pm",
+      "color": "white",
+      "intensity": {
+        "xenon": 8000,
+        "led": 8000
+      },
+      "cone": 0.091
+    },
+    "beacon_bb": {
+      "class": "airplane_beacon_bb",
+      "color": "red",
+      "intensity": {
+        "xenon": 18000,
+        "led": 12000
+      },
+      "cone": 1,
+      "dir": [0, 0, 0]
+    },
+    "beacon_pm": {
+      "class": "airplane_beacon_pm",
+      "color": "red",
+      "intensity": {
+        "xenon": 4000,
+        "led": 4000
+      },
+      "cone": 1,
+      "dir": [0, 0, 0]
+    },
+    "logo_bb": {
+      "class": "airplane_generic_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 800,
+        "led": 1000
+      },
+      "cone": {
+        "halogen": 0.3,
+        "led": 0.5
+      },
+      "dir": [0, 1, 0]
+    },
+    "logo_pm": {
+      "class": "airplane_generic_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 3000,
+        "led": 5000
+      },
+      "cone": 0.75
+    },
+    "landing_bb": {
+      "class": "airplane_landing_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 4000,
+        "led": 6000
+      },
+      "cone": 0.96
+    },
+    "landing_main": {
+      "class": "airplane_landing_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 504900,
+        "led": 1000000
+      },
+      "cone": 0.985
+    },
+    "landing_mid": {
+      "class": "airplane_landing_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 105600,
+        "led": 300000
+      },
+      "cone": 0.88
+    },
+    "landing_wide": {
+      "class": "airplane_landing_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 50490,
+        "led": 200000
+      },
+      "cone": 0.7
+    },
+    "to_bb": {
+      "class": "airplane_generic_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 4000,
+        "led": 4000
+      },
+      "cone": 0.574,
+      "dir": [0.087, -0.996, 0]
+    },
+    "to_pm": {
+      "class": "airplane_generic_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 80000,
+        "led": 120000
+      },
+      "cone": 0.866,
+      "dir": [0.087, -0.996, 0]
+    },
+    "taxi_pm": {
+      "class": "airplane_taxi_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 80000,
+        "led": 100000
+      },
+      "cone": 0.866,
+      "dir": [0.087, -0.996, 0]
+    },
+    "rwy_bb": {
+      "class": "airplane_generic_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 3000,
+        "led": 3000
+      },
+      "cone": 0.259
+    },
+    "rwy_pm": {
+      "class": "airplane_generic_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 60000,
+        "led": 80000
+      },
+      "cone": 0.866
+    },
+    "wing_bb": {
+      "class": "airplane_generic_bb",
+      "color": "white",
+      "intensity": {
+        "halogen": 3000,
+        "led": 4000
+      },
+      "cone": 0.9
+    },
+    "wing_pm": {
+      "class": "airplane_generic_pm",
+      "color": "white",
+      "intensity": {
+        "halogen": 30000,
+        "led": 40000
+      },
+      "cone": 0.924
+    }
+  },
+  // -- MOUNTS: verbatim transform-stack snippet files --
+  "mounts": {
+    "a320": {
+      "beacon_fus": { "stock": "build/mounts/a320/beacon_fus.stock.obj" },
+      "logo_fus": { "stock": "build/mounts/a320/logo_fus.stock.obj" },
+      // durantula/realwings variants are placeholder copies of stock (TODO: tune
+      // ANIM_trans/rotate for each wing mod's fairing geometry -- landing lights
+      // sit too high under both mods, see phase_ii/design.md).
+      "gear_left": {
+        "stock": "build/mounts/a320/gear_left.stock.obj",
+        "durantula": "build/mounts/a320/gear_left.durantula.obj",
+        "realwings": "build/mounts/a320/gear_left.realwings.obj"
+      },
+      "gear_right": {
+        "stock": "build/mounts/a320/gear_right.stock.obj",
+        "durantula": "build/mounts/a320/gear_right.durantula.obj",
+        "realwings": "build/mounts/a320/gear_right.realwings.obj"
+      },
+      "nosegear": { "stock": "build/mounts/a320/nosegear.stock.obj" },
+      "wing_left": {
+        "stock": "build/mounts/a320/wing_left.stock.obj",
+        "durantula": "build/mounts/a320/wing_left.durantula.obj"
+      },
+      "wing_right": {
+        "stock": "build/mounts/a320/wing_right.stock.obj",
+        "durantula": "build/mounts/a320/wing_right.durantula.obj"
+      }
+    },
+    "a321": {
+      "beacon_fus": { "stock": "build/mounts/a321/beacon_fus.stock.obj" },
+      "tail_fus": { "stock": "build/mounts/a321/tail_fus.stock.obj" }
+    }
+  },
+  // -- AIRFRAMES: placement + gating only --
+  "airframes": {
+    "a320": {
+      "fixtures": {
+        "tail_nav": {
+          "comment": "Tail Nav",
+          "gating": { "category": "nav" },
+          "groups": [
+            {
+              "comment": "Light 1",
+              "gate": {
+                "dref": "AirbusFBW/OHPLightSwitches[2]",
+                "hide": [1.5, 2.5]
+              },
+              "position": [-0.07, 0.7, 31.26],
+              "lights": [
+                { "type": "nav_tail_bb" },
+                { "type": "nav_tail_sp" }
+              ]
+            },
+            {
+              "comment": "Light 2",
+              "gate": {
+                "dref": "AirbusFBW/OHPLightSwitches[2]",
+                "hide": [-0.5, 1.5]
+              },
+              "position": [0.07, 0.7, 31.26],
+              "lights": [
+                { "type": "nav_tail_bb" },
+                { "type": "nav_tail_sp" }
+              ]
+            }
+          ]
+        },
+        "tail_strobe": {
+          "comment": "Tail Strobe",
+          "gating": { "category": "strobe" },
+          "position": [0, 0.7, 31.32],
+          "lights": [
+            { "type": "strobe_tail_bb" },
+            { "type": "strobe_tail_sp" }
+          ]
+        },
+        "top_beacon": {
+          "comment": "Top Beacon",
+          "gating": {
+            "category": "beacon",
+            "mount": "beacon_fus"
+          },
+          "groups": [
+            {
+              "position": [0, -0.001, 0.008],
+              "lights": [
+                { "type": "beacon_bb" }
+              ]
+            },
+            {
+              "position": [0, 0, 0],
+              "lights": [
+                { "type": "beacon_pm" }
+              ]
+            }
+          ]
+        },
+        "logo": {
+          "comment": "Logo Lights",
+          "gating": {
+            "category": "logo",
+            "mount": "logo_fus"
+          },
+          "lights": [
+            {
+              "type": "logo_bb",
+              "position": [-3.016, 0.304, -2.699],
+              "index": 7
+            },
+            {
+              "type": "logo_pm",
+              "position": [-3.008, 0.355, -2.7],
+              "index": 7,
+              "dir": [0.589, 0.805, -0.074]
+            },
+            {
+              "type": "logo_bb",
+              "position": [2.887, 0.246, -2.718],
+              "index": 8
+            },
+            {
+              "type": "logo_pm",
+              "position": [2.878, 0.298, -2.719],
+              "index": 8,
+              "dir": [-0.588, 0.805, -0.081]
+            }
+          ]
+        },
+        "landing_left": {
+          "comment": "Retractable Landing Light #1",
+          "gating": {
+            "category": "landing",
+            "mount": "gear_left"
+          },
+          "position": [0.149, -0.03, -0.06],
+          "lights": [
+            {
+              "type": "landing_bb",
+              "index": 0,
+              "dir": [-0.053, -0.987, -0.151]
+            },
+            {
+              "type": "landing_main",
+              "index": 0,
+              "position": [0.151, 0.002, -0.055],
+              "dir": [0.033, -0.99, -0.134]
+            },
+            {
+              "type": "landing_mid",
+              "index": 0,
+              "position": [0.151, 0.002, -0.055],
+              "dir": [0.253, -0.99, -0.134]
+            },
+            {
+              "type": "landing_wide",
+              "index": 0,
+              "position": [0.151, 0.002, -0.055],
+              "dir": [0.459, -0.99, -0.134]
+            }
+          ]
+        },
+        "landing_right": {
+          "comment": "Retractable Landing Light #2",
+          "gating": {
+            "category": "landing",
+            "mount": "gear_right"
+          },
+          "position": [-0.133, -0.025, -0.063],
+          "lights": [
+            {
+              "type": "landing_bb",
+              "index": 1,
+              "dir": [0.053, -0.987, -0.151]
+            },
+            {
+              "type": "landing_main",
+              "index": 1,
+              "position": [-0.135, 0.007, -0.059],
+              "dir": [-0.033, -0.99, -0.134]
+            },
+            {
+              "type": "landing_mid",
+              "index": 1,
+              "position": [-0.135, 0.007, -0.059],
+              "dir": [-0.253, -0.99, -0.134]
+            },
+            {
+              "type": "landing_wide",
+              "index": 1,
+              "position": [-0.135, 0.007, -0.059],
+              "dir": [-0.459, -0.99, -0.134]
+            }
+          ]
+        },
+        "landing_spill": { "raw": "build/raw/a320/landing_spill.obj" },
+        "nose_rwyturnoff": {
+          "comment": "Nosegear - Runway Turn Off",
+          "gating": {
+            "category": "rwyturnoff",
+            "mount": "nosegear"
+          },
+          "lights": [
+            {
+              "type": "rwy_bb",
+              "position": [0.814, -0.146, 0.765],
+              "index": 3,
+              "dir": [0.085, -0.936, 0.341]
+            },
+            {
+              "type": "rwy_pm",
+              "position": [0.811, -0.097, 0.708],
+              "index": 3,
+              "dir": [0.085, -0.64, 0.764]
+            },
+            {
+              "type": "rwy_bb",
+              "position": [0.814, -0.145, 0.15],
+              "index": 4,
+              "dir": [0.085, -0.936, -0.341]
+            },
+            {
+              "type": "rwy_pm",
+              "position": [0.811, -0.098, 0.209],
+              "index": 4,
+              "dir": [0.085, -0.64, -0.764]
+            }
+          ]
+        },
+        "nose_to": {
+          "comment": "Nosegear - T.O. Light",
+          "gating": {
+            "category": "to",
+            "mount": "nosegear"
+          },
+          "lights": [
+            {
+              "type": "to_bb",
+              "position": [0.34, -0.392, 0.71]
+            },
+            {
+              "type": "to_pm",
+              "position": [0.34, -0.387, 0.71]
+            }
+          ]
+        },
+        "nose_taxi": {
+          "comment": "Nosegear - Taxi",
+          "gating": {
+            "category": "taxi",
+            "mount": "nosegear"
+          },
+          "lights": [
+            {
+              "type": "taxi_pm",
+              "position": [0.31, -0.387, 0.195]
+            }
+          ]
+        },
+        "wing_strobe": {
+          "comment": "Wing Strobe",
+          "gating": {
+            "category": "strobe",
+            "mirror": true,
+            "omit_for": [
+              "realwings"
+            ],
+            "mount": {
+              "port": "wing_left",
+              "starboard": "wing_right"
+            }
+          },
+          "groups": [
+            {
+              "gate": {
+                "dref": "anim/SHARK",
+                "hide": [1, 1]
+              },
+              "position": [-0.29, 0.031, -1.008],
+              "lights": [
+                {
+                  "type": "strobe_marker",
+                  "dir": [-0.354, 0.866, -0.354]
+                },
+                {
+                  "type": "strobe_marker",
+                  "dir": [-0.354, -0.866, -0.354]
+                },
+                {
+                  "type": "strobe_beam",
+                  "dir": [-0.707, 0, -0.707]
+                },
+                {
+                  "type": "strobe_spill",
+                  "dir": [-0.895, -0.094, -0.436],
+                  "position": [-0.286, 0.03, -1.006]
+                }
+              ]
+            },
+            {
+              "gate": {
+                "dref": "anim/SHARK",
+                "hide": [0, 0]
+              },
+              "position": [-0.909, 0.452, -0.346],
+              "lights": [
+                {
+                  "type": "strobe_marker",
+                  "dir": [0.866, 0, -0.5],
+                  "cone": 0.1
+                },
+                {
+                  "type": "strobe_marker",
+                  "dir": [-0.863, -0.087, -0.498],
+                  "cone": 0.1
+                },
+                {
+                  "type": "strobe_beam",
+                  "dir": [-0.863, -0.087, -0.498],
+                  "cone": 0.5,
+                  "index": {
+                    "port": 0,
+                    "starboard": 1
+                  }
+                },
+                {
+                  "type": "strobe_spill",
+                  "dir": [-0.992, -0.086, 0.088],
+                  "position": [-0.896, 0.452, -0.317]
+                }
+              ]
+            }
+          ]
+        },
+        "wing_nav": {
+          "comment": "Wing Nav",
+          "gating": {
+            "category": "nav",
+            "mirror": true,
+            "omit_for": [
+              "realwings"
+            ],
+            "mount": {
+              "port": "wing_left",
+              "starboard": "wing_right"
+            }
+          },
+          "groups": [
+            {
+              "gate": {
+                "dref": "anim/SHARK",
+                "hide": [1, 1]
+              },
+              "position": [-0.194, 0.021, -1.205],
+              "lights": [
+                {
+                  "type": "nav_marker",
+                  "dir": [-0.354, 0.866, -0.354]
+                },
+                {
+                  "type": "nav_marker",
+                  "dir": [-0.354, -0.866, -0.354]
+                },
+                {
+                  "type": "nav_beam",
+                  "dir": [-0.574, 0, -0.819]
+                },
+                {
+                  "type": "nav_spill",
+                  "dir": [-0.865, -0.16, -0.476],
+                  "position": [-0.175, 0.021, -1.181]
+                }
+              ]
+            },
+            {
+              "gate": {
+                "dref": "anim/SHARK",
+                "hide": [0, 0]
+              },
+              "position": [-0.103, 0.004, -1.314],
+              "lights": [
+                {
+                  "type": "nav_marker",
+                  "dir": [-0.354, 0.866, -0.354],
+                  "cone": 0.01,
+                  "intensity": {
+                    "halogen": 50,
+                    "led": {
+                      "port": 80,
+                      "starboard": 50
+                    }
+                  }
+                },
+                {
+                  "type": "nav_marker",
+                  "dir": [-0.354, -0.866, -0.354],
+                  "cone": 0.01,
+                  "intensity": {
+                    "halogen": 50,
+                    "led": {
+                      "port": 80,
+                      "starboard": 50
+                    }
+                  }
+                },
+                {
+                  "type": "nav_beam",
+                  "dir": [-0.707, 0, -0.707]
+                },
+                {
+                  "type": "nav_spill",
+                  "dir": [-0.865, -0.16, -0.476]
+                }
+              ]
+            }
+          ]
+        },
+        "wing": {
+          "comment": "Wing Lights",
+          "gating": { "category": "wing" },
+          "lights": [
+            {
+              "type": "wing_bb",
+              "position": [-1.943, -0.08, 2.52],
+              "index": 1,
+              "dir": [-0.939, -0.035, 0.342]
+            },
+            {
+              "type": "wing_pm",
+              "position": [-1.984, -0.08, 2.52],
+              "index": 1,
+              "dir": [-0.574, 0, 0.819]
+            },
+            {
+              "type": "wing_bb",
+              "position": [1.941, -0.08, 2.52],
+              "index": 2,
+              "dir": [0.939, -0.035, 0.342]
+            },
+            {
+              "type": "wing_pm",
+              "position": [2.018, -0.08, 2.52],
+              "index": 2,
+              "dir": [0.574, 0, 0.819],
+              "intensity": {
+                "halogen": 40000,
+                "led": 40000
+              }
+            }
+          ]
+        },
+        "bottom_beacon": {
+          "comment": "Bottom Beacon",
+          "gating": { "category": "beacon" },
+          "groups": [
+            {
+              "position": [0, -2.404, 7.956],
+              "lights": [
+                {
+                  "type": "beacon_bb",
+                  "index": 1,
+                  "intensity": {
+                    "xenon": 12000,
+                    "led": 24000
+                  }
+                }
+              ]
+            },
+            {
+              "position": [0, -2.403, 7.948],
+              "lights": [
+                {
+                  "type": "beacon_pm",
+                  "index": 1,
+                  "intensity": {
+                    "xenon": 4000,
+                    "led": 6000
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    // A319 / A321: bootstrap-generated position overrides + tweaks.
+    "a319": {
+      "extends": "a320",
+      "fixtures": {
+        "tail_nav": {
+          "groups": [
+            {
+              "lights": [
+                { "position": [-0.042, 0.706, 29.14] },
+                { "position": [-0.029, 0.706, 29.14] }
+              ]
+            },
+            {
+              "lights": [
+                { "position": [-0.042, 0.706, 29.14] },
+                { "position": [-0.029, 0.706, 29.14] }
+              ]
+            }
+          ]
+        },
+        "tail_strobe": {
+          "lights": [
+            { "position": [0.034, 0.702, 29.14] },
+            { "position": [0.034, 0.705, 29.14] }
+          ]
+        },
+        "top_beacon": {
+          "groups": [
+            {
+              "lights": [
+                { "position": [0.0, 1.983, 7.928] }
+              ]
+            },
+            {
+              "lights": [
+                { "position": [0.0, 1.984, 7.928] }
+              ]
+            }
+          ],
+          "gating": { "mount": null }
+        },
+        "logo": {
+          "lights": [
+            { "position": [-2.982, 1.009, 26.41] },
+            { "position": [-2.973, 1.061, 26.41] },
+            { "position": [2.921, 0.951, 26.41] },
+            { "position": [2.913, 1.003, 26.41] }
+          ],
+          "gating": { "mount": null }
+        },
+        "wing_nav": {
+          "groups": [
+            {
+              "lights": [
+                {},
+                {},
+                {},
+                {}
+              ]
+            },
+            {
+              "lights": [
+                {},
+                {},
+                {},
+                { "position": [-0.098, -0.003, -1.302] }
+              ]
+            }
+          ]
+        },
+        "wing": {
+          "lights": [
+            { "position": [-1.943, -0.088, 2.458] },
+            { "position": [-1.984, -0.086, 2.501] },
+            { "position": [1.941, -0.088, 2.459] },
+            { "position": [2.018, -0.086, 2.501] }
+          ]
+        },
+        "landing_spill": { "raw": "build/raw/a319/landing_spill.obj" }
+      }
+    },
+    "a321": {
+      "extends": "a320",
+      "fixtures": {
+        "tail_nav": {
+          "groups": [
+            {
+              "lights": [
+                { "position": [-0.076, 0.001, 0.031] },
+                { "position": [-0.063, 0.001, 0.003] }
+              ]
+            },
+            {
+              "lights": [
+                { "position": [-0.076, 0.001, 0.031] },
+                { "position": [-0.063, 0.001, 0.003] }
+              ]
+            }
+          ],
+          "gating": { "mount": "tail_fus" }
+        },
+        "tail_strobe": {
+          "lights": [
+            { "position": [0.0, -0.003, 0.031] },
+            { "position": [0.0, 0.0, 0.0] }
+          ],
+          "gating": { "mount": "tail_fus" }
+        },
+        "nose_taxi": {
+          "lights": [
+            { "position": [0.31, -0.392, 0.195] }
+          ]
+        },
+        "wing_nav": {
+          "groups": [
+            {
+              "lights": [
+                {},
+                {},
+                {},
+                {}
+              ]
+            },
+            {
+              "lights": [
+                {},
+                {},
+                {},
+                { "position": [-0.098, -0.003, -1.302] }
+              ]
+            }
+          ]
+        },
+        "wing": {
+          "lights": [
+            { "position": [-1.943, -0.028, 1.428] },
+            { "position": [-1.984, -0.026, 1.461] },
+            { "position": [1.941, -0.028, 1.419] },
+            { "position": [2.018, -0.026, 1.471] }
+          ]
+        }
+      }
+    }
+  }
+}

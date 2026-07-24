@@ -1,0 +1,202 @@
+name: Build installers
+
+# Builds every distributable form of the ToLiss Photon installer:
+#   * the native .xpl plugin, compiled per-OS (win_x64 / mac_x64 / lin_x64) and
+#     merged into one fat-plugin folder the installer bundles
+#   * the cross-platform loose-.py bundle (ToLissPhoton-installer-vX.zip)
+#   * a standalone native executable for Windows, macOS, and Linux
+#
+# The C++ plugin and PyInstaller both cannot cross-compile, so each is built on
+# its own OS runner (that is the whole reason for the matrices). The native jobs
+# run first; `bundle` and `exe` download all three arch `.xpl` files, merge them
+# into one ToLissPhoton/ fat-plugin folder, and pass it to the release tooling
+# via --plugin-dir. Push a v* tag to also cut a GitHub Release with every
+# artifact attached; run manually (workflow_dispatch) to just produce the build
+# artifacts without releasing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed by the release job to create/attach to a Release
+
+env:
+  # X-Plane SDK download (see src/native/README.md). Fetched fresh each run;
+  # SDK/ is gitignored (third-party), so CI grabs it the same way a dev does.
+  XPSDK_URL: https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK411.zip
+
+jobs:
+  # ── the native .xpl, one per OS (C++ can't cross-compile) ────────────────────
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, arch: win_x64 }
+          - { os: macos-latest, arch: mac_x64 }
+          - { os: ubuntu-latest, arch: lin_x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # unzip (Unix) preserves the macOS XPLM.framework symlinks that the linker
+      # needs; Expand-Archive (Windows) avoids relying on unzip being on PATH in
+      # Git Bash. Both drop the SDK zip's ./SDK/ tree where CMakeLists expects it.
+      - name: Fetch X-Plane SDK (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: src/native
+        run: |
+          curl -sSL -o sdk.zip "$XPSDK_URL"
+          unzip -q sdk.zip
+          rm sdk.zip
+          test -f SDK/CHeaders/XPLM/XPLMDefs.h
+
+      - name: Fetch X-Plane SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src/native
+        run: |
+          Invoke-WebRequest -Uri $env:XPSDK_URL -OutFile sdk.zip
+          Expand-Archive -Path sdk.zip -DestinationPath . -Force
+          Remove-Item sdk.zip
+          if (-not (Test-Path SDK/CHeaders/XPLM/XPLMDefs.h)) { throw "unexpected SDK layout" }
+
+      # Windows uses the multi-config VS generator (-A x64 + --config Release);
+      # macOS/Linux use single-config (CMAKE_BUILD_TYPE). CMakeLists emits to
+      # build/ToLissPhoton/<arch>/ToLissPhoton.xpl for all three.
+      - name: Configure & build (Release)
+        shell: bash
+        working-directory: src/native
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build -A x64
+            cmake --build build --config Release
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build
+          fi
+          test -f "build/ToLissPhoton/${{ matrix.arch }}/ToLissPhoton.xpl"
+
+      # Upload build/ToLissPhoton/, whose contents are <arch>/ToLissPhoton.xpl.
+      # upload-artifact strips the passed dir name, so each artifact's root is
+      # <arch>/... — the three arches never collide, and the merge-multiple
+      # download below recombines them into one folder with all three <arch>/.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.arch }}
+          path: src/native/build/ToLissPhoton
+          if-no-files-found: error
+
+  # ── the loose .py bundle (OS-independent — build once, on Linux) ─────────────
+  bundle:
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download + merge native plugins (all arches)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
+      - name: Build loose-.py bundle
+        run: python build/make_release.py --plugin-dir plugin --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loose-bundle
+          path: ToLissPhoton-installer-v*.zip
+          if-no-files-found: error
+
+  # ── the loose per-OS installer binaries (PyInstaller can't cross-compile) ─────
+  # Each is a LOOSE binary (no embedded payload) named installer_<os>; it reads a
+  # sibling data/ folder at runtime. The combined job below drops all three next
+  # to one shared data/. The binary is payload-independent, but make_exe --loose
+  # still stages (and we ignore) a data/ copy, so a plugin is needed to build it —
+  # hence `needs: native` + the payload step.
+  exe:
+    needs: native
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: installer_windows, bin: installer_windows.exe }
+          - { os: macos-latest, name: installer_macos, bin: installer_macos }
+          - { os: ubuntu-latest, name: installer_linux, bin: installer_linux }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download + merge native plugins (all arches)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pyinstaller
+      - name: Build release payload (fat plugin)
+        run: python build/make_release.py --plugin-dir plugin
+      - name: Freeze loose installer (installer_<os>)
+        run: python build/make_exe.py --skip-release --loose --exe-name ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.name }}
+          path: release/snapshot/${{ matrix.name }}/${{ matrix.bin }}
+          if-no-files-found: error
+
+  # ── assemble the single all-platform zip (data/ + README + 3 installers) ──────
+  combined:
+    needs: [native, exe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download + merge native plugins (all arches)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
+      - name: Download + merge installer binaries (all OSes)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: exes # -> exes/installer_windows.exe, installer_macos, installer_linux
+      - name: Assemble combined zip
+        run: python build/make_combined.py --exes exes --plugin-dir plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: combined-all-platforms
+          path: release/combined/*.zip
+          if-no-files-found: error
+
+  # ── attach the combined zip + the loose-.py bundle to a Release (tags only) ───
+  release:
+    needs: [bundle, combined]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          # the combined all-platform zip + the separate loose-.py bundle zip
+          find artifacts -type f -name '*.zip' -exec cp {} dist/ \;
+          ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

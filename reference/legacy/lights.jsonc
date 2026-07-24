@@ -1,0 +1,131 @@
+{
+	"colors": {
+		"led": {
+			"red": {
+				"billboard": [1.0, 0.03, 0],
+				"spill": [1.0, 0.03, 0]
+			},
+			"green": {
+				"billboard": [0.12, 0.77, 0.25],
+				"spill": [0.12, 0.77, 0.25]
+			},
+			"white": {
+				"billboard": [0.66, 0.91, 1],
+				"spill": [0.66, 0.91, 1]
+			}
+		},
+		"halogen": {
+			"red": {
+				"billboard": [1.0, 0.15, 0.07],
+				"spill": [1.0, 0.15, 0.07]
+			},
+			"green": {
+				"billboard": [0.06, 1.0, 0],
+				"spill": [0.06, 1.0, 0]
+			},
+			"white": {
+				"billboard": [1.0, 0.70, 0.44],
+				"spill": [1.0, 0.70, 0.44]
+			}
+		},
+		"xenon": {
+			"red": {
+				"billboard": [1.0, 0.03, 0.05],
+				"spill": [1.0, 0.03, 0.05]
+			},
+			"white": {
+				"billboard": [0.45, 0.45, 1],
+				"spill": [0.75, 0.75, 1]
+			}
+		}
+	},
+	"templates": {
+		"a320_tail_nav": {
+			"class": "airplane_nav_bb",
+			"color": "colors.led.white.billboard",
+			"intensity": 600,
+			"direction": [0, 0, 1],
+			"cone_angle": 0.1
+		},
+		"a320_tail_nav_spill": {
+			"class": "airplane_nav_sp",
+			"color": "colors.led.white.spill",
+			"intensity": 600,
+			"direction": [-0.00324956, -0.15311261, 0.98820341],
+			"cone_angle": 0.12966104
+		}
+	},
+	"objects":{
+		"a320": {
+			"templates": {
+				"tail_nav_left": {
+					"template": "a320_tail_nav",
+					"position": [-0.07, 0.7, 31.26]
+				},
+				"tail_nav_left_spill": {
+					"template": "a320_tail_nav_spill",
+					"position": [-0.07, 0.7, 31.26]
+				}
+			},
+			"nav": {
+				"tail": {
+					"left": [
+						{
+							"profile": "led",
+							"lights": [ 
+								// Every light in here would be a separate LIGHT_PARAM entry in the .obj file
+								{ 
+									"template": "tail_nav_left" // Inherit all properties from the tail_nav_left template, color should be colors.led.white.billboard because this is under the "led" profile
+								},
+								// Result: LIGHT_PARAM		airplane_nav_bb	   -0.07 0.7 31.26 0.66 0.91 1 0 600cd 0 0 1 0.1
+								{ 
+									"template": "tail_nav_left_spill"
+								}
+								// Result: LIGHT_PARAM		airplane_nav_sp	   -0.07 0.7 31.26 0.66 0.91 1 0 600cd -0.00324956 -0.15311261 0.98820341 0.12966104
+							]
+						},
+						{
+							"profile": "halogen",
+							"lights": [
+								{ "template": "tail_nav_left", "intensity": 600 },
+								{ "template": "tail_nav_left_spill", "intensity": 600 }
+							]
+						}
+					],
+					"right": [
+						{
+							"profile": "led",
+							"lights": [
+								{
+									"template": "tail_nav_left",
+									"transform": "mirror" // I want left and right sides to be symmetrical but am not confident it [0, -1, 0] is the way to declare it
+								},
+								{ "template": "tail_nav_left_spill", "transform": "mirror" }
+							]
+						},
+						{
+							"profile": "halogen",
+							"lights": [
+								{ "template": "tail_nav_left", "transform": "mirror", "intensity": 600 },
+								{ "template": "tail_nav_left_spill", "transform": "mirror", "intensity": 600 }
+							]
+						}
+					]
+				},
+				"left_wing": {
+					"sharklet": [],
+					"wingtip_fence": []
+				},
+				"right_wing": {
+					"sharklet": [],
+					"wingtip_fence": []
+				}
+			}
+		},
+		"a319": {
+
+		}
+
+	},
+	
+}

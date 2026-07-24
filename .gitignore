@@ -1,8 +1,35 @@
-*.claude.md
-XPPython3Log.txt
-Log.txt
-CLAUDE.md
+# ── Build output ────────────────────────────────────────────────────────────
+# dist/ is generated end-to-end from src/ by build/build_objs.py — never edit it
+# by hand, and never commit it. Cut releases by building and attaching the ZIP.
+dist/
 
-# Python bytecode (XPPython3 regenerates these)
+# release/ is generated end-to-end from build/make_release.py (install.py +
+# installer/ + the 9 pre-built OBJs) — never edit it by hand, never commit it.
+release/
+ToLissPhoton-installer-v*.zip
+
+# ── Local scratch (never committed) ─────────────────────────────────────────
+# Vendored third-party mods (Real Wings — someone else's assets, ~2 GB), old
+# build snapshots, and anything else transient. Nothing here is an input to the
+# build: patch_realwings.py locates the *installed* mod inside X-Plane itself.
+.scratch/
+
+# Sim logs — symlinks into the live X-Plane install, for tailing.
+Log.txt
+XPPython3Log.txt
+
+# ── Agent / editor cruft ────────────────────────────────────────────────────
+CLAUDE.md
+*.claude.md
+
+# ── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+
+# ── Native plugin (.xpl) ────────────────────────────────────────────────────
+# The X-Plane SDK is a third-party download (developer.x-plane.com), not ours to
+# commit; CMake build tree is generated. See src/native/README.md.
+src/native/SDK/
+src/native/build/
+docs/phase_ii.md
+docs/design.md

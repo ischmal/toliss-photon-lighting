@@ -1,0 +1,25 @@
+	ANIM_begin
+	ANIM_trans	-6.335	-0.57261997	11.26831	-6.335	-0.57261997	11.26831
+	ANIM_rotate	1	0	0	-0.028074932	-0.028074932
+	ANIM_rotate_begin	-0	0	-1	anim/winglex
+	ANIM_rotate_key	0	0
+	ANIM_rotate_key	1	1.000137
+	ANIM_rotate_end
+		ANIM_begin
+		ANIM_trans	-6.9650002	0.55980003	3.3630199	-6.9650002	0.55980003	3.3630199
+		ANIM_rotate	1	0	0	2.077545	2.077545
+		ANIM_rotate_begin	0.00000002	0.00000001	-1	anim/winglex
+		ANIM_rotate_key	0	0
+		ANIM_rotate_key	1	1.000137
+		ANIM_rotate_end
+			ANIM_begin
+			ANIM_trans	-3.13994	0.33555999	0.75527	-3.13994	0.33555999	0.75527
+			ANIM_rotate	1	0	0	-1.167688	-1.167688
+			ANIM_rotate_begin	-0.00000001	0	-1	anim/winglex
+			ANIM_rotate_key	0	0
+			ANIM_rotate_key	1	1.000137
+			ANIM_rotate_end
+{{lights}}
+			ANIM_end
+		ANIM_end
+	ANIM_end

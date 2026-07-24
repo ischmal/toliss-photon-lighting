@@ -1,0 +1,13 @@
+ANIM_begin
+ANIM_trans	0	1.58583	27.418659	0	1.58583	27.418659
+ANIM_rotate_begin	1	0	-0	AirbusFBW/PitchTrimPosition
+ANIM_rotate_key	-5	5.0002026
+ANIM_rotate_key	0	0
+ANIM_rotate_key	15	-15.000035
+ANIM_rotate_end
+	ANIM_begin
+	ANIM_trans	3.3274288	0.35101461	1.5725809	3.3174288	0.35101461	1.5825809	0	0	no_ref
+	ANIM_rotate	-0.65	-0.76	-0.0000	-80.00	-80.00	0	1	none
+{{lights}}
+	ANIM_end
+ANIM_end

@@ -1,0 +1,14 @@
+	ANIM_begin
+	ANIM_hide	1	1	AirbusFBW/LandingLightLocation
+		ANIM_begin
+		ANIM_trans	-2.19628	-1.49562	10.3186	-2.19628	-1.49562	10.3186
+		ANIM_rotate	0	1	0	-78.555379	-78.555379
+		ANIM_rotate	0	0	-1	-7.9177038	-7.9177038
+		ANIM_rotate	1	0	0	-9.6732465	-9.6732465
+		ANIM_rotate_begin	-0.00000002	0	-1	anim/lightOut/left
+		ANIM_rotate_key	0	0
+		ANIM_rotate_key	1	95.000002
+		ANIM_rotate_end
+{{lights}}
+		ANIM_end
+	ANIM_end
