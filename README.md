@@ -14,7 +14,7 @@ Overhauled exterior lighting for ToLiss aircraft in X-Plane 12.
 
 **3. Run the installer file.**
 
-_**4. For Durantula and RealWings mod users:_ Run the installer after the wing mod already been installed.**
+**_4. For Durantula and RealWings mod users:_ Run the installer after the wing mod already been installed.**
 
 # Features
 * Complete rework of exterior lighting for supported ToLiss aircraft
@@ -53,7 +53,13 @@ _**4. For Durantula and RealWings mod users:_ Run the installer after the wing m
 
 ## Changelog
 ### v0.5 (2026-07-24)
-
+* All new cross-platform installers. Simply download for your platform, unzip, and run the installer file from your downloads folder.
+* New 100% native plugin. XPPython3 is no longer required and can be removed if desired.
+* Full support for ToLiss A330-900.
+* Full support on A319/A320/A321 for Durantula's Wing Mod (wing-flex + flaps).
+* Full support on A319/A320/A321 for RealWings (wings).
+* Slightly tweaked strobe and beacon timing on both LED and Xenon versions (special thanks to tuongminh5833).
+* Updated automatic light profile detection logic.
 
 ### v0.2-beta (2026-07-10)
 * Moved all scripting to single Python script (removed Lua).
@@ -78,7 +84,7 @@ I created an emergency lighting system for Garry's Mod called Photon and have ex
 This project initially began as an attempt to correct the unrealistic fade-in/fade-out appearance of the beacon light. The scope significantly expanded the more I learned about how X-Plane lighting effects work. The light colors, appearance, and behavior were painsakingly adjusted by hand. I then leveraged Claude Code to implement much of the coding and add quality-of-life functionality.
 
 ## Photon
-This plugin is a Photon project. Join the (Photon Community Discord)[http://photon.lighting/discord] and see the `#x-plane` channel.
+This plugin is a Photon project. Join the [Photon Community Discord](http://photon.lighting/discord) and see the `#x-plane` channel.
 
 ## How it Works
 Light positioning, color and intensity is hard-coded in plain-text .OBJ aircraft files. X-Plane uses two major types of light: "billboards" and "spill lights". Billboards are 2D sprites that give a light source its on-screen glow, while spill lights are what actually illuminate surrounding objects in the 3D environment.
