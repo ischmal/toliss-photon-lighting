@@ -144,6 +144,73 @@ Light-type properties: `class` (required for anything a fixture references),
 condition blocks. The bb/sp palette swatch is picked automatically from the
 `class` suffix (`*_bb` → bb, else sp).
 
+### N-way categories
+
+A `categories` entry with **one** value is the two-way form and still means
+`<palette> led` — branch 0 uses that palette, branch 1 uses `led`. With **two or
+more**, branch *i* uses profile *i* and is gated on the category dataref reading
+*i*:
+
+```
+categories {
+  nav: halogen;                       // 2-way -> [halogen, led]
+  dome: int_old int_new int_led;      // 3-way -> branch i == dataref value i
+}
+```
+
+The two forms emit **different gate encodings**, and this is load-bearing:
+
+| branches | gate emitted for branch `i` of `n` |
+|---|---|
+| 2 | `ANIM_hide 1 1 <dref>` / `ANIM_hide 0 0 <dref>` |
+| 3+ | `ANIM_hide -0.5 <i-0.5> <dref>` (if `i > 0`) **and** `ANIM_hide <i+0.5> <n-0.5> <dref>` (if `i < n-1`) |
+
+Both forms are **hide**, never `ANIM_show`. An OBJ8 animation block starts
+*visible*, and a show/hide only acts while its range **matches** the dataref — so
+a lone `ANIM_show -0.5 0.5` leaves the branch visible at `2` as well, every branch
+draws at once, and switching the dataref does nothing. (That bug shipped in the
+interior and was caught in-sim on 2026-07-28.) With hides, "no match" is exactly
+the visible state, so a branch is on for its own value and off everywhere else.
+
+A three-way category therefore hides the open-ended range on each side of its own
+value; the middle branch emits two hide lines and the end branches one each.
+Multiple `ANIM_hide` in a single block AND together, so no nesting and no
+per-profile boolean datarefs are needed — `branch_gate` returns a list of lines.
+
+**Keep every exterior category one-valued**: that is what pins exterior output to
+the original one-line encoding and keeps the frozen `reference/photon/` goldens
+passing `check`.
+
+### `size:` vs `intensity:`
+
+Slot 8 of a `LIGHT_PARAM` is class-dependent. The exterior `*_bb` / `*_pm`
+classes read it as a photometric intensity and X-Plane wants the `cd` suffix;
+the interior's `airplane_panel_sp` / `airplane_inst_sp` read the same slot as a
+bare fractional **size**. Declaring `size:` selects the bare rendering,
+`intensity:` the `…cd` one. Never both on one light.
+
+### `spill_dref:` — custom lights
+
+A light type carrying `spill_dref` emits a `LIGHT_SPILL_CUSTOM` instead of a
+`LIGHT_PARAM`, and needs no `class`:
+
+```
+LIGHT_SPILL_CUSTOM  x y z  r g b a  s  dx dy dz  semi  <dref>
+```
+
+`alpha:` supplies the `a` slot. X-Plane runs the **baked** parameters through
+that dataref — a plugin may modify them in place — and draws them unmodified if
+the dataref isn't found, so bake `alpha` at the value you want in the
+plugin-absent case. Used for exactly one light (the interior map spot, whose
+brightness source is a ToLiss dataref rather than a rheostat `index`).
+
+### The interior profile axis
+
+`axis intprofile: int_old int_new int_led;` is the interior's own profile
+dimension, deliberately separate from `profile`. No light carries both, so
+keeping them apart means an `@int_led` block never expands into a
+halogen/xenon/led cross product — and exterior resolution stays untouched.
+
 ## 4. lights.layout.phdsl
 
 ```
@@ -302,15 +369,31 @@ block inside an extends airframe *replaces* the inherited fixture.
 
 ```
 src/lights/      lights.style.phdsl, lights.layout.phdsl, mounts/, raw/  ← you edit this
-src/plugin/      PI_ToLissPhoton.py                           ← you edit this
+src/native/      the shipping plugin (C++ .xpl)                ← you edit this
 build/           the generator (code only)
 dist/            generated installable X-Plane tree  (gitignored)
-reference/       frozen goldens for `check` + superseded configs
+reference/photon/  frozen goldens for `check`
+reference/gus/     vendored interior source data (Gus's OBJs + textures)
+reference/legacy/  superseded configs
 ```
 
 The rule: **everything under `src/` is hand-authored, everything under `dist/`
-is generated.** No exceptions — the plugin is edited at `src/plugin/` and staged
-into `dist/` by the build, so `dist/` is a complete drop-in.
+is generated.** `reference/` is a third category: frozen inputs and goldens that
+are neither edited nor generated.
+
+### Targets
+
+Each airframe builds one OBJ **per target** — `exterior` (`lights_out3xx_XP12.obj`)
+and `interior` (`lights_inn.obj`, the cockpit lights). A fixture declares
+`target: interior;` to route into the latter; the default is `exterior`, so
+every pre-existing fixture is unaffected. `build --target {exterior,interior,both}`
+selects; `both` is the default.
+
+An airframe with no entry for a target in `OBJ_TARGETS` doesn't build it at all —
+that's how the A330-900 is kept out of the interior mod, mirroring how
+`SUPPORTED_WINGS` gates its absent wing mods. The interior fixtures live in the
+`airframe a320` block so a319/a321 inherit them verbatim via `extends`, and a339
+(which doesn't extend a320) inherits nothing.
 
 ## 7. Editor support
 

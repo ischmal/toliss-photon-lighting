@@ -61,7 +61,13 @@ MISSING = object()
 # `wingtip` (fence/sharklet) is free but appears ONLY on the RealWings @realwings
 # offset, which the emitter never resolves (those fixtures are omit: realwings) —
 # patch_realwings.py resolves it. Placing it before `side` nests it wingtip-major.
-AXIS_ORDER = ("profile", "swatch", "wingtip", "side")
+#
+# `intprofile` (int_old/int_new/int_led) is the INTERIOR's own profile axis,
+# kept separate from `profile` on purpose: the two never appear on the same
+# light, so a separate axis means an interior @int_led block does not expand
+# into a halogen/xenon/led cross product (and, more importantly, exterior
+# resolution is left completely untouched by the interior work).
+AXIS_ORDER = ("profile", "intprofile", "swatch", "wingtip", "side")
 
 # Axes NOT in AXIS_ORDER are *pre-bound*: fixed for a whole build, so they are
 # supplied as a base context at load time and act as a filter on @-conditions
@@ -410,8 +416,20 @@ def _load_style(stmts, filename, base=None):
             for d in st.children:
                 if d.kind != "decl" or len(d.words) != 1:
                     raise DslError(f"{filename}:{d.line}: categories holds "
-                                   "'<name>: <palette>;' lines only")
-                categories[d.words[0]] = {"original": d.values[0]}
+                                   "'<name>: <palette> [<palette> ...];' lines only")
+                # ONE value is the original two-way form and still means
+                # "<palette> led" — branch 0 = that palette, branch 1 = led.
+                # TWO OR MORE is the explicit N-way form: branch i renders
+                # profile i and is gated on the dataref reading i. The interior
+                # needs three (old halogen / new halogen / LED); every exterior
+                # category stays one-valued so its emission is unchanged.
+                vals = [str(v) for v in d.values]
+                profiles = [vals[0], "led"] if len(vals) == 1 else vals
+                if len(set(profiles)) != len(profiles):
+                    raise DslError(f"{filename}:{d.line}: category "
+                                   f"{d.words[0]!r} repeats a profile: {profiles}")
+                categories[d.words[0]] = {"original": profiles[0],
+                                          "profiles": profiles}
         elif st.kind == "block" and st.words[0] == "light":
             name = st.words[1]
             parent = None
@@ -609,6 +627,16 @@ def fixture_to_old(fx, axes, where, base=None):
     out = {}
     if fx["comment"]:
         out["comment"] = fx["comment"]
+    # Which OBJ this fixture belongs in. Defaults to exterior, so every existing
+    # fixture is unaffected; `target: interior;` routes a fixture into
+    # lights_inn.obj instead. The Emitter builds one target at a time and skips
+    # everything else.
+    if "target" in props:
+        tgt = props["target"]
+        if tgt not in ("exterior", "interior"):
+            raise DslError(f"{where}: target must be 'exterior' or 'interior', "
+                           f"got {tgt!r}")
+        out["target"] = tgt
     if "raw" in props:
         if "offset" in props:
             raise DslError(f"{where}: 'offset' is not supported on a raw fixture "
@@ -736,6 +764,7 @@ def load_dsl(style_path, doc_path, wing: str = "stock") -> dict:
     return {
         "schema": 3,
         "wing": wing,
+        "axes": axes,        # so the Emitter knows every profile-axis value
         "palettes": palettes,
         "categories": categories,
         "lightTypes": light_types,

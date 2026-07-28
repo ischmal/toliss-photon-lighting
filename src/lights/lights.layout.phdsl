@@ -34,6 +34,14 @@ mounts a320 {
     stock: src/lights/mounts/a320/wing_right.stock.obj;
     durantula: src/lights/mounts/a320/wing_right.durantula.obj;
   }
+  // Interior: ToLiss's four movable map lamps. Each is a z/x/y ANIM_trans
+  // stack driven by ckpt/lights/<n>/{x,y,z}/dir, transcribed verbatim (Gus's
+  // file and stock ToLiss's are byte-identical here). Stock-only: wing mods
+  // do not touch the cockpit.
+  maplamp1 { stock: src/lights/mounts/a320/maplamp1.stock.obj; }
+  maplamp2 { stock: src/lights/mounts/a320/maplamp2.stock.obj; }
+  maplamp3 { stock: src/lights/mounts/a320/maplamp3.stock.obj; }
+  maplamp4 { stock: src/lights/mounts/a320/maplamp4.stock.obj; }
 }
 mounts a321 {
   beacon_fus { stock: src/lights/mounts/a321/beacon_fus.stock.obj; }
@@ -250,6 +258,161 @@ airframe a320 {
       pos: 0 -2.403 7.948;
       beacon_pm { index: 1;  intensity: 4000;  @led { intensity: 6000; } }
     }
+  }
+
+  // ==========================================================================
+  // INTERIOR (cockpit) — target: interior -> objects/lights_inn.obj
+  // ==========================================================================
+  // Gus's mod, folded into one runtime-switchable OBJ. 23 lights in 4
+  // categories; full table in docs/interior_plan.md §1.2.
+  //
+  // These live in the a320 block ON PURPOSE: a319/a321 `extends a320` and so
+  // inherit them byte-identically, which is correct — Gus's A320 and A321
+  // variants are byte-identical and stock lights_inn.obj is the same file on
+  // all three. a339 does NOT extend a320, so it inherits nothing and is kept
+  // out of the interior mod for free (decision #14).
+  //
+  // No `mirror: true` anywhere: the left/right pairs are written out
+  // explicitly so the emitted file maps 1:1 onto Gus's, and a mirrored fixture
+  // would emit two full category-gated blocks where one does.
+
+  fixture int_dome_lights "Dome Lights" {
+    target: interior;
+    category: dome;
+    int_dome#left  { pos: -0.472 1.09 -3.35; }
+    int_dome#right { pos:  0.472 1.09 -3.35; }
+  }
+
+  // Pedestal spans all three colour ramps (flood is P1, tables P2, tablets
+  // P3). That is fine and matches the exterior: the LIGHT TYPE carries the
+  // colour ramp, the FIXTURE carries the category. All five share panel[3].
+  fixture int_pedestal "Pedestal & Tables" {
+    target: interior;
+    category: pedestal;
+    int_flood         { pos:  0     0.8    -4.1; }
+    // Gus calls these the CA/FO "table" lights, but aimed down and aft from
+    // y 0.333 what they actually wash is each pilot's footwell and seat. Both
+    // keep his cone (the type default, 0.701 = 45.5°): a 2026-07-28 attempt to
+    // narrow the captain's was aimed at the wrong light and has been reverted.
+    int_table#ca      { pos: -0.5577 0.3333 -4.5; }
+    int_table#fo      { pos:  0.5577 0.3333 -4.5; }
+    int_tablet#ca     { pos: -0.8    0.7    -4.0;  dir: -0.35 -0.75 -0.4; }
+    int_tablet#fo     { pos:  0.8    0.7    -4.0;  dir:  0.35 -0.75 -0.4; }
+  }
+
+  fixture int_console "Console Lights" {
+    target: interior;
+    category: console;
+    int_console#l1 { pos: -1.1471  0.0333 -4.2;   index: 22; }
+    int_console#l2 { pos: -1.3463  0.0032 -3.65;  index: 22; }
+    int_console#l3 { pos: -1.4369 -0.0101 -3.3;   index: 22; }
+    int_console#r1 { pos:  1.1471  0.0333 -4.2;   index: 23; }
+    int_console#r2 { pos:  1.3463  0.0032 -3.65;  index: 23; }
+    int_console#r3 { pos:  1.4369 -0.0101 -3.3;   index: 23; }
+  }
+
+  // The four movable map lamps. One fixture per lamp because the mount (the
+  // ckpt/lights/<n> transform stack) is a per-fixture property. All four are
+  // category `map`; the rheostat index is per-LIGHT and is NOT uniform per
+  // lamp — lamp 3 straddles panel[1] and panel[2]. Transcribed as-is.
+  //
+  // Cone values are Gus's verbatim, rounded to the project-wide 3 dp by the
+  // emitter. That also settles the §1.2 note about lamp 4's 0.9063077 vs lamp
+  // 1's 0.906307: both round to 0.906. Decided, not drifted.
+  fixture int_map1 "Map Light 1" {
+    target: interior;
+    category: map;
+    mount: maplamp1;
+    pos: 0 0 0;   // real placement comes from the mount's ckpt/lights/1 animation
+    int_maplamp#a { index: 1;  dir: 0 -0.15 -0.1;   cone: 0.819152; }
+    int_maplamp#b { index: 1;  dir: 0 -0.21 -0.15;  cone: 0.906307; }
+  }
+  fixture int_map2 "Map Light 2" {
+    target: interior;
+    category: map;
+    mount: maplamp2;
+    pos: 0 0 0;
+    int_maplamp#a { index: 1;  dir: 0 -1.5 0.4;  cone: 0.906307; }
+    int_maplamp#b { index: 1;  dir: 0 -1.5 0.4;  cone: 0.866025; }
+    int_maplamp#c { index: 1;  dir: 0 -1.5 0.4;  cone: 0.642787; }
+  }
+  fixture int_map3 "Map Light 3" {
+    target: interior;
+    category: map;
+    mount: maplamp3;
+    pos: 0 0 0;
+    int_maplamp#a { index: 1;  dir: 0 -1.5 0.4;  cone: 0.906307; }
+    int_maplamp#b { index: 2;  dir: 0 -1.5 0.4;  cone: 0.866025; }
+    int_maplamp#c { index: 2;  dir: 0 -1.5 0.4;  cone: 0.642787; }
+  }
+  fixture int_map4 "Map Light 4" {
+    target: interior;
+    category: map;
+    mount: maplamp4;
+    pos: 0 0 0;
+    int_maplamp#a { index: 2;  dir: 0 -0.15 -0.1;   cone: 0.819152; }
+    int_maplamp#b { index: 2;  dir: 0 -0.21 -0.15;  cone: 0.9063077; }
+  }
+
+  // -- The three re-added .acf cockpit spots (docs/interior_plan.md §3.4) ----
+  //
+  // The installer disables ToLiss's three sim 3D spots (_spot_name_3d/* = none)
+  // and they reappear here as OBJ lights, so their colour follows the runtime
+  // switch instead of being frozen at install time by a Plane Maker edit.
+  //
+  // POSITIONS ARE DERIVED, NOT GUESSED. The .acf states spot positions in FEET
+  // against a per-airframe datum; the interior OBJ is attached at
+  // _obja/11/_v10_att_{x,y,z}_acf_prt_ref = (0, 0.4, 26.00 / 20.75 / 6.78 ft)
+  // for a319 / a320 / a321. So:
+  //
+  //     obj_metres = (acf_feet - attach_feet) * 0.3048
+  //
+  // That difference is the SAME on all three airframes (spot 1 lands at
+  // z = -3.429 / -3.432 / -3.432 m — a 3 mm spread from rounding in the .acf),
+  // which is what keeps one shared lights_inn.obj correct for all of them.
+  //
+  // Cross-check: spot 1 is the panel_brightness_ratio[0] rheostat — the DOME
+  // light — and the conversion puts it at y 1.097, z -3.432, against Gus's own
+  // dome lights at y 1.09, z -3.35. Two independent axes agree to within 8 cm,
+  // so the conversion is sound.
+  //
+  // ⚠ DIRECTION IS THE OPEN QUESTION — the main Phase VI tuning target.
+  // Gus sets _spot_the/0 = -60 (pitch) and _spot_psi/0 = 180 (heading). Taking
+  // psi=0 as "toward the nose" (OBJ -Z), psi=180 pitch=-60 gives
+  // dir = (0, -0.866, 0.5): down and AFT. But the panels these lights wash are
+  // FORWARD of the fixture (pedestal z -4.1, consoles -3.3..-4.2, map lamps
+  // -4.61), so aft points away from them. Either Plane Maker measures spot
+  // heading from the tail, or Gus's 180 means "forward" in that UI.
+  //   >>> If the cockpit looks lit from behind in-sim, flip dz: 0.5 -> -0.5.
+  // Both readings are one edit apart, which is exactly why this lives here and
+  // not in Python. Spots 2 and 3 keep their stock headings (psi -20 / 14, near
+  // enough to straight down at pitch -66 / -53 that the ambiguity barely bites).
+  //
+  // CONE and SIZE are seeds too: cone is cos(_spot_angle) which is at least
+  // dimensionally right, but the .acf `_spot_size` (8/9/10) is in sim-spot
+  // units that do NOT map onto the OBJ size slot, so those are eyeballed
+  // against Gus's own values (dome 1.414, pedestal flood 2.0).
+  fixture int_spot_dome "Cockpit Spot 1 (dome)" {
+    target: interior;
+    category: dome;
+    int_spot1 { pos: 0 1.097 -3.432;  dir: 0 -0.866 0.5; }
+  }
+  fixture int_spot_pedestal "Cockpit Spot 2 (pedestal)" {
+    target: interior;
+    category: pedestal;
+    // stock _spot_the/1 = -66, _spot_psi/1 = 0 -> down, very slightly forward
+    int_spot2 { pos: 0 1.036 -3.52;  dir: 0 -0.914 -0.407; }
+  }
+  // The MAIN PNL flood. Its own category (not `map`) because its brightness
+  // comes from ToLiss's `ckpt/lights/map` — the MAIN PNL knob — while the four
+  // movable reading lamps come from panel[1]/[2]. ToLiss's dataref name says
+  // "map"; the placard on the glareshield says MAIN PNL, and the placard wins
+  // for anything the user sees. Confirmed in-sim 2026-07-28.
+  fixture int_spot_mainpnl "Cockpit Spot 3 (main panel flood)" {
+    target: interior;
+    category: mainpnl;
+    // stock _spot_the/2 = -53, _spot_psi/2 = 14 -> down, forward, slightly right
+    int_spot3 { pos: 0.244 1.097 -3.463;  dir: 0.146 -0.799 -0.584; }
   }
 }
 

@@ -16,8 +16,10 @@ from pathlib import Path
 
 from installer import payload
 from installer.constants import (
-    AIRFRAMES, BACKUP_DIRNAME, GLOW_AIRFRAMES, MANIFEST_NAME, PLUGIN_DIR_REL,
-    PLUGIN_FOLDER, REALWINGS_DIR, VERSION,
+    AIRFRAMES, BACKUP_DIRNAME, GLOW_AIRFRAMES, INTERIOR_AIRFRAMES,
+    INTERIOR_LIVERY_EXTS, INTERIOR_OBJ, INTERIOR_TEXTURES,
+    INTERIOR_TEXTURES_ADDED, MANIFEST_NAME,
+    PLUGIN_DIR_REL, PLUGIN_FOLDER, REALWINGS_DIR, VERSION,
 )
 
 
@@ -181,6 +183,69 @@ def _patch_glow(objects: Path, airframe: str, dry_run: bool, log) -> int:
     return n
 
 
+# ─── .acf cockpit-spot patch (delegates to the bundled DSL toolchain copy) ────
+def _import_patch_acf():
+    dsl = payload.dsl_dir()
+    if not dsl.is_dir():
+        raise ActionError(f"bundled .acf patch toolchain missing: {dsl}")
+    if str(dsl) not in sys.path:
+        sys.path.insert(0, str(dsl))
+    import patch_acf as A  # bundled copy — see payload.dsl_dir()
+    return A
+
+
+def _patch_acf(aircraft_dir: Path, reverse: bool, dry_run: bool, log) -> list[str]:
+    """Patch (or revert) the cockpit spot block in every .acf of an aircraft.
+
+    Returns the .acf file NAMES touched. No backup is taken and none is wanted:
+    the reversal writes ToLiss's recorded stock values back rather than restoring
+    a snapshot, so it composes with whatever else has edited the file since
+    (Durantula rewrites 312 lines of the very same file). Restoring a whole-file
+    backup here would silently undo those other mods."""
+    A = _import_patch_acf()
+    buf = io.StringIO()
+    touched = []
+    with contextlib.redirect_stdout(buf):
+        try:
+            touched = A.run(aircraft_dir, reverse=reverse, dry=dry_run) or []
+        except SystemExit as e:
+            log.write(f"acf patch: {e}", "WARN")
+        except A.AcfError as e:
+            log.write(f"acf patch: {e}", "WARN")
+    for line in buf.getvalue().splitlines():
+        log.write(f"[acf] {line}")
+    return [Path(p).name for p in touched]
+
+
+# ─── interior livery scan ─────────────────────────────────────────────────────
+def _interior_livery_overrides(aircraft_dir: Path) -> list[Path]:
+    """Livery files that would SHADOW our interior textures.
+
+    X-Plane substitutes a `.dds` for the `.png` an OBJ names, so a livery
+    shipping `chairs_LIT.dds` wins over our `chairs_LIT.png` in objects/ and the
+    mod is simply invisible in that livery. Dropping our PNG into the livery
+    folder does nothing — the fix is to back up and REMOVE the livery's file so
+    the one in objects/ resolves. (Converting PNG->DDS would be the alternative,
+    but needs an encoder we don't have and won't add for what is typically one
+    file across dozens of liveries.)
+
+    Only stems matching our texture set are considered, so a livery's own
+    unrelated overrides are never touched."""
+    stems = {Path(n).stem for n in INTERIOR_TEXTURES}
+    hits = []
+    liveries = aircraft_dir / "liveries"
+    if not liveries.is_dir():
+        return hits
+    for livery in sorted(p for p in liveries.iterdir() if p.is_dir()):
+        objs = livery / "objects"
+        if not objs.is_dir():
+            continue
+        for f in sorted(objs.iterdir()):
+            if f.is_file() and f.stem in stems and f.suffix.lower() in INTERIOR_LIVERY_EXTS:
+                hits.append(f)
+    return hits
+
+
 # ─── plugin state ────────────────────────────────────────────────────────────
 _CMP_CHUNK = 1 << 16
 
@@ -223,9 +288,98 @@ def plugin_is_current(xplane_root) -> bool:
 
 
 # ─── install / uninstall ───────────────────────────────────────────────────────
-def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) -> list[str]:
+def _install_interior(ac: dict, objects: Path, backup_dir: Path, manifest: dict,
+                      log, dry_run: bool, progress=None) -> list[str]:
+    """The interior ("Gus Mod") install — an INDEPENDENT, OPT-IN axis.
+
+    Five parts: the OBJ, the texture set, the livery-shadow scan, the four-.acf
+    cockpit-spot patch, and its own manifest block. A user who wants only the
+    exterior mod never runs any of it, and uninstalling one axis does not
+    disturb the other.
+
+    `progress`, if given, is called with (done, total, name) while copying
+    textures — ~57 MiB of file copying that otherwise looks like a hang."""
+    aircraft_dir = objects.parent
+    airframe = ac["airframe"]
+    steps: list[str] = []
+    interior = manifest.setdefault("interior", {})
+
+    # 1. the OBJ. _inject_marker anchors on POINT_COUNTS, which lights_inn.obj
+    #    has, so it needs no special-casing.
+    target = objects / INTERIOR_OBJ
+    if _backup_once(target, backup_dir, manifest, log, dry_run):
+        steps.append(f"Backed up original {INTERIOR_OBJ} → {objects.name}\\{BACKUP_DIRNAME}")
+    text = _inject_marker(payload.interior_obj_text(), VERSION, "interior")
+    log.write(f"writing {target} ({len(text)} bytes, dry_run={dry_run})")
+    if not dry_run:
+        _atomic_write_bytes(target, text.encode("utf-8"))
+    steps.append(f"Installed {INTERIOR_OBJ} (interior lights, mod by Gus) → {objects.name}")
+
+    # 2. the textures. NINE replace a stock file and are restored from backup on
+    #    uninstall; TWO (pedals_details_{1,2}.png) have no stock counterpart, so
+    #    they are recorded in `added` and DELETED on uninstall instead —
+    #    _backup_once would otherwise just log "nothing to back up" and leave
+    #    them orphaned in the aircraft folder forever.
+    textures = payload.interior_textures()
+    added = interior.setdefault("added", [])
+    total = len(textures)
+    for i, (name, src) in enumerate(textures, 1):
+        dest = objects / name
+        if name in INTERIOR_TEXTURES_ADDED:
+            if name not in added:
+                added.append(name)
+        else:
+            _backup_once(dest, backup_dir, manifest, log, dry_run)
+        if progress:
+            progress(i, total, name)
+        if not dry_run:
+            _atomic_write_bytes(dest, src.read_bytes())
+    steps.append(f"Installed {total} interior texture(s) → {objects.name}")
+
+    # 3. livery scan. A livery's own .dds shadows our .png (X-Plane substitutes
+    #    .dds for the .png an OBJ names), so back it up and remove it.
+    liveries_patched = interior.setdefault("liveries_patched", [])
+    overrides = _interior_livery_overrides(aircraft_dir)
+    for f in overrides:
+        rel = f.relative_to(aircraft_dir).as_posix()
+        if rel in liveries_patched:
+            continue
+        dest = backup_dir / "liveries" / rel.replace("/", "__")
+        log.write(f"livery override shadows our texture, removing: {f}")
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest)
+            f.unlink()
+        liveries_patched.append(rel)
+    if overrides:
+        steps.append(f"Cleared {len(overrides)} livery texture override(s) that would "
+                     f"have hidden the interior mod")
+    # Liveries installed LATER aren't covered by this pass — surfaced as a hint
+    # rather than pretending the coverage is permanent.
+    steps.append("Note: re-run the installer after adding liveries to cover them too")
+
+    # 4. the .acf cockpit spots, all four files per airframe.
+    touched = _patch_acf(aircraft_dir, reverse=False, dry_run=dry_run, log=log)
+    if touched:
+        interior["acf_patched"] = touched
+        steps.append(f"Patched cockpit spot lights in {len(touched)} .acf file(s): "
+                     + ", ".join(touched))
+    else:
+        interior["acf_patched"] = []
+        steps.append("! No .acf cockpit spot block found — sim spots left as they were")
+
+    interior.update(installed=True, version=VERSION, airframe=airframe)
+    return steps
+
+
+def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
+            interior: bool = False, progress=None) -> list[str]:
     """Install (or reinstall/upgrade) Photon onto one aircraft. Returns a list
-    of human-readable step descriptions for the Perform screen."""
+    of human-readable step descriptions for the Perform screen.
+
+    `interior` opts into the cockpit-lighting mod, a separate axis from the
+    exterior one (docs/interior_plan.md §5). It is False by default so every
+    existing caller keeps the exterior-only behaviour."""
     if not payload.available():
         raise ActionError(f"bundled payload not found next to the installer "
                           f"({payload.PAYLOAD_DIR}) — this build is incomplete")
@@ -332,6 +486,18 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False) 
         else:
             log.write(f"previous realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
 
+    # Interior — opt-in and independent of everything above. Gated on
+    # INTERIOR_AIRFRAMES so the A330-900 can never pick it up (decision #14):
+    # different cockpit model, different rheostat indices, and Gus's mod does not
+    # cover it.
+    if interior:
+        if airframe not in INTERIOR_AIRFRAMES:
+            log.write(f"interior mod not available for {airframe}", "WARN")
+            steps.append(f"Interior lighting not available for this airframe — skipped")
+        else:
+            steps += _install_interior(ac, objects, backup_dir, manifest, log,
+                                       dry_run, progress)
+
     manifest.update(version=VERSION, wing=wing,
                     installed_at=_dt.datetime.now().isoformat(timespec="seconds"))
     _write_manifest(objects, manifest, dry_run)
@@ -384,6 +550,50 @@ def uninstall(ac: dict, xplane_root: Path, log, dry_run: bool = False,
         else:
             log.write(f"realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
             steps.append("RealWings mod folder no longer present — nothing to reverse")
+
+    # ── interior ──────────────────────────────────────────────────────────────
+    # The OBJ and the nine stock-replacing textures are already restored by the
+    # backed_up loop above. What remains is what a backup can't express.
+    interior = manifest.get("interior") or {}
+    if interior.get("installed"):
+        aircraft_dir = objects.parent
+
+        # 1. Files we ADDED, which never had a stock original to restore. These
+        #    must be deleted or they linger in the aircraft folder forever.
+        for name in interior.get("added", []):
+            f = objects / name
+            if f.is_file():
+                log.write(f"removing added interior file {f} (dry_run={dry_run})")
+                if not dry_run:
+                    with contextlib.suppress(OSError):
+                        f.unlink()
+                steps.append(f"Removed added file {name}")
+
+        # 2. Livery overrides we backed up and removed so our PNG could resolve.
+        for rel in interior.get("liveries_patched", []):
+            src = backup_dir / "liveries" / rel.replace("/", "__")
+            dest = aircraft_dir / rel
+            if not src.is_file():
+                log.write(f"livery backup missing, cannot restore: {src}", "WARN")
+                steps.append(f"! Livery backup missing for {rel} — left as-is")
+                continue
+            log.write(f"restoring livery override {dest} <- {src} (dry_run={dry_run})")
+            if not dry_run:
+                _atomic_write_bytes(dest, src.read_bytes())
+                with contextlib.suppress(OSError):
+                    src.unlink()
+            steps.append(f"Restored livery override {rel}")
+
+        # 3. The .acf spot patch, reversed by writing ToLiss's stock values back
+        #    rather than restoring a snapshot — so other mods' edits to the same
+        #    file (Durantula rewrites 312 lines of it) survive.
+        if interior.get("acf_patched"):
+            touched = _patch_acf(aircraft_dir, reverse=True, dry_run=dry_run, log=log)
+            steps.append(f"Restored stock cockpit spot lights in {len(touched)} .acf file(s)")
+
+        with contextlib.suppress(OSError):
+            if not dry_run:
+                (backup_dir / "liveries").rmdir()   # only if now empty
 
     log.write(f"removing {backup_dir} (dry_run={dry_run})")
     if not dry_run:

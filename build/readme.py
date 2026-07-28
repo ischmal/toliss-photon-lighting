@@ -99,16 +99,18 @@ def _contents(kind: str, exe_name: str, arch: str | None) -> list[str]:
             "  install.py, installer/   the installer itself - plain, readable Python",
             "  payload/                 the files it installs:",
             "    objs/                  pre-built light objects (wing variants x airframes)",
+            "    textures/              cockpit textures for the interior mod (by Gus)",
             "    plugin/                the native X-Plane plugin (all OSes: win/mac/linux)",
-            "    dsl/                   small toolchain the RealWings live-patch needs",
+            "    dsl/                   small toolchain the live patches need at install",
         ]
     return [
         "WHAT'S INCLUDED",
         f"  {exe_name}   the installer (self-contained - no Python needed)",
         "  data/        the files it installs:",
         "    objs/      pre-built light objects (wing variants x airframes)",
+        "    textures/  cockpit textures for the interior mod (by Gus)",
         f"    plugin/    the native X-Plane plugin (this build: {arch or 'this platform'})",
-        "    dsl/       small toolchain the RealWings live-patch needs at install",
+        "    dsl/       small toolchain the live patches need at install",
     ]
 
 
@@ -128,6 +130,13 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
         "  and swaps the exterior light colors between an LED and the original look,",
         "  per light category. You pick a profile from the plugin's menu in-sim; the",
         "  choice is saved per livery.",
+        "",
+        "  It can also, optionally, re-light the COCKPIT - dome, map, pedestal, table",
+        "  and console lights - switchable between old halogen, new halogen and LED",
+        "  from the same menu. The interior lighting is the work of GUS, used with",
+        "  permission; see CREDIT below. The installer asks before installing it, and",
+        "  it is easy to decline if you only want the exterior mod.",
+        "  (A330-900: exterior only.)",
         "",
     ]
     if kind == "Python":
@@ -151,7 +160,18 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
         "",
         "UNINSTALL",
         "  Re-run the installer and choose Uninstall for the aircraft; it restores",
-        "  the original ToLiss files byte-for-byte.",
+        "  the original ToLiss files byte-for-byte - including the aircraft's .acf",
+        "  files and any livery textures the interior install had to move aside.",
+        "",
+        "CREDIT",
+        "  The interior (cockpit) lighting - its design, placement, intensities and",
+        "  the three colour looks - is the work of GUS, used with permission. Photon",
+        "  only folds his three separate variant files into one that can be switched",
+        "  in-sim. All credit for how the cockpit looks belongs to him.",
+        "",
+        "  NOTE: if you also install Gus's original zip BY HAND, do it BEFORE running",
+        "  this installer, not after. His package includes its own exterior light",
+        "  object which would overwrite Photon's and silently revert the exterior mod.",
         "",
     ]
     lines += _links()

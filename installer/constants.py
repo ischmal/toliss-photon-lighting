@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-VERSION = "0.5"
+VERSION = "0.6"
 
 # airframe key -> (aircraft-folder glob under Aircraft/, X-Plane tree folder,
 # OBJ filename, fallback pretty name if skunkcrafts_updater.cfg is missing).
@@ -35,6 +35,55 @@ AIRFRAME_CFG_IDS = {
     "a339": {"module": "/A330-900/", "name": "A330-900"},
 }
 
+# ─── interior ("Gus Mod") ─────────────────────────────────────────────────────
+# The interior mod is a SEPARATE, OPT-IN install axis from the exterior one.
+#
+# ⚠ Deliberately NOT folded into AIRFRAMES above. That tuple's OBJ-filename slot
+# feeds detect._identify_airframe / _obj_marker as an airframe FINGERPRINT, and
+# lights_inn.obj is byte-identical across A319/A320/A321 — adding it there would
+# make every A3xx match every other one.
+INTERIOR_OBJ = "lights_inn.obj"
+
+# Airframes that ship the interior mod. The A330-900 is out of scope entirely
+# (docs/interior_plan.md decision #14): different cockpit model, different
+# rheostat indices, and Gus's mod does not cover it.
+INTERIOR_AIRFRAMES = ("a319", "a320", "a321")
+
+# Gus's canonical texture set, installed into <aircraft>/objects/.
+# NINE of these replace a stock ToLiss file and are restored from backup on
+# uninstall. The TWO in INTERIOR_TEXTURES_ADDED have NO stock counterpart, so
+# uninstall must DELETE them instead — restoring a backup that never existed
+# would leave them in place forever.
+INTERIOR_TEXTURES = (
+    "chairs_LIT.png",
+    "kitchens_LIT.png",
+    "knobs.png",
+    "knobs_LIT.png",
+    "panels_overhead_LIT.png",
+    "pedals_details_1.png",
+    "pedals_details_2.png",
+    "text_LIT.png",
+    "walls_bottom_LIT.png",
+    "walls_outer_LIT.png",
+    "walls_top_LIT.png",
+)
+INTERIOR_TEXTURES_ADDED = frozenset({"pedals_details_1.png", "pedals_details_2.png"})
+
+# Livery overrides that shadow our textures. X-Plane substitutes a .dds for the
+# .png an OBJ names, so a livery shipping chairs_LIT.dds wins over our
+# chairs_LIT.png in objects/ and our work is invisible in that livery. The fix
+# is to back up and REMOVE the livery's .dds so the PNG resolves (§5.4).
+# Matched by stem against INTERIOR_TEXTURES.
+INTERIOR_LIVERY_EXTS = (".dds", ".png")
+
+# The four .acf files per airframe that carry the cockpit spot block. All four
+# hold identical spot values, so this is one constant patch applied four times.
+# Photon's OBJ work is XP12-only, but this patch is not: lights_inn.obj is
+# shared by every variant, so an XP11 user would otherwise get patched OBJ
+# lights alongside unpatched sim spots.
+ACF_SUFFIXES = ("", "_StdDef", "_XP11", "_XP11_StdDef")
+
+# ─── skin glow ────────────────────────────────────────────────────────────────
 # Airframes whose install repoints ToLiss's skin-glow LIT-texture regions to
 # Photon's own dataref (build/patch_glow.py). Gate only — the actual indices live
 # in patch_glow.REDIRECT, which must agree with GlowMapForIcao in

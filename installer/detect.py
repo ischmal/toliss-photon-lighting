@@ -15,7 +15,7 @@ from pathlib import Path
 import fnmatch
 
 from installer.constants import (
-    AIRFRAME_CFG_IDS, AIRFRAMES, BACKUP_DIRNAME, MANIFEST_NAME,
+    AIRFRAME_CFG_IDS, AIRFRAMES, BACKUP_DIRNAME, INTERIOR_OBJ, MANIFEST_NAME,
 )
 
 _SKUNK_CFG_NAME = "skunkcrafts_updater.cfg"
@@ -212,6 +212,36 @@ def _obj_marker(objects: Path):
         if ver:
             return ver, wing
     return None, None
+
+
+def interior_status(objects: Path):
+    """Interior ("Gus Mod") install status, as (version, installed, stale).
+
+    A SECOND, INDEPENDENT AXIS from photon_status. It deliberately does not fold
+    into that function: `_obj_marker` scans only the exterior lights_out OBJs, so
+    an aircraft with the interior installed and the exterior reverted would read
+    as "not installed at all" and hide a live modification from the user.
+
+    Same corroboration rule as the exterior: the manifest says what we did, the
+    marker in lights_inn.obj says whether it is still there. Marker gone with the
+    manifest intact => an aircraft update reverted the file; needs reinstall."""
+    from installer import actions  # local import: actions owns the manifest schema
+
+    manifest = actions.read_manifest(objects)
+    interior = (manifest or {}).get("interior") or {}
+    p = objects / INTERIOR_OBJ
+    marker_ver = None
+    if p.is_file():
+        try:
+            marker_ver, _ = _parse_marker(
+                p.read_text(encoding="utf-8", errors="replace")[:2000])
+        except OSError:
+            marker_ver = None
+    if interior.get("installed"):
+        return interior.get("version"), True, marker_ver is None
+    if marker_ver:
+        return marker_ver, True, False   # manifest-less hand-copy
+    return None, False, False
 
 
 def photon_status(objects: Path):

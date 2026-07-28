@@ -28,6 +28,8 @@ bundle (`python install.py`, needs only Python 3.8+, runs on any OS):
     release/installer/...
     release/README.txt
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
+    release/payload/objs/interior/lights_inn.obj      (wing- & airframe-independent)
+    release/payload/textures/interior/*.png           (Gus's set, ~57 MiB)
     release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl   (all arches in CI)
     release/payload/dsl/...
 With --zip: release/ToLissPhoton-Installer-v<VER>-Python-Universal.zip
@@ -54,7 +56,7 @@ INSTALLER_PKG = REPO / "installer"
 # Python that runs on any OS (its plugin/ is the fat folder with every arch).
 BUNDLE_NAME = f"ToLissPhoton-Installer-v{VERSION}-Python-Universal"
 DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py",
-                       "patch_glow.py"]
+                       "patch_glow.py", "patch_acf.py"]
 DSL_CONFIG_FILES = ["lights.style.phdsl", "lights.layout.phdsl"]
 # Default location of the compiled native fat-plugin folder (CMake build output).
 DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
@@ -62,21 +64,67 @@ DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
 
 def build_objs_payload(payload: Path):
     """Builds every (airframe, wing) combo that airframe actually supports —
-    B.SUPPORTED_WINGS, not a blind WINGS x OBJ_PATH cross product. Without that
-    guard, an airframe with no wing mods (e.g. a339) would still build a
+    B.SUPPORTED_WINGS, not a blind WINGS x OBJ_TARGETS cross product. Without
+    that guard, an airframe with no wing mods (e.g. a339) would still build a
     "durantula"/"realwings" OBJ: resolve_mount()'s fallback to whatever mount
     variant exists would silently emit a byte-identical copy of the stock OBJ
     under those names instead of erroring."""
     for wing in WINGS:
         cfg = B.load_config(wing=wing)
-        for airframe, (_folder, fname) in B.OBJ_PATH.items():
+        for airframe, targets in B.OBJ_TARGETS.items():
             if wing not in B.SUPPORTED_WINGS[airframe]:
                 continue
-            text = B.Emitter(cfg, airframe, wing).emit()
+            fname = targets.get("exterior")
+            if fname is None:
+                continue
+            text = B.Emitter(cfg, airframe, wing, target="exterior").emit()
             dest = payload / "objs" / wing / fname
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(text.encode("utf-8"))
             print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
+
+
+def build_interior_payload(payload: Path):
+    """The interior OBJ is built ONCE, outside the wing loop, to
+    payload/objs/interior/lights_inn.obj.
+
+    It is both wing-independent (wing mods don't touch the cockpit) and
+    airframe-independent (stock lights_inn.obj is byte-identical across
+    A319/A320/A321, and Gus's variants are too), so the per-wing layout the
+    exterior uses does not apply. Writing it per-airframe under
+    payload/objs/<wing>/ would put all three airframes on the SAME path and
+    silently collapse them into one file anyway — this makes that explicit.
+
+    Built from the a320 fixtures, which a319/a321 inherit verbatim; a339 has no
+    interior target at all (interior_plan.md decision #14)."""
+    cfg = B.load_config(wing="stock")
+    fname = B.OBJ_TARGETS["a320"]["interior"]
+    text = B.Emitter(cfg, "a320", "stock", target="interior").emit()
+    dest = payload / "objs" / "interior" / fname
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(text.encode("utf-8"))
+    print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
+
+
+def stage_interior_textures(payload: Path):
+    """Copy Gus's canonical texture set into the bundle (decision #7 — textures
+    ship bundled). ~57 MB, shared by all three airframes, staged once."""
+    src = REPO / "reference" / "gus" / "textures"
+    if not src.is_dir():
+        raise SystemExit(
+            f"interior texture set not found: {src}\n"
+            f"Phase 0 vendoring is a hard prerequisite — the textures cannot be "
+            f"reproduced from any document. See reference/gus/README.md.")
+    dest = payload / "textures" / "interior"
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    total = 0
+    for f in sorted(src.glob("*.png")):
+        shutil.copyfile(f, dest / f.name)
+        total += f.stat().st_size
+    print(f"  staged payload/textures/interior/ "
+          f"({len(list(dest.glob('*.png')))} files, {total / 1048576:.1f} MiB)")
 
 
 def stage_plugin(payload: Path, plugin_dir: Path):
@@ -171,6 +219,8 @@ def main():
     payload = out / "payload"
     print(f"building release v{VERSION} -> {out}")
     build_objs_payload(payload)
+    build_interior_payload(payload)
+    stage_interior_textures(payload)
     stage_plugin(payload, plugin_dir)
     stage_dsl_toolchain(payload)
     stage_installer(out)

@@ -62,13 +62,23 @@ CONFIG_LAYOUT = REPO / "src" / "lights" / "lights.layout.phdsl"
 DIST = REPO / "dist"                       # generated installable tree (OBJs only)
 GOLDEN = REPO / "reference" / "photon"     # frozen hand-authored `check` reference
 
-# airframe key -> (aircraft folder in the X-Plane tree, obj filename)
-OBJ_PATH = {
-    "a319": ("A319", "lights_out319_XP12.obj"),
-    "a320": ("A320", "lights_out320_XP12.obj"),
-    "a321": ("A321", "lights_out321_XP12.obj"),
-    "a339": ("A339", "ExternalLights_XP12.obj"),
+# airframe key -> aircraft folder in the X-Plane tree
+OBJ_FOLDER = {"a319": "A319", "a320": "A320", "a321": "A321", "a339": "A339"}
+
+# airframe key -> {target: obj filename}. An airframe with no entry for a target
+# does not build that target at all — this is how the A339 is kept out of the
+# interior mod (docs/interior_plan.md decision #14), the same shape as
+# SUPPORTED_WINGS gating its absent wing mods. Do not "fix" the missing a339
+# "interior" key: ToLiss's A339 cockpit is a different model with different
+# rheostat indices, and Gus's mod does not cover it.
+OBJ_TARGETS = {
+    "a319": {"exterior": "lights_out319_XP12.obj", "interior": "lights_inn.obj"},
+    "a320": {"exterior": "lights_out320_XP12.obj", "interior": "lights_inn.obj"},
+    "a321": {"exterior": "lights_out321_XP12.obj", "interior": "lights_inn.obj"},
+    "a339": {"exterior": "ExternalLights_XP12.obj"},
 }
+
+TARGETS = ("exterior", "interior")
 
 # airframe key -> supported wing-mod variants for that airframe. Source of truth
 # for which --wing values may be built/installed: resolve_mount()'s fallback to
@@ -83,6 +93,34 @@ SUPPORTED_WINGS = {
 }
 
 HEADER = "I\n800\nOBJ\n\nGLOBAL_cockpit_lit\nPOINT_COUNTS\t0\t0\t0\t0\n"
+
+# Per-target OBJ header. The interior header is NOT the exterior one: stock
+# lights_inn.obj declares no GLOBAL_cockpit_lit, writes POINT_COUNTS as
+# "0 0 1 0" (spaces, and a 1) rather than "0\t0\t0\t0", and carries a TEXTURE
+# line with a trailing tab and an EMPTY value. Both stock and Gus's files say
+# "0 0 1 0" while carrying 13 and 23 lights respectively, so the count is
+# plainly ignored — matched anyway rather than introducing an untested
+# difference. Verified byte-for-byte against the installed stock file.
+#
+# NB the trailing tab on "TEXTURE\t" is load-bearing and is why emit() keeps the
+# header OUT of reindent(), which strips every line.
+HEADERS = {
+    "exterior": HEADER,
+    "interior": "I\n800\nOBJ\n\nTEXTURE\t\nPOINT_COUNTS\t0 0 1 0\n",
+}
+
+# Credit banner emitted into the generated interior OBJ (interior_plan.md
+# decision #6 — Gus gets heavy credit on every user-facing surface).
+INTERIOR_CREDIT = """# ToLiss Photon Lighting — interior (cockpit) lights
+# GENERATED from src/lights/lights.{style,layout}.phdsl — do not hand-edit.
+#
+# Interior light design, placement, intensities and the three colour ramps are
+# the work of GUS ("Gus Mod"), used with permission and vendored in
+# reference/gus/. Photon's contribution is only to fold his three separate
+# variant files into one runtime-switchable OBJ.
+#
+# Old halogen = 0, new halogen = 1, LED = 2, per category dataref:
+#   ToLissPhoton/interior/{dome,map,mainpnl,pedestal,console}"""
 
 
 def _rel(p: Path):
@@ -217,14 +255,20 @@ def pick_side(val, side):
 PROFILES = ("halogen", "xenon", "led")
 
 
-def resolve_field(value, profile: str, side: str | None):
+def resolve_field(value, profile: str, side: str | None, profiles=PROFILES):
     """A field (intensity, cone, ...) may be scalar or nested with profile keys
-    (halogen/xenon/led) and/or port/starboard (either order). Walk to a scalar."""
+    and/or port/starboard (either order). Walk to a scalar.
+
+    `profiles` is the set of keys that count as a profile dimension. It defaults
+    to the exterior axis (halogen/xenon/led) for the legacy JSONC path, but the
+    Emitter passes the union of every declared profile axis so the interior's
+    own `axis intprofile: int_old int_new int_led` resolves the same way."""
     v = value
     for _ in range(4):
         if isinstance(v, dict):
-            if any(p in v for p in PROFILES):
-                v = v[profile] if profile in v else next(v[p] for p in PROFILES if p in v)
+            if any(p in v for p in profiles):
+                v = (v[profile] if profile in v
+                     else next(v[p] for p in profiles if p in v))
                 continue
             if "port" in v or "starboard" in v:
                 v = pick_side(v, side or "port")
@@ -237,7 +281,9 @@ def swatch_for(cls: str) -> str:
     return "bb" if cls.endswith("_bb") else "sp"
 
 
-PROFILE_LABEL = {"led": "LED", "halogen": "Halogen", "xenon": "Xenon"}
+PROFILE_LABEL = {"led": "LED", "halogen": "Halogen", "xenon": "Xenon",
+                 "int_old": "Old Halogen", "int_new": "New Halogen",
+                 "int_led": "LED"}
 SIDE_LABEL = {"port": "Left", "starboard": "Right"}
 
 
@@ -272,45 +318,108 @@ def reindent(text: str) -> str:
 # ─── emission ─────────────────────────────────────────────────────────────────
 class Emitter:
     def __init__(self, cfg: dict, airframe: str, variant: str = "stock",
-                 annotate: bool = False):
+                 annotate: bool = False, target: str = "exterior"):
         cfg_wing = cfg.get("wing")
         if cfg_wing is not None and cfg_wing != variant:
             raise SystemExit(
                 f"config was loaded for wing variant {cfg_wing!r} but the Emitter "
                 f"was built for {variant!r} — the DSL resolves @<variant> "
                 f"conditions at load time, so pass load_config(wing={variant!r})")
+        if target not in TARGETS:
+            raise SystemExit(f"unknown target {target!r} (expected one of {TARGETS})")
         self.cfg = cfg
         self.airframe = airframe
         self.variant = variant  # wing-mod variant: stock | durantula | realwings
+        self.target = target    # exterior | interior — selects fixtures + header
         self.annotate = annotate  # emit "# @fixture|gi|li|side" tags (bootstrap)
         self.palettes = cfg["palettes"]
         self.categories = cfg["categories"]
         self.types = cfg["lightTypes"]
+        # every declared profile-axis value, so resolve_field walks the interior
+        # axis (int_old/int_new/int_led) as readily as the exterior one
+        axes = cfg.get("axes") or {}
+        keys = list(PROFILES)
+        for ax in ("profile", "intprofile"):
+            for v in axes.get(ax, ()):
+                if v not in keys:
+                    keys.append(v)
+        self.profile_keys = tuple(keys)
+
+    def profiles_of(self, category):
+        """The ordered profile list for a category: branch *i* renders profile
+        *i* and is gated on the category dataref reading *i*. The legacy JSONC
+        config has no explicit list, so a 2-way [original, led] is assumed."""
+        catdef = self.categories[category]
+        return catdef.get("profiles") or [catdef["original"], "led"]
+
+    def field(self, value, profile, side):
+        """resolve_field bound to this build's full profile-key set."""
+        return resolve_field(value, profile, side, self.profile_keys)
+
+    def dref(self, category):
+        return f"ToLissPhoton/{self.target}/{category}"
 
     def light_line(self, light, *, profile, side, group, fixture, mirror):
         # appearance from the light type; placement (position/dir) from the light
         tpl = self.types[light["type"]] if "type" in light else {}
         merged = {**tpl, **{k: v for k, v in light.items() if k != "type"}}
-        cls = merged["class"]
+        # LIGHT_SPILL_CUSTOM carries no light class; everything else must name
+        # one. The empty default still resolves the `sp` palette swatch, which
+        # is right — a spill light is not a billboard.
+        cls = merged.get("class", "")
+        if not cls and "spill_dref" not in merged:
+            raise SystemExit(
+                f"light {light.get('type', '?')!r} has no 'class:' (only a "
+                f"'spill_dref:' light may omit it)")
 
         # position: light > group > fixture
         pos = merged.get("position") or (group or {}).get("position") or fixture.get("position")
         pos = [rnd(p) for p in pos]
         d = [rnd(v) for v in merged["dir"]]
-        cone = rnd(resolve_field(merged["cone"], profile, side))
+        cone = rnd(self.field(merged["cone"], profile, side))
         if mirror and side == "starboard":
             pos = [-pos[0], pos[1], pos[2]]
             d = [-d[0], d[1], d[2]]
 
         # color is an explicit property of the light type (per-side where it
-        # differs); swatch (bb/sp) comes from the class
-        cname = pick_side(merged.get("color", "white"), side or "port")
+        # differs); swatch (bb/sp) comes from the class. Resolved through
+        # field() rather than a bare pick_side because the interior conditions
+        # colour on the PROFILE too (ramp P3 goes warm only under @int_led);
+        # for the exterior, whose colours are only ever side-conditioned, this
+        # walks the identical path and yields the identical name.
+        cname = self.field(merged.get("color", "white"), profile, side)
         rgb = [rnd(v) for v in self.palettes[profile][cname][swatch_for(cls)]]
 
         index = pick_side(merged.get("index", 0), side or "port")
-        inten = resolve_field(merged.get("intensity", 0), profile, side)
 
-        nums = pos + rgb + [index, f"{int(round(inten))}cd"] + d + [cone]
+        # Slot 8 is class-dependent. Exterior billboard/spill classes read it as
+        # a photometric intensity and X-Plane wants the "cd" suffix; the
+        # interior's airplane_panel_sp / airplane_inst_sp read the same slot as
+        # a bare fractional SIZE (1.414, 0.471, ...). A light type declares
+        # `size:` or `intensity:` to pick which — never both.
+        if "size" in merged:
+            slot = fmt(self.field(merged["size"], profile, side))
+        else:
+            inten = self.field(merged.get("intensity", 0), profile, side)
+            slot = f"{int(round(inten))}cd"
+
+        # A light type carrying `spill_dref` emits LIGHT_SPILL_CUSTOM instead of
+        # LIGHT_PARAM. Used for exactly one light — the map spot, whose
+        # brightness source is a ToLiss dataref rather than a rheostat INDEX, so
+        # airplane_panel_sp cannot express it (docs/interior_plan.md §3.3).
+        #   LIGHT_SPILL_CUSTOM x y z  r g b a  s  dx dy dz  semi  dref
+        # The baked params are the INPUT: X-Plane runs them through the dataref,
+        # which may modify them, and draws them UNMODIFIED if the dataref is not
+        # found. So with the plugin absent this still draws at its baked alpha —
+        # which is why alpha is baked conservatively (dim, not glaring).
+        if "spill_dref" in merged:
+            alpha = self.field(merged.get("alpha", 1), profile, side)
+            nums = pos + rgb + [alpha, slot] + d + [cone]
+            fields = [fmt(x) for x in nums]
+            return ("\tLIGHT_SPILL_CUSTOM\t" + " ".join(fields)
+                    + f" {merged['spill_dref']}")
+
+        nums = pos + rgb + [index, slot] + d + [cone]
         fields = [fmt(x) if isinstance(x, (int, float)) else str(x) for x in nums]
         return f"\tLIGHT_PARAM\t{cls} " + " ".join(fields)
 
@@ -326,8 +435,12 @@ class Emitter:
         lights = g.get("lights") or []
         tcolor = (self.types[lights[0]["type"]].get("color", "white")
                   if lights and "type" in lights[0] else "white")
-        cname = pick_side(tcolor, side or "port")
-        colorlbl = None if cname == "white" else cname.capitalize()
+        cname = self.field(tcolor, profile, side)
+        # Only a real tint (red/green) is worth naming in the comment; the
+        # several shades of white are not — the profile suffix already says
+        # which era, and "-> Fluoro -> Old Halogen" reads as a contradiction.
+        colorlbl = (None if cname in ("white", "warm", "fluoro")
+                    else cname.capitalize())
         sidelbl = SIDE_LABEL.get(side)
         if sidelbl and colorlbl:
             parts.append(f"{colorlbl}/{sidelbl}")
@@ -339,12 +452,47 @@ class Emitter:
         parts.append(PROFILE_LABEL.get(profile, profile.capitalize()))
         return "# " + " -> ".join(parts)
 
+    def branch_gate(self, category, branch):
+        """The ANIM line(s) selecting branch `branch` of `category`.
+
+        ALWAYS ANIM_hide, never ANIM_show. An OBJ8 animation block starts
+        VISIBLE, and a show/hide command only takes effect while its range
+        MATCHES the dataref. So a block whose sole conditional is
+        `ANIM_show -0.5 0.5 dref` is visible at dref 0 (matched) *and* at
+        dref 2 (nothing matched, default visible) — every branch draws at
+        once and switching the dataref changes nothing. Confirmed in-sim on
+        the interior, 2026-07-28. `ANIM_hide` has no such hole, because
+        "no match" is exactly the state we want. The corpus agrees: the
+        FF777's lights_inn.obj gates 218 blocks and uses hide for all 218.
+
+        TWO-value categories keep the original single-line encoding verbatim —
+        "hide when the dataref reads the OTHER branch's value". Every exterior
+        category is two-valued, so exterior output stays byte-identical and the
+        frozen reference/photon goldens keep passing `check`.
+
+        THREE-or-more-value categories hide the two OPEN-ENDED ranges either
+        side of their own value — Not-below AND Not-above. Interior branch 1
+        of {0,1,2} emits both lines; branches 0 and 2 need only the one, having
+        nothing on one side. Multiple ANIM_hide in a single block AND together
+        (204 OBJs in a stock install rely on this; Laminar's own 737 stacks
+        three), so no nesting and no per-profile boolean datarefs are needed —
+        the ternary dataref already carries everything."""
+        profiles = self.profiles_of(category)
+        dref = self.dref(category)
+        if len(profiles) == 2:
+            return [f"ANIM_hide {'1 1' if branch == 0 else '0 0'} {dref}"]
+        last = len(profiles) - 1
+        lines = []
+        if branch > 0:
+            lines.append(f"ANIM_hide {fmt(-0.5)} {fmt(branch - 0.5)} {dref}")
+        if branch < last:
+            lines.append(f"ANIM_hide {fmt(branch + 0.5)} {fmt(last + 0.5)} {dref}")
+        return lines
+
     def emit_branch(self, fixture, category, *, branch, side, mirror, indent="", name=""):
-        catdef = self.categories[category]
-        profile = catdef["original"] if branch == "original" else "led"
-        hide = "1 1" if branch == "original" else "0 0"
-        lines = [f"{indent}ANIM_begin",
-                 f"{indent}\tANIM_hide {hide} ToLissPhoton/exterior/{category}"]
+        profile = self.profiles_of(category)[branch]
+        lines = [f"{indent}ANIM_begin"]
+        lines += [f"{indent}\t" + g for g in self.branch_gate(category, branch)]
         for gi_idx, g in enumerate(self.groups_of(fixture)):
             gate = g.get("gate")
             gi = indent + "\t"
@@ -369,7 +517,7 @@ class Emitter:
     def emit_side(self, fixture, category, *, side, mirror, name=""):
         blocks = [self.emit_branch(fixture, category, branch=b, side=side, mirror=mirror,
                                    name=name)
-                  for b in ("original", "led")]
+                  for b in range(len(self.profiles_of(category)))]
         body = "\n".join(blocks)
 
         mount = fixture["gating"].get("mount")
@@ -432,15 +580,33 @@ class Emitter:
 
     def emit(self):
         af = resolve_airframe(self.cfg, self.airframe)
-        parts = [HEADER]
+        parts = []
+        if self.target == "interior":
+            parts.append(INTERIOR_CREDIT)
+            parts.append("")
+        emitted = 0   # counted separately: the credit banner above is not a fixture
         for name, fixture in af["fixtures"].items():
             if not fixture or ("gating" not in fixture and "raw" not in fixture):
                 continue
+            if fixture.get("target", "exterior") != self.target:
+                continue  # this OBJ is not where that fixture belongs
             if self.variant in fixture.get("gating", {}).get("omit_for", []):
                 continue  # e.g. wingtip nav/strobe under RealWings (mod owns them)
             parts.append(self.emit_fixture(name, fixture))
             parts.append("")
-        return reindent("\n".join(parts)).replace("\n", "\r\n")
+            emitted += 1
+        if not emitted:
+            raise SystemExit(
+                f"{self.airframe}: no {self.target} fixtures — nothing to emit. "
+                f"(An airframe with no {self.target} lights should be left out of "
+                f"OBJ_TARGETS entirely rather than building an empty OBJ.)")
+        # The header is deliberately NOT run through reindent(): reindent strips
+        # every line, which would eat the load-bearing trailing tab on the
+        # interior header's "TEXTURE\t". Splitting it out leaves exterior output
+        # byte-identical (its header has no leading/trailing whitespace, and
+        # contributes no ANIM nesting, so depth still starts at 0).
+        return (HEADERS[self.target] + "\n"
+                + reindent("\n".join(parts))).replace("\n", "\r\n")
 
 
 # ─── normalized parsing (for check) ───────────────────────────────────────────
@@ -465,11 +631,18 @@ def parse_records(text: str):
             lo, hi, dref = rnd(tok[1]), rnd(tok[2]), tok[3]
             if stack:
                 stack[-1].append((head, lo, hi, dref))
-        elif head == "LIGHT_PARAM":
+        elif head in ("LIGHT_PARAM", "LIGHT_SPILL_CUSTOM"):
             # strip trailing inline comment
             body = line.split("#", 1)[0].split()
-            cls = body[1]
-            vals = body[2:]
+            # LIGHT_PARAM names a light class then 12 numbers; LIGHT_SPILL_CUSTOM
+            # has no class (12 numbers then a dataref). Recording the directive
+            # itself as the "class" keeps one comparable record shape, and slot 7
+            # holds an INDEX for the former and an ALPHA for the latter — both
+            # sides of any compare parse the same way, so it stays sound.
+            if head == "LIGHT_PARAM":
+                cls, vals = body[1], body[2:]
+            else:
+                cls, vals = head, body[1:]
             nums = []
             for v in vals:
                 v = v.replace("cd", "")
@@ -481,9 +654,17 @@ def parse_records(text: str):
                 continue
             x, y, z, r, g, b, index, inten, dx, dy, dz, cone = nums[:12]
             gate_path = tuple(c for frame in stack for c in frame)
+            # slot 8 is rounded, not truncated to int: the interior reads it as
+            # a fractional SIZE (0.4 vs 0.471 vs 0.5), which int() would collapse
+            # to 0 and hide from `check`. Exterior intensities are whole numbers,
+            # so they compare identically either way.
+            # slot 7 rounded rather than int()-ed for the same reason as slot 8:
+            # it is a whole-number rheostat INDEX on a LIGHT_PARAM but a
+            # fractional ALPHA on a LIGHT_SPILL_CUSTOM. Whole numbers compare
+            # identically either way, so exterior records are unaffected.
             rec = (gate_path, cls,
                    (rnd(x), rnd(y), rnd(z)), (rnd(r), rnd(g), rnd(b)),
-                   int(index), int(round(inten)),
+                   rnd(index), rnd(inten),
                    (rnd(dx), rnd(dy), rnd(dz)), rnd(cone))
             records[rec] += 1
     return records
@@ -503,15 +684,23 @@ def project_positions(records):
             for (gate, cls, pos, rgb, index, inten, d, cone) in records}
 
 
-def get_reference(airframe: str) -> str:
+def get_reference(airframe: str, target: str = "exterior") -> str:
     """The canonical Photon reference is the frozen hand-authored OBJ in
     reference/photon/ — a checked-in fixture, deliberately NOT the build output.
 
     (Historically this read `git show HEAD:<aircraft>/objects/<obj>`, which
     worked only while the committed OBJs were hand-authored. Now that the build
     generates that tree into dist/, reading it back from git would compare
-    generated output against generated output and pass unconditionally.)"""
-    _, fname = OBJ_PATH[airframe]
+    generated output against generated output and pass unconditionally.)
+
+    Per-target filenames differ (lights_out3xx_XP12.obj vs lights_inn.obj), so
+    one flat golden folder still addresses both. The interior golden is shared
+    by all three A3xx airframes because the OBJ is identical for all of them."""
+    try:
+        fname = OBJ_TARGETS[airframe][target]
+    except KeyError:
+        raise SystemExit(
+            f"{airframe} has no {target!r} target (it does not ship that OBJ)")
     p = GOLDEN / fname
     if not p.exists():
         raise SystemExit(
@@ -681,17 +870,29 @@ def cmd_build(args):
                 f"(supported: {', '.join(SUPPORTED_WINGS[args.airframe])})")
         targets = [args.airframe]
     else:
-        targets = [af for af in OBJ_PATH if args.wing in SUPPORTED_WINGS[af]]
+        targets = [af for af in OBJ_TARGETS if args.wing in SUPPORTED_WINGS[af]]
+    # getattr, not args.target: cmd_build is also called programmatically (tests,
+    # tooling) with a minimal args object that predates this flag.
+    target = getattr(args, "target", "both")
+    want = TARGETS if target == "both" else (target,)
     root = (REPO / args.out) if args.out else DIST
     for af in targets:
-        text = Emitter(cfg, af, args.wing).emit()
-        folder, fname = OBJ_PATH[af]
-        # mirror the X-Plane tree: <root>/A320/objects/lights_out320_XP12.obj
-        dest = root / folder / "objects" / fname if not args.flat else root / fname
-        atomic_write_bytes(dest, text.encode("utf-8"))
-        print(f"wrote {_rel(dest)} ({len(text)} bytes)")
-        if args.write:
-            _write_live(af, dest)
+        folder = OBJ_FOLDER[af]
+        for tgt in want:
+            fname = OBJ_TARGETS[af].get(tgt)
+            if fname is None:
+                # a339 has no interior OBJ (decision #14) — a normal skip, and
+                # the reason an explicit --target interior on it is an error.
+                if target != "both":
+                    raise SystemExit(f"{af} has no {tgt!r} target")
+                continue
+            text = Emitter(cfg, af, args.wing, target=tgt).emit()
+            # mirror the X-Plane tree: <root>/A320/objects/lights_out320_XP12.obj
+            dest = root / folder / "objects" / fname if not args.flat else root / fname
+            atomic_write_bytes(dest, text.encode("utf-8"))
+            print(f"wrote {_rel(dest)} ({len(text)} bytes)")
+            if args.write:
+                _write_live(af, dest)
     if not args.flat:
         print("note: dist/ holds OBJs only — the plugin is now the native .xpl "
               "(src/native/), built + installed separately (see src/native/README.md).")
@@ -707,7 +908,7 @@ def cmd_patch_realwings(args):
     if args.root:
         roots = [(args.airframe or "?", Path(args.root))]
     else:
-        targets = [args.airframe] if args.airframe else list(OBJ_PATH)
+        targets = [args.airframe] if args.airframe else list(OBJ_TARGETS)
         roots = []
         for af in targets:
             rw, reason = _find_realwings_dir(af)
@@ -733,7 +934,7 @@ def _fmt_rec(rec):
 def cmd_check(args):
     cfg = load_config(wing=args.wing)
     af = args.airframe or "a320"
-    gen_text = Emitter(cfg, af, args.wing).emit()
+    gen_text = Emitter(cfg, af, args.wing, target=getattr(args, "target", "exterior")).emit()
     gen = parse_records(gen_text)
 
     if args.against:
@@ -745,7 +946,7 @@ def cmd_check(args):
     else:
         if args.positions_only:
             raise SystemExit("--positions-only only makes sense together with --against")
-        ref_text, ref_src = get_reference(af)
+        ref_text, ref_src = get_reference(af, getattr(args, "target", "exterior"))
     ref = parse_records(ref_text)
 
     if args.positions_only:
@@ -798,9 +999,13 @@ def main():
     ap = argparse.ArgumentParser(description="ToLiss Photon OBJ generator")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="generate the installable tree into dist/")
-    b.add_argument("--airframe", choices=list(OBJ_PATH))
+    b.add_argument("--airframe", choices=list(OBJ_TARGETS))
     b.add_argument("--wing", choices=["stock", "durantula", "realwings"], default="stock",
                    help="wing-mod variant (selects wing mount transforms)")
+    b.add_argument("--target", choices=[*TARGETS, "both"], default="both",
+                   help="which OBJ(s) to build: exterior (lights_out3xx), "
+                        "interior (lights_inn, the cockpit 'Gus Mod' lights), "
+                        "or both (default)")
     b.add_argument("--out", help="output dir (default: dist/)")
     b.add_argument("--flat", action="store_true",
                    help="write bare OBJs side by side instead of the X-Plane tree "
@@ -811,9 +1016,14 @@ def main():
                         "(auto-located), and with --wing realwings patch the mod")
     b.set_defaults(func=cmd_build)
     c = sub.add_parser("check", help="normalized round-trip check vs reference OBJ")
-    c.add_argument("--airframe", choices=list(OBJ_PATH))
+    c.add_argument("--airframe", choices=list(OBJ_TARGETS))
     c.add_argument("--wing", choices=["stock", "durantula", "realwings"], default="stock",
                    help="wing-mod variant")
+    c.add_argument("--target", choices=list(TARGETS), default="exterior",
+                   help="which OBJ to check (default: exterior). NOTE there is "
+                        "no interior golden until an in-sim pass is accepted and "
+                        "frozen, so --target interior errors by design until then "
+                        "— the same situation as --airframe a339.")
     c.add_argument("--category", help="only compare lights under this category dataref")
     c.add_argument("-v", "--verbose", action="store_true", help="list only-in-reference too")
     c.add_argument("--against", help="compare against an arbitrary OBJ file instead of the "
@@ -829,7 +1039,7 @@ def main():
                        help="patch the installed RealWings mod's baked wingtip "
                             "lights in place (also run by build --wing realwings "
                             "--write)")
-    p.add_argument("--airframe", choices=list(OBJ_PATH),
+    p.add_argument("--airframe", choices=list(OBJ_TARGETS),
                    help="airframe whose RealWings folder to patch (default: all "
                         "installed)")
     p.add_argument("--root", help="RealWings folder (default: auto-locate in the "

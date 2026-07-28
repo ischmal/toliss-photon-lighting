@@ -34,7 +34,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from installer.constants import AIRFRAMES, PLUGIN_FOLDER, WINGS_FOR, XPL_NAME
+from installer.constants import (
+    AIRFRAMES, INTERIOR_OBJ, INTERIOR_TEXTURES, PLUGIN_FOLDER, WINGS_FOR, XPL_NAME,
+)
 
 # installer/payload.py -> installer/ -> the dir holding install.py. In a release
 # that dir holds payload/; in the repo it *is* the repo root (holds build/, src/).
@@ -125,6 +127,80 @@ def obj_text(wing: str, airframe: str) -> str:
     B = _import_build_objs(repo)
     cfg = B.load_config(wing=wing)
     return B.Emitter(cfg, airframe, wing).emit()
+
+
+# ─── interior OBJ + textures ("Gus Mod") ───────────────────────────────────────
+# The interior artifact is ONE file for everything: no wing variants (wing mods
+# don't touch the cockpit) and no per-airframe variants (stock lights_inn.obj is
+# byte-identical across A319/A320/A321). Hence no arguments — a per-(wing,
+# airframe) signature like obj_text's would imply a choice that doesn't exist,
+# and in the bundle all three airframes would resolve to the same path anyway.
+def interior_obj_path() -> Path:
+    p = PAYLOAD_DIR / "objs" / "interior" / INTERIOR_OBJ
+    if not p.is_file():
+        raise PayloadError(f"missing bundled interior OBJ: {p}")
+    return p
+
+
+def interior_obj_text() -> str:
+    """The interior OBJ text to install: read from the bundle, or generated on
+    the fly from the DSL in a dev checkout. Built from the a320 fixtures, which
+    a319/a321 inherit verbatim (a339 has no interior target at all)."""
+    if _bundled():
+        return interior_obj_path().read_text(encoding="utf-8", errors="replace")
+    repo = _dev_repo()
+    if repo is None:
+        raise PayloadError(
+            f"no bundled payload at {PAYLOAD_DIR} and not a source checkout — "
+            f"nothing to install from")
+    B = _import_build_objs(repo)
+    cfg = B.load_config(wing="stock")
+    return B.Emitter(cfg, "a320", "stock", target="interior").emit()
+
+
+def interior_texture_dir() -> Path:
+    """Where Gus's canonical texture set lives. Bundled: payload/textures/
+    interior/. Dev: the vendored reference/gus/textures/ (the build must NOT
+    depend on .scratch/, which is gitignored and absent from a fresh clone)."""
+    if _bundled():
+        return PAYLOAD_DIR / "textures" / "interior"
+    repo = _dev_repo()
+    if repo is not None:
+        return repo / "reference" / "gus" / "textures"
+    return PAYLOAD_DIR / "textures" / "interior"
+
+
+def interior_textures() -> list[tuple[str, Path]]:
+    """The texture set as (filename, absolute source). Ordered by name so the
+    install progress display is stable run to run.
+
+    Only files actually present are returned, but a MISSING one is an error, not
+    a silent skip: shipping 9 of 11 would leave the cockpit half-retextured."""
+    src = interior_texture_dir()
+    if not src.is_dir():
+        raise PayloadError(
+            f"interior texture set not found: {src} — this build is incomplete "
+            f"(see reference/gus/README.md)")
+    out, missing = [], []
+    for name in INTERIOR_TEXTURES:
+        p = src / name
+        (out if p.is_file() else missing).append((name, p) if p.is_file() else name)
+    if missing:
+        raise PayloadError(
+            f"interior texture set is incomplete in {src} — missing: "
+            + ", ".join(missing))
+    return out
+
+
+def interior_available() -> bool:
+    """Whether this build can install the interior mod at all, so the TUI can
+    hide the opt-in rather than offer a step that would fail."""
+    try:
+        interior_obj_text()
+        interior_textures()
+        return True
+    except (PayloadError, OSError):
+        return False
 
 
 def _import_build_objs(repo: Path):

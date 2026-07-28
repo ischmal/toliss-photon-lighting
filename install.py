@@ -27,8 +27,8 @@ from pathlib import Path
 from installer import actions, config, detect, payload
 from installer import tui
 from installer.constants import (
-    AIRFRAMES, GITHUB_URL, VERSION, WING_ACTION_LABEL, WING_LABEL, WINGS_FOR,
-    XPLANE_ORG_URL,
+    AIRFRAMES, GITHUB_URL, INTERIOR_AIRFRAMES, VERSION, WING_ACTION_LABEL,
+    WING_LABEL, WINGS_FOR, XPLANE_ORG_URL,
 )
 from installer.log import Log
 from installer.tui import C, Back, flash, menu, render, text_prompt
@@ -383,6 +383,38 @@ def screen_check_not_running(ac: dict, action: str, xplane_root: Path):
 
 
 # ─── uninstall: shared-plugin disposition ─────────────────────────────────────
+def screen_interior(ac: dict) -> bool:
+    """Opt in to the interior ("Gus Mod") cockpit lighting — a separate axis from
+    the exterior mod, so a user who wants only the exterior can decline (§5.1).
+
+    Skipped entirely when the airframe is out of scope (the A330-900) or this
+    build has no interior payload, rather than offering a step that would fail.
+    Declining is the default: it is the bigger, more invasive change of the two
+    (it retextures the cockpit and edits the .acf), so it should be chosen, not
+    defaulted into."""
+    if ac["airframe"] not in INTERIOR_AIRFRAMES or not payload.interior_available():
+        LOG.write(f"interior mod not offered for {ac['airframe']} "
+                  f"(unsupported airframe or no payload)")
+        return False
+    options = [
+        "Exterior lighting only (recommended)",
+        "Also install the interior cockpit lighting",
+    ]
+    body = (
+        "The interior mod re-lights the COCKPIT — dome, map, pedestal, table and "
+        "console lights — and lets you switch them between old halogen, new "
+        "halogen and LED from the same menu as the exterior lights.\n\n"
+        "It is the work of GUS, used with permission and shipped with credit.\n\n"
+        "It installs ~57 MB of cockpit textures, and edits the aircraft's .acf "
+        "files to hand its three sim cockpit spotlights over to the mod. "
+        "Uninstalling puts all of it back."
+    )
+    choice = menu(STAGE_CONFIGURE, "Step 3d.  Interior cockpit lighting (optional)",
+                  body, options)
+    LOG.write(f"interior opt-in: {choice == 1}")
+    return choice == 1
+
+
 def screen_plugin_disposition(ac: dict, xplane_root: Path) -> bool:
     """Whether to also remove the shared plugin on uninstall. Left installed by
     default (other airframes may use it); only offered when this is the last
@@ -406,14 +438,25 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
     # it (the animation loop below reads no keys). screen_plugin_disposition may
     # raise Back — let it propagate to the flow, unchanged.
     remove_plugin = False
+    want_interior = False
     if action == "uninstall":
         remove_plugin = screen_plugin_disposition(ac, xplane_root)
+    else:
+        want_interior = screen_interior(ac)
 
     # The real filesystem work is synchronous and can take a beat (backing up
     # OBJs, RealWings/glow patching, plugin copy), during which a static
     # "Working…" looks hung. Run it on a worker thread and animate the ellipsis
     # on the main thread so the screen visibly stays alive.
     result: dict = {}
+    # Written by the worker, read by the render loop below. A plain dict
+    # assignment is atomic enough for this — the reader only ever displays the
+    # latest value and never acts on it, so a torn read is impossible and a
+    # stale one is invisible.
+    progress: dict = {}
+
+    def _on_progress(done, total, name):
+        progress["text"] = f"copying textures {done}/{total} — {name}"
 
     def _work():
         try:
@@ -422,7 +465,8 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
                     ac, xplane_root, LOG, dry_run=DRY_RUN, remove_plugin=remove_plugin)
             else:
                 result["steps"] = actions.install(
-                    ac, action, xplane_root, LOG, dry_run=DRY_RUN)
+                    ac, action, xplane_root, LOG, dry_run=DRY_RUN,
+                    interior=want_interior, progress=_on_progress)
         except actions.ActionError as e:
             result["error"] = str(e)
             LOG.write(f"ACTION FAILED: {e}", "ERROR")
@@ -437,7 +481,13 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
     tick = 0
     while True:  # renders at least once, then animates until the work finishes
         dots = ("." * (1 + tick % 3)).ljust(3)
-        render(STAGE_RUN, ["", title, "", f"  {C.DIM}Working{dots}{C.RESET}"])
+        # The interior step copies ~57 MiB of textures; naming the current file
+        # is what keeps that from reading as a hang (interior_plan.md §5.3).
+        note = progress.get("text")
+        body = ["", title, "", f"  {C.DIM}Working{dots}{C.RESET}"]
+        if note:
+            body += ["", f"  {C.BR_BLACK}{note}{C.RESET}"]
+        render(STAGE_RUN, body)
         worker.join(WORKING_ANIM_INTERVAL)  # wakes early the instant work finishes
         if not worker.is_alive():
             break

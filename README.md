@@ -48,6 +48,7 @@ for building the plugin.
 * Realistic red beacon flash behavior
 * Improved white strobe flash behavior
 * Ability to select between new LED lighting or older halogen/incandescent and Xenon flash-tube lighting
+* **Optional interior (cockpit) lighting**, switchable between old halogen, new halogen, and LED — by [GusRodrigues](https://forums.x-plane.org/profile/6767-gusrodrigues/), integrated with permission (A319/A320/A321 only)
 * Optionally change individual lights for a custom lighting configuration
 * Instantly adjust lighting options while loaded in the aircraft
 * Preferences are saved per aircraft livery
@@ -76,6 +77,28 @@ for building the plugin.
   * Beacon: Xenon or LED
   * Strobes: Xenon or LED
   * Logo Lights: Halogen or LED
+
+## Interior (Cockpit) Lighting
+An **optional** add-on, offered during install and easy to decline if you only want the
+exterior mod. The cockpit lighting itself — its design, placement, intensities, and the
+three looks — is the work of [GusRodrigues](https://forums.x-plane.org/profile/6767-gusrodrigues/),
+used with permission. Photon's only contribution is folding his three separate variant
+files into one that can be switched in-sim, the same way the exterior lights work.
+
+* **Old Halogen**: the warm orange cockpit of an early A320.
+* **New Halogen**: a lighter amber, as fitted to later builds.
+* **LED**: cool white domes and flood, warm white on the smaller lamps.
+* **Auto**: follows whatever era the exterior profile resolved to.
+* **Custom**: set each group independently — Dome Lights, Map Lights, Pedestal &
+  Tables, and Console Lights.
+
+Installing it also replaces a set of cockpit textures and adjusts the aircraft's `.acf`
+files so the sim's three built-in cockpit spotlights follow the same switch. Uninstalling
+puts all of it back. Not available for the A330-900.
+
+> If you also install Gus's original zip **by hand**, do it *before* running this
+> installer, not after — his package contains its own exterior light object, which would
+> overwrite Photon's and silently revert the exterior mod.
 
 ## Changelog
 ### v0.2-beta (2026-07-10)
@@ -121,9 +144,12 @@ The strobe and beacon flashing is controlled by the ToLiss Photon plugin. It run
 ## Other Recommended Mods
 * [KOSP Project](https://store.x-plane.org/KOSP-PROJECT--A319-A320-A321-Full-Soundscape_p_1773.html) for audio
 * [GusRodrigues'](https://forums.x-plane.org/profile/6767-gusrodrigues/) A320 Family Light Mod ([A319](https://forums.x-plane.org/files/file/93336-a319-light-mod/), [A320](https://forums.x-plane.org/files/file/93337-a320-light-mod/), [A321](https://forums.x-plane.org/files/file/93338-a321-light-mod/)) for additional lighting improvements
-  * _These mods also optionally provide improved exterior lighting. They have a different artistic direction compared to ToLiss Photon and are a good alternative if yu decide you don't like this mod._
+  * _The **interior** half of these mods is now included in ToLiss Photon as an optional install (see [Interior (Cockpit) Lighting](#interior-cockpit-lighting) above) — you don't need to install it separately._
+  * _These mods also optionally provide improved **exterior** lighting. That part has a different artistic direction compared to ToLiss Photon and is a good alternative if you decide you don't like this mod. Note the two can't coexist: installing Gus's zip by hand after Photon will overwrite Photon's exterior lights._
 
 ## Credits
+The **interior (cockpit) lighting is entirely the work of [GusRodrigues](https://forums.x-plane.org/profile/6767-gusrodrigues/)** and is included here with his permission. The light design, placement, intensities, colour looks, and the cockpit textures that ship with it are all his; ToLiss Photon only makes them switchable in-sim. If you like how the cockpit looks, that's Gus. Go say thanks on [his profile](https://forums.x-plane.org/profile/6767-gusrodrigues/).
+
 The original .obj lighting files were authored by ToLiss Simulations. Scripting was crafted with the assistance of Claude Code (Sonnet 5 and Opus 4.8). 
 
 The file you're currently reading was still 100% written by me (schmal), a real human.

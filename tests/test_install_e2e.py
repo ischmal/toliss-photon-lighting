@@ -115,6 +115,7 @@ class InstallFlowE2ETest(unittest.TestCase):
             tui.KEY_ENTER,  # launch -> continue
             tui.KEY_ENTER,  # aircraft select -> first (only) entry
             tui.KEY_ENTER,  # action select -> first entry (stock install)
+            tui.KEY_ENTER,  # interior opt-in -> first entry (exterior only)
             tui.KEY_ENTER,  # perform -> continue
             tui.KEY_ENTER,  # complete -> first entry (Exit installer)
         ]
@@ -141,6 +142,7 @@ class InstallFlowE2ETest(unittest.TestCase):
             tui.KEY_ENTER,  # launch -> continue
             tui.KEY_ENTER,  # aircraft select -> first (only) entry
             tui.KEY_ENTER,  # action select -> first entry (stock install)
+            tui.KEY_ENTER,  # interior opt-in -> first entry (exterior only)
             tui.KEY_ENTER,  # perform -> continue
             "2",            # complete -> "Modify another aircraft"
             tui.KEY_ENTER,  # aircraft select -> first (only) entry, again

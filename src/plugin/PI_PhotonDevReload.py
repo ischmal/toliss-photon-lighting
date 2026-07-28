@@ -15,24 +15,49 @@ WHAT IT AUTOMATES
      1. Snapshot the current EXTERNAL CAMERA pose.
      2. Snapshot a configurable list of DATAREFS (light switches + external power) so the
         aircraft's post-reload cold state can be put back exactly.
-     3. Disable the ToLiss aircraft plugins (matched by NAME: "AirbusFBW", "SASL") - the
-        same crash-avoidance step you do by hand in Plugin Admin before reloading an OBJ.
-     4. Reload the aircraft (sim/operation/reload_aircraft) - re-reads the edited OBJ.
+     3. Disable the aircraft's own plugins - the same crash-avoidance step you do by hand in
+        Plugin Admin before reloading an OBJ. Scoped by FILE PATH (every plugin whose binary
+        lives under the current aircraft's folder), minus SkipPluginNameMatches. NEVER match
+        by name - a name match on "sasl" also catches unrelated scenery plugins and hard-
+        crashes the sim. See docs/dev-tools.md.
+     4. Reload the aircraft (sim/operation/reload_aircraft) - re-reads the edited OBJ. Issued
+        straight from the command handler: reloading from a flight loop hard-crashes the sim.
      5. When the reloaded plane reports loaded (MSG_PLANE_LOADED), SETTLE: re-enable the
-        plugins, then re-assert the snapshotted datarefs every tick for a few seconds so
-        ToLiss's own cold-start init can't clobber them (power back on, your light switches
-        back on).
-     6. Restore the CAMERA to the exact pose you were looking from, then hand control back.
+        plugins, then WAIT OUT ToLiss's cold-start init rather than racing it - watch the
+        snapshot datarefs until ToLiss has visibly touched them and then gone quiet, and only
+        then write the snapshot back (power back on, your light switches back on).
+     6. Restore the CAMERA to the exact pose you were looking from and HOLD it there,
+        re-grabbing if ToLiss steals it, until you give input (any key / click / wheel).
 
 WHY A COMMAND (not just a dataref/menu): commands are bindable to keys and joystick
 buttons, so you can fire the whole cycle without moving the mouse to a menu while framing
-a shot outside. A "Photon Dev" Plugins menu is also provided (Quick Reload / Release
-Camera / Log Plugin List) as a mouse fallback.
+a shot outside. A "Photon Dev" Plugins menu is also provided as a mouse fallback.
+
+ALSO IN HERE (all reachable from the Plugins > Photon Dev menu)
+
+  PLAIN RELOAD - the reload with none of the above. Still disables/re-enables the
+  aircraft's plugins (that is the crash avoidance, not a convenience), but takes no
+  snapshot and never touches the camera. Use it when you just want the OBJ re-read and
+  don't mind landing back in a cold cockpit.
+
+  CINEMATIC CAMERA - a slow, eased camera for recording pans. X-Plane exposes no
+  free-camera speed dataref, and its own *_slow command variants are still far too fast,
+  so this drives the camera itself and INTERCEPTS the sim's view commands
+  (sim/general/forward, rot_left, ...) while active - meaning your existing keys, hat
+  switch and joystick fly it, at a speed you set, with velocity easing in and out.
+
+  COCKPIT LIGHT TUNER - find a light's position/aim/cone/size in-sim. OBJ light geometry
+  is read once at aircraft load, so edits are staged in memory, written into the
+  installed lights_inn.obj in one batch, and picked up by a quick reload (which restores
+  the camera, so every iteration frames the identical shot). The OUTPUT is the "Log DSL"
+  line: paste it into src/lights/lights.layout.phdsl, which stays the source of truth.
+  The OBJ the tuner writes is build output and the next build overwrites it.
 
 TUNE IN-SIM: the timing constants and (especially) the external-power dataref name below
 are the parts to confirm in the sim. Every snapshot dataref is logged with found/value at
 trigger time, so tailing XPPython3Log.txt tells you immediately whether a name resolves.
 """
+import math
 import os
 import time
 import traceback
@@ -121,21 +146,74 @@ CameraRegrabInterval    = 0.1   # how often the watchdog polls for "did somethin
 MaxArrayElements = 1024        # cap when snapshotting array datarefs (OHPLightSwitches is
                                # tiny; this only bounds pathological sizes)
 
+# ---- cinematic camera ---------------------------------------------------------------
+# A slow, smoothed camera you fly with YOUR EXISTING view keybindings. X-Plane has no
+# dataref for free-camera speed (checked: nothing in DataRefs.txt), and its own _slow
+# command variants are still far too fast for a panning shot - so instead of trying to
+# scale the sim's motion we take the camera and drive it ourselves.
+#
+# HOW THE INPUT WORKS: we intercept the sim's own view commands (sim/general/left,
+# forward, rot_left, zoom_in, ... and their _fast/_slow variants) with BEFORE-phase
+# handlers that consume them while cinematic mode is on. So whatever you already have
+# bound - keys, hat switch, joystick - flies the cinematic camera at OUR speed, with no
+# new bindings to learn. Turn the mode off and the bindings go straight back to the sim.
+#
+# The smoothing is what makes it cinematic: velocity EASES toward the target instead of
+# snapping, so starts and stops are soft rather than stepped. CineSmoothingSeconds is the
+# time constant - larger = longer, more languid ramps (0 = instant, mechanical).
+CineMoveSpeed      = 0.35   # metres/second at multiplier 1.0 (deliberately very slow)
+CineRotateSpeed    = 3.0    # degrees/second at multiplier 1.0
+CineZoomSpeed      = 0.25   # zoom factor change per second at multiplier 1.0
+CineSmoothingSeconds = 0.6  # velocity ease-in/out time constant (0 = no smoothing)
+CineFastScale      = 4.0    # the sim's *_fast command variants
+CineSlowScale      = 0.25   # the sim's *_slow command variants
+CineMultipliers    = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)   # the -/+ buttons step these
+CineDefaultMultiplierIndex = 3   # -> 1.0
+
+# ---- cockpit light tuner ------------------------------------------------------------
+# Position/aim/cone/size of an OBJ light are BAKED INTO THE OBJ - X-Plane reads them at
+# aircraft load, and no dataref can move them afterwards. So the tuner edits the installed
+# lights_inn.obj in place and then runs the quick reload (which puts your camera back
+# exactly where it was, so you see the same view with the light moved).
+#
+# ⚠ The OBJ IS BUILD OUTPUT. This tool is for FINDING the numbers in-sim, never for
+# keeping them: once a value looks right, hit "Log DSL" and paste it into
+# src/lights/lights.layout.phdsl, which stays the single source of truth. The next
+# `build_objs.py build --write` overwrites whatever the tuner wrote.
+TunerObjRelPath = os.path.join("objects", "lights_inn.obj")
+TunerFineStep   = {"pos": 0.01, "dir": 0.02, "size": 0.05, "cone": 0.005}
+TunerCoarseStep = {"pos": 0.10, "dir": 0.10, "size": 0.25, "cone": 0.020}
+
 # Command + menu identity
 CommandName = "ToLissPhoton/dev/quick_reload"
 CommandDesc = "Photon Dev: snapshot -> reload aircraft -> restore state & camera"
+PlainReloadCommandName = "ToLissPhoton/dev/plain_reload"
+PlainReloadCommandDesc = "Photon Dev: reload the aircraft only (no state or camera restore)"
 ReleaseCameraCommandName = "ToLissPhoton/dev/release_camera"
 ReleaseCameraCommandDesc = "Photon Dev: release the held camera back to free-look control"
+CineToggleCommandName = "ToLissPhoton/dev/cinematic_camera"
+CineToggleCommandDesc = "Photon Dev: toggle the slow cinematic camera"
+CineFasterCommandName = "ToLissPhoton/dev/cinematic_faster"
+CineSlowerCommandName = "ToLissPhoton/dev/cinematic_slower"
 # ====================================================================================
 
 
 # XPLM constants with integer fallbacks (names occasionally differ by version)
-CommandBegin   = getattr(xp, "CommandBegin", 0)
+CommandBegin    = getattr(xp, "CommandBegin", 0)
+CommandContinue = getattr(xp, "CommandContinue", 1)
+CommandEnd      = getattr(xp, "CommandEnd", 2)
 MsgPlaneLoaded = getattr(xp, "MSG_PLANE_LOADED", 102)
 PhaseAfterFM   = getattr(xp, "FlightLoop_Phase_AfterFlightModel", 1)
 CamForever     = getattr(xp, "ControlCameraForever", 2)
 WinDecoNone    = getattr(xp, "WindowDecorationNone", 0)
-WinLayerOverlay = getattr(xp, "WindowLayerFlightOverlay", getattr(xp, "WindowLayerFloatingWindows", 2))
+WinDecoRound   = getattr(xp, "WindowDecorationRoundRectangle", 1)
+WinLayerFloat  = getattr(xp, "WindowLayerFloatingWindows", 2)
+WinLayerOverlay = getattr(xp, "WindowLayerFlightOverlay", WinLayerFloat)
+WinPositionFree = getattr(xp, "WindowPositionFree", 0)
+MouseDown      = getattr(xp, "MouseDown", 1)
+MouseUp        = getattr(xp, "MouseUp", 3)
+FontProp       = getattr(xp, "Font_Proportional", 18)
+CursorDefault  = getattr(xp, "CursorDefault", 0)
 
 TYPE_INT      = getattr(xp, "Type_Int", 1)
 TYPE_FLOAT    = getattr(xp, "Type_Float", 2)
@@ -143,8 +221,13 @@ TYPE_DOUBLE   = getattr(xp, "Type_Double", 4)
 TYPE_FLOATARR = getattr(xp, "Type_FloatArray", 8)
 TYPE_INTARR   = getattr(xp, "Type_IntArray", 16)
 
-# state machine
-ST_IDLE, ST_AWAIT_LOAD, ST_SETTLING, ST_CAMERA = 0, 1, 2, 3
+# state machine. ST_PLAIN is the bare reload: it still disables/re-enables the
+# aircraft's own plugins (that is crash avoidance, not convenience) but does no
+# dataref snapshot and never touches the camera.
+ST_IDLE, ST_AWAIT_LOAD, ST_SETTLING, ST_CAMERA, ST_PLAIN = 0, 1, 2, 3, 4
+
+# camera pose slots, as returned by xp.readCameraPosition()
+CAM_X, CAM_Y, CAM_Z, CAM_PITCH, CAM_HEADING, CAM_ROLL, CAM_ZOOM = range(7)
 
 
 def _log(msg):
@@ -152,6 +235,54 @@ def _log(msg):
         xp.log("Photon Dev: " + msg)
     except Exception:
         pass
+
+
+# ============================== tiny immediate-mode UI ================================
+# Enough widget to build the two dev windows without a widget library. Buttons are drawn
+# by the window's draw callback, which ALSO records each button's rectangle into a hit
+# list; the click callback then just searches that list. Layout therefore exists in
+# exactly one place and a click can never land somewhere the button isn't - the same
+# draw/hit-test-share-geometry discipline the native plugin's Custom window uses, minus
+# its duplicated rect maths.
+UI_PAD, UI_GAP, UI_TOP_INSET, UI_BTN_PAD = 8, 6, 20, 8
+UI_BULLET = "• "
+
+COL_TEXT   = (0.86, 0.86, 0.86)
+COL_BRIGHT = (1.0, 1.0, 1.0)
+COL_DIM    = (0.55, 0.55, 0.58)
+COL_ACTIVE = (0.0, 0.729, 1.0)
+
+
+def _measure(text):
+    try:
+        return int(xp.measureString(FontProp, text))
+    except Exception:
+        return 7 * len(text)
+
+
+def _font_height():
+    try:
+        return int(xp.getFontDimensions(FontProp)[1])
+    except Exception:
+        return 12
+
+
+def _draw_text(color, x, y, text):
+    try:
+        xp.drawString(color, x, y, text, None, FontProp)
+    except Exception:
+        pass
+
+
+class UiButton:
+    """One drawn button plus the action to run when it is clicked."""
+    __slots__ = ("l", "b", "r", "t", "action")
+
+    def __init__(self, l, b, r, t, action):
+        self.l, self.b, self.r, self.t, self.action = l, b, r, t, action
+
+    def hit(self, x, y):
+        return self.l <= x <= self.r and self.b <= y <= self.t
 
 
 class PythonInterface:
@@ -162,7 +293,11 @@ class PythonInterface:
 
         self.state = ST_IDLE
         self.cmdRef = None
+        self.plainCmdRef = None
         self.releaseCmdRef = None
+        self.cineCmdRef = None
+        self.cineFasterCmdRef = None
+        self.cineSlowerCmdRef = None
         self.driverLoopID = None
 
         # menu
@@ -193,14 +328,51 @@ class PythonInterface:
         self.keySnifferOn = False       # key sniffer registered while holding
         self.mouseWin = None            # full-screen click/wheel catcher while holding
 
+        # cinematic camera (see the CineMoveSpeed tunables)
+        self.cineActive = False
+        self.cineControlling = False
+        self.cinePendingRegrab = False
+        self.cinePose = None            # the pose we are driving, mutated every frame
+        self.cineLoopID = None
+        self.cineHeld = {}              # refCon tuple -> True while its command is held
+        self.cineVel = {"fwd": 0.0, "side": 0.0, "up": 0.0,
+                        "pitch": 0.0, "hdg": 0.0, "zoom": 0.0}   # smoothed velocities
+        self.cineMulIndex = CineDefaultMultiplierIndex
+        self.cineLastTick = None
+        self.cineHooks = []             # (commandRef, refCon) we registered handlers on
+        self.cineWin = None
+        self.cineHits = []
+
+        # cockpit light tuner
+        self.tunerWin = None
+        self.tunerHits = []
+        self.tunerPath = None           # the OBJ we parsed
+        self.tunerLines = []            # the whole file, split into lines
+        self.tunerOrder = []            # keys, in file order
+        self.tunerLights = {}           # key -> {"cls", "refs": [(lineIdx, cmd, prefix, nums, tail)]}
+        self.tunerVals = {}             # key -> working copy of the 12 numeric slots
+        self.tunerSel = 0
+        self.tunerCoarse = False
+        self.tunerNote = "not loaded"
+
     # ---------------------------------------------------------------- lifecycle
     def XPluginStart(self):
         try:
             self.cmdRef = xp.createCommand(CommandName, CommandDesc)
             xp.registerCommandHandler(self.cmdRef, self.QuickReloadCmd, 1, 0)
+            self.plainCmdRef = xp.createCommand(PlainReloadCommandName, PlainReloadCommandDesc)
+            xp.registerCommandHandler(self.plainCmdRef, self.PlainReloadCmd, 1, 0)
             self.releaseCmdRef = xp.createCommand(ReleaseCameraCommandName, ReleaseCameraCommandDesc)
             xp.registerCommandHandler(self.releaseCmdRef, self.ReleaseCameraCmd, 1, 0)
-            _log("started; command '%s' registered (bind it to a key/button)" % CommandName)
+            self.cineCmdRef = xp.createCommand(CineToggleCommandName, CineToggleCommandDesc)
+            xp.registerCommandHandler(self.cineCmdRef, self.CineToggleCmd, 1, 0)
+            self.cineFasterCmdRef = xp.createCommand(
+                CineFasterCommandName, "Photon Dev: cinematic camera - next speed up")
+            xp.registerCommandHandler(self.cineFasterCmdRef, self.CineFasterCmd, 1, 0)
+            self.cineSlowerCmdRef = xp.createCommand(
+                CineSlowerCommandName, "Photon Dev: cinematic camera - next speed down")
+            xp.registerCommandHandler(self.cineSlowerCmdRef, self.CineSlowerCmd, 1, 0)
+            _log("started; commands registered (bind '%s' to a key/button)" % CommandName)
         except Exception:
             _log("XPluginStart error:\n" + traceback.format_exc())
         return self.Name, self.Sig, self.Desc
@@ -211,6 +383,7 @@ class PythonInterface:
             # Separate watchdog loop for the camera hold: it must keep ticking to
             # re-grab the camera after the settle state machine has gone idle.
             self.camWatchLoopID = xp.createFlightLoop(self.CameraWatchLoop, PhaseAfterFM, 0)
+            self.cineLoopID = xp.createFlightLoop(self.CineLoop, PhaseAfterFM, 0)
             self.CreateMenu()
         except Exception:
             _log("XPluginEnable error:\n" + traceback.format_exc())
@@ -218,29 +391,44 @@ class PythonInterface:
 
     def XPluginDisable(self):
         try:
+            self._cine_stop("plugin disable")
             self._release_camera()
-            if self.driverLoopID is not None:
-                xp.destroyFlightLoop(self.driverLoopID)
-                self.driverLoopID = None
-            if self.camWatchLoopID is not None:
-                xp.destroyFlightLoop(self.camWatchLoopID)
-                self.camWatchLoopID = None
+            self._destroy_window("cineWin")
+            self._destroy_window("tunerWin")
+            for loop in ("driverLoopID", "camWatchLoopID", "cineLoopID"):
+                if getattr(self, loop) is not None:
+                    xp.destroyFlightLoop(getattr(self, loop))
+                    setattr(self, loop, None)
             self.DestroyMenu()
         except Exception:
             _log("XPluginDisable error:\n" + traceback.format_exc())
 
     def XPluginStop(self):
         try:
-            if self.cmdRef is not None:
-                xp.unregisterCommandHandler(self.cmdRef, self.QuickReloadCmd, 1, 0)
-            if self.releaseCmdRef is not None:
-                xp.unregisterCommandHandler(self.releaseCmdRef, self.ReleaseCameraCmd, 1, 0)
+            for ref, handler in ((self.cmdRef, self.QuickReloadCmd),
+                                 (self.plainCmdRef, self.PlainReloadCmd),
+                                 (self.releaseCmdRef, self.ReleaseCameraCmd),
+                                 (self.cineCmdRef, self.CineToggleCmd),
+                                 (self.cineFasterCmdRef, self.CineFasterCmd),
+                                 (self.cineSlowerCmdRef, self.CineSlowerCmd)):
+                if ref is not None:
+                    xp.unregisterCommandHandler(ref, handler, 1, 0)
         except Exception:
             _log("XPluginStop error:\n" + traceback.format_exc())
 
     def XPluginReceiveMessage(self, inFromWho, inMessage, inParam):
         try:
-            if inMessage == MsgPlaneLoaded and inParam == 0 and self.state == ST_AWAIT_LOAD:
+            if inMessage != MsgPlaneLoaded or inParam != 0:
+                return
+            if self.state == ST_PLAIN:
+                # Bare reload: nothing to settle, nothing to restore. The one thing
+                # still owed is re-enabling the aircraft's plugins, and that has to
+                # wait a beat for them to finish (re)loading - hence a single
+                # deferred tick rather than doing it right here.
+                _log("plane loaded (plain reload); re-enabling aircraft plugins shortly")
+                xp.scheduleFlightLoop(self.driverLoopID, 1.0, 1)
+                return
+            if self.state == ST_AWAIT_LOAD:
                 _log("plane loaded; waiting out ToLiss init before restoring")
                 self.state = ST_SETTLING
                 self.settleElapsed = 0.0
@@ -261,9 +449,29 @@ class PythonInterface:
             self.Trigger()
         return 1
 
+    def PlainReloadCmd(self, inCommand, inPhase, inRefcon):
+        if inPhase == CommandBegin:
+            self.PlainReload()
+        return 1
+
     def ReleaseCameraCmd(self, inCommand, inPhase, inRefcon):
         if inPhase == CommandBegin:
             self._release_camera_to_free()
+        return 1
+
+    def CineToggleCmd(self, inCommand, inPhase, inRefcon):
+        if inPhase == CommandBegin:
+            self._cine_stop("toggled off") if self.cineActive else self._cine_start()
+        return 1
+
+    def CineFasterCmd(self, inCommand, inPhase, inRefcon):
+        if inPhase == CommandBegin:
+            self._cine_step_multiplier(+1)
+        return 1
+
+    def CineSlowerCmd(self, inCommand, inPhase, inRefcon):
+        if inPhase == CommandBegin:
+            self._cine_step_multiplier(-1)
         return 1
 
     # ---------------------------------------------------------------- the sequence
@@ -280,6 +488,7 @@ class PythonInterface:
             # external while ToLiss resets the view mode is what culls the exterior
             # (the settle's whole point is to re-establish the hold only AFTER
             # quiescence, at ST_CAMERA). Quiet when nothing was held.
+            self._cine_stop("quick reload")
             self._release_camera()
             self._snapshot_datarefs()
             self._disable_plugins()
@@ -288,7 +497,36 @@ class PythonInterface:
             _log("Trigger error:\n" + traceback.format_exc())
             self.state = ST_IDLE
 
-    def _issue_reload(self):
+    def PlainReload(self):
+        """Reload the aircraft and nothing else.
+
+        The quick reload's snapshot/settle/camera-hold machinery exists to make
+        light-POSITION iteration painless, and it costs 10-45 seconds of waiting out
+        ToLiss's cold-start init. When you only need the OBJ or plugin re-read - and
+        are happy to be dropped back in the cockpit with the switches cold - this is
+        the same reload without any of that.
+
+        What it deliberately KEEPS is the plugin disable/re-enable around the reload.
+        That is not part of the "fix"; it is the crash avoidance that makes reloading
+        a ToLiss safe at all (see _disable_plugins), so skipping it would just mean an
+        occasional hard sim crash instead of a faster reload.
+        """
+        try:
+            if self.state != ST_IDLE:
+                _log("busy (state %d) - ignoring plain reload" % self.state)
+                return
+            _log("=== plain reload triggered (no state/camera restore) ===")
+            # A live camera hold would survive into the reload and fight ToLiss's
+            # view reset - the exact thing that culls the exterior. Drop it first.
+            self._cine_stop("plain reload")
+            self._release_camera()
+            self._disable_plugins()
+            self._issue_reload(plain=True)
+        except Exception:
+            _log("PlainReload error:\n" + traceback.format_exc())
+            self.state = ST_IDLE
+
+    def _issue_reload(self, plain=False):
         # CRITICAL: issue the reload from THIS command/menu-handler context, never from a
         # flight-loop callback. sim/operation/reload_aircraft runs SYNCHRONOUSLY and unloads
         # the aircraft's plugins; doing that nested inside X-Plane's flight-loop dispatch
@@ -303,15 +541,21 @@ class PythonInterface:
             self._reenable_plugins()
             self.state = ST_IDLE
             return
-        # Set AWAIT_LOAD *before* commandOnce: the reload (and MSG_PLANE_LOADED) can fire
-        # synchronously inside this call, so ReceiveMessage must already see AWAIT_LOAD.
-        self.state = ST_AWAIT_LOAD
+        # Set the awaiting state *before* commandOnce: the reload (and MSG_PLANE_LOADED)
+        # can fire synchronously inside this call, so ReceiveMessage must already see it.
+        self.state = ST_PLAIN if plain else ST_AWAIT_LOAD
         _log("issuing %s (handler context)" % ReloadCommand)
         xp.commandOnce(cmd)
         _log("reload issued; awaiting MSG_PLANE_LOADED")
 
     def Driver(self, sinceLast, sinceLoop, counter, refCon):
         try:
+            if self.state == ST_PLAIN:
+                self._reenable_plugins()
+                _log("=== plain reload complete ===")
+                self.state = ST_IDLE
+                return 0
+
             if self.state == ST_SETTLING:
                 self.settleElapsed += sinceLast
                 if not self.pluginsReenabled:
@@ -815,14 +1059,653 @@ class PythonInterface:
             pass
         self._release_camera()
 
+    # ============================== shared window plumbing ==========================
+    def _create_window(self, title, width, height, drawFn, clickFn):
+        try:
+            sl, st, sr, sb = xp.getScreenBoundsGlobal()
+            left = (sl + sr) // 2 - width // 2
+            top = (st + sb) // 2 + height // 2
+            win = xp.createWindowEx(
+                left=left, top=top, right=left + width, bottom=top - height, visible=1,
+                draw=drawFn, click=clickFn,
+                key=self._win_noop_key, cursor=self._win_noop_cursor,
+                wheel=self._win_noop_wheel, rightClick=self._win_noop_click,
+                refCon=0, decoration=WinDecoRound, layer=WinLayerFloat)
+            xp.setWindowTitle(win, title)
+            xp.setWindowPositioningMode(win, WinPositionFree, -1)
+            xp.setWindowResizingLimits(win, width, height, width, height)
+            return win
+        except Exception:
+            _log("could not create window '%s':\n%s" % (title, traceback.format_exc()))
+            return None
+
+    def _destroy_window(self, attr):
+        win = getattr(self, attr, None)
+        if win is not None:
+            try:
+                xp.destroyWindow(win)
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+    def _win_noop_key(self, *a):
+        return
+
+    def _win_noop_cursor(self, *a):
+        return CursorDefault
+
+    def _win_noop_wheel(self, *a):
+        return 0
+
+    def _win_noop_click(self, *a):
+        return 1
+
+    def _ui_button(self, l, b, r, t, mx, my, hits, label, action, active=False):
+        """Draw one button and record its rectangle + action in `hits`."""
+        try:
+            xp.drawTranslucentDarkBox(l, t, r, b)
+        except Exception:
+            pass
+        over = l <= mx <= r and b <= my <= t
+        color = COL_ACTIVE if active else (COL_BRIGHT if over else COL_TEXT)
+        text = (UI_BULLET + label) if active else label
+        _draw_text(color, l + ((r - l) - _measure(text)) // 2,
+                   b + (t - b - _font_height()) // 2 + 1, text)
+        hits.append(UiButton(l, b, r, t, action))
+
+    def _ui_button_row(self, x, b, t, mx, my, hits, items, minWidth=0):
+        """Draw `items` = [(label, action[, active])] left to right from x."""
+        for item in items:
+            label, action = item[0], item[1]
+            active = item[2] if len(item) > 2 else False
+            w = max(minWidth, _measure(label) + 2 * UI_BTN_PAD + (_measure(UI_BULLET) if active else 0))
+            self._ui_button(x, b, x + w, t, mx, my, hits, label, action, active)
+            x += w + UI_GAP
+        return x
+
+    def _ui_click(self, hits, x, y, inMouse):
+        # Act on mouse-UP so a press that drags off the button does nothing, and so a
+        # single click can never fire twice. The hit list was built by the last draw,
+        # which by definition ran before this click.
+        if inMouse == MouseUp:
+            for btn in hits:
+                if btn.hit(x, y):
+                    try:
+                        btn.action()
+                    except Exception:
+                        _log("UI action error:\n" + traceback.format_exc())
+                    break
+        return 1
+
+    # ============================ cinematic camera ==================================
+    # Slow, smoothed camera for recording pans. See the CineMoveSpeed tunables for why
+    # this drives the camera itself instead of scaling the sim's own motion.
+    #
+    # AXES are camera-relative, which is what makes a pan feel natural: "forward" goes
+    # where you are LOOKING (pitch included), "side" strafes level, "up" is world up
+    # (deliberately NOT the camera's up - a level rise while pitched down is what you
+    # want for a crane shot, not a diagonal drift).
+
+    # sim command -> (axis, sign). Every one of these gets a _fast and _slow sibling.
+    CINE_COMMANDS = (
+        ("sim/general/forward",   "fwd",   +1.0),
+        ("sim/general/backward",  "fwd",   -1.0),
+        ("sim/general/right",     "side",  +1.0),
+        ("sim/general/left",      "side",  -1.0),
+        ("sim/general/up",        "up",    +1.0),
+        ("sim/general/down",      "up",    -1.0),
+        ("sim/general/rot_up",    "pitch", +1.0),
+        ("sim/general/rot_down",  "pitch", -1.0),
+        ("sim/general/rot_right", "hdg",   +1.0),
+        ("sim/general/rot_left",  "hdg",   -1.0),
+        ("sim/general/zoom_in",   "zoom",  +1.0),
+        ("sim/general/zoom_out",  "zoom",  -1.0),
+    )
+
+    def _cine_multiplier(self):
+        return CineMultipliers[self.cineMulIndex]
+
+    def _cine_step_multiplier(self, delta):
+        i = self.cineMulIndex + delta
+        self.cineMulIndex = max(0, min(len(CineMultipliers) - 1, i))
+        _log("cinematic camera speed x%.2f (%.3f m/s, %.2f deg/s)"
+             % (self._cine_multiplier(),
+                CineMoveSpeed * self._cine_multiplier(),
+                CineRotateSpeed * self._cine_multiplier()))
+
+    def _cine_hook_commands(self):
+        """Take over the sim's view commands so existing bindings fly OUR camera.
+
+        Registered in the BEFORE phase and returning 0 while cinematic mode is on, so
+        X-Plane never sees them and cannot also move its own camera. When the mode is
+        off the handlers return 1 and every binding behaves exactly as it always did -
+        which is why it is safe to leave them registered for the session.
+        """
+        if self.cineHooks:
+            return
+        for name, axis, sign in self.CINE_COMMANDS:
+            for suffix, scale in (("", 1.0), ("_fast", CineFastScale), ("_slow", CineSlowScale)):
+                try:
+                    ref = xp.findCommand(name + suffix)
+                    if ref is None:
+                        continue
+                    refCon = (axis, sign, scale)
+                    xp.registerCommandHandler(ref, self.CineAxisCmd, 1, refCon)
+                    self.cineHooks.append((ref, refCon))
+                except Exception:
+                    _log("could not hook %s%s:\n%s" % (name, suffix, traceback.format_exc()))
+        _log("cinematic camera: hooked %d view commands" % len(self.cineHooks))
+
+    def _cine_unhook_commands(self):
+        for ref, refCon in self.cineHooks:
+            try:
+                xp.unregisterCommandHandler(ref, self.CineAxisCmd, 1, refCon)
+            except Exception:
+                pass
+        self.cineHooks = []
+
+    def CineAxisCmd(self, inCommand, inPhase, inRefcon):
+        # inRefcon is the (axis, sign, scale) tuple this command was registered with.
+        if not self.cineActive:
+            return 1                      # mode off: hand the command straight to the sim
+        try:
+            if inPhase == CommandEnd:
+                self.cineHeld.pop(inRefcon, None)
+            else:
+                self.cineHeld[inRefcon] = True
+        except Exception:
+            _log("CineAxisCmd error:\n" + traceback.format_exc())
+        return 0                          # consumed - the sim must not also move the view
+
+    def _cine_start(self):
+        try:
+            if self.cineActive:
+                return
+            # The quick-reload hold and this both call controlCamera; they cannot both
+            # own the camera, so the hold yields.
+            self._end_camera_hold("cinematic camera")
+            pos = xp.readCameraPosition()
+            self.cinePose = [float(pos[i]) for i in range(7)]
+            self.cineActive = True
+            self.cineControlling = False
+            # _enter_free_camera runs below, so the first CineLoop tick may grab straight
+            # away rather than switching views again.
+            self.cinePendingRegrab = True
+            self.cineHeld = {}
+            for k in self.cineVel:
+                self.cineVel[k] = 0.0
+            self.cineLastTick = time.monotonic()
+            self._cine_hook_commands()
+            self._enter_free_camera()
+            # Take control on the NEXT frame, not this one: a view switch in the same
+            # frame as controlCamera releases us instantly (same race the reload hold
+            # splits across frames).
+            if self.cineLoopID is not None:
+                xp.scheduleFlightLoop(self.cineLoopID, -1, 1)
+            _log("cinematic camera ON (x%.2f) - your view keys now fly it"
+                 % self._cine_multiplier())
+        except Exception:
+            _log("cine start error:\n" + traceback.format_exc())
+            self.cineActive = False
+
+    def _cine_stop(self, reason):
+        if not (self.cineActive or self.cineHooks):
+            return
+        self.cineActive = False
+        self.cineControlling = False
+        self.cinePendingRegrab = False
+        self.cineHeld = {}
+        self._cine_unhook_commands()
+        if self.cineLoopID is not None:
+            try:
+                xp.scheduleFlightLoop(self.cineLoopID, 0, 1)
+            except Exception:
+                pass
+        try:
+            xp.dontControlCamera()
+        except Exception:
+            pass
+        _log("cinematic camera OFF (%s)" % reason)
+
+    def _cine_target_velocity(self):
+        """Sum the held commands into a per-axis target, in units/second."""
+        mul = self._cine_multiplier()
+        target = {"fwd": 0.0, "side": 0.0, "up": 0.0, "pitch": 0.0, "hdg": 0.0, "zoom": 0.0}
+        for axis, sign, scale in self.cineHeld:
+            base = (CineRotateSpeed if axis in ("pitch", "hdg")
+                    else CineZoomSpeed if axis == "zoom" else CineMoveSpeed)
+            target[axis] += sign * scale * base * mul
+        return target
+
+    def _cine_integrate(self, dt):
+        """Ease the velocities toward their targets, then advance the pose by dt.
+
+        The easing is a first-order lag with time constant CineSmoothingSeconds -
+        `alpha = 1 - exp(-dt/tau)` rather than a fixed per-frame fraction, so the ramp
+        takes the same wall-clock time at 30 fps as at 120 and a recording doesn't
+        change character with framerate.
+        """
+        target = self._cine_target_velocity()
+        tau = CineSmoothingSeconds
+        alpha = 1.0 if tau <= 0.0 else 1.0 - math.exp(-dt / tau)
+        for axis in self.cineVel:
+            self.cineVel[axis] += (target[axis] - self.cineVel[axis]) * alpha
+
+        pose = self.cinePose
+        pose[CAM_PITCH] = max(-89.9, min(89.9, pose[CAM_PITCH] + self.cineVel["pitch"] * dt))
+        pose[CAM_HEADING] = (pose[CAM_HEADING] + self.cineVel["hdg"] * dt) % 360.0
+
+        # X-Plane local coords: +x east, +y up, +z SOUTH; heading 0 = north = -z.
+        psi = math.radians(pose[CAM_HEADING])
+        theta = math.radians(pose[CAM_PITCH])
+        cosT = math.cos(theta)
+        fwd = (math.sin(psi) * cosT, math.sin(theta), -math.cos(psi) * cosT)
+        side = (math.cos(psi), 0.0, math.sin(psi))
+        for i, axis in enumerate((CAM_X, CAM_Y, CAM_Z)):
+            pose[axis] += (fwd[i] * self.cineVel["fwd"] + side[i] * self.cineVel["side"]) * dt
+        pose[CAM_Y] += self.cineVel["up"] * dt
+
+        if self.cineVel["zoom"]:
+            pose[CAM_ZOOM] = max(0.05, pose[CAM_ZOOM] + self.cineVel["zoom"] * dt)
+
+    def CineCameraFunc(self, outCameraPosition, inIsLosingControl, inRefcon):
+        try:
+            if not self.cineActive or self.cinePose is None:
+                self.cineControlling = False
+                return 0
+            if inIsLosingControl:
+                # Same treatment as the reload hold: drop the ownership flag and let
+                # CineLoop re-grab, rather than ending the mode.
+                self.cineControlling = False
+                return 0
+            now = time.monotonic()
+            dt = 0.0 if self.cineLastTick is None else now - self.cineLastTick
+            self.cineLastTick = now
+            if dt > 0.25:
+                dt = 0.25          # a stall must not fling the camera across the field
+            if dt > 0.0:
+                self._cine_integrate(dt)
+            for i in range(7):
+                outCameraPosition[i] = self.cinePose[i]
+            return 1
+        except Exception:
+            _log("CineCameraFunc error:\n" + traceback.format_exc())
+            self._cine_stop("error")
+            return 0
+
+    def CineLoop(self, sinceLast, sinceLoop, counter, refCon):
+        # Grabs the camera one frame after the view switch, then acts as the watchdog
+        # that re-grabs if the sim or ToLiss takes ownership back.
+        try:
+            if not self.cineActive:
+                return 0
+            if self.cineControlling:
+                return CameraRegrabInterval       # holding cleanly; just keep polling
+            if not self.cinePendingRegrab:
+                # Lost ownership. Re-enter the free external view FIRST and grab on the
+                # next frame - a view switch and controlCamera in the same frame release
+                # instantly (the same race _begin_camera_hold splits across frames).
+                self._enter_free_camera()
+                self.cinePendingRegrab = True
+                return -1
+            xp.controlCamera(CamForever, self.CineCameraFunc, 0)
+            self.cineControlling = True
+            self.cinePendingRegrab = False
+            self.cineLastTick = time.monotonic()   # don't integrate the grab gap
+            return CameraRegrabInterval
+        except Exception:
+            _log("CineLoop error:\n" + traceback.format_exc())
+            return 0
+
+    # ---------------------------------------------------------------- cinematic window
+    def _cine_window_rows(self):
+        mul = self._cine_multiplier()
+        return [
+            ("Cinematic camera", "ON" if self.cineActive else "off"),
+            ("Speed multiplier", "x%g" % mul),
+            ("Move", "%.3f m/s" % (CineMoveSpeed * mul)),
+            ("Rotate", "%.2f deg/s" % (CineRotateSpeed * mul)),
+            ("Ease in/out", "%.2f s" % CineSmoothingSeconds),
+        ]
+
+    def CineDraw(self, windowID, refCon):
+        try:
+            l, t, r, b = xp.getWindowGeometry(windowID)
+            mx, my = xp.getMouseLocationGlobal()
+            fh = _font_height()
+            lineH, btnH = fh + 8, fh + 10
+            self.cineHits = []
+
+            y = t - UI_TOP_INSET
+            for label, value in self._cine_window_rows():
+                _draw_text(COL_DIM, l + UI_PAD, y, label)
+                _draw_text(COL_ACTIVE if label == "Cinematic camera" and self.cineActive
+                           else COL_BRIGHT,
+                           l + UI_PAD + 130, y, value)
+                y -= lineH
+
+            y -= UI_GAP
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.cineHits, [
+                ("Slower", lambda: self._cine_step_multiplier(-1)),
+                ("Faster", lambda: self._cine_step_multiplier(+1)),
+                ("Stop" if self.cineActive else "Start",
+                 lambda: self._cine_stop("window") if self.cineActive else self._cine_start()),
+            ])
+            y -= btnH + UI_GAP + 4
+            _draw_text(COL_DIM, l + UI_PAD, y,
+                       "Your view keys/hat fly the camera while ON.")
+        except Exception:
+            _log("CineDraw error:\n" + traceback.format_exc())
+
+    def ShowCineWindow(self):
+        if self.cineWin is not None:
+            xp.setWindowIsVisible(self.cineWin, 1)
+            xp.bringWindowToFront(self.cineWin)
+            return
+        # Mirrors CineDraw's vertical walk exactly, so nothing lands outside the frame.
+        fh = _font_height()
+        lineH, btnH = fh + 8, fh + 10
+        height = (UI_TOP_INSET + len(self._cine_window_rows()) * lineH
+                  + UI_GAP + btnH + UI_GAP + 4 + fh + UI_PAD * 2)
+        self.cineWin = self._create_window("Photon Dev - Cinematic Camera", 340, height,
+                                           self.CineDraw, self.CineClick)
+
+    def CineClick(self, windowID, x, y, inMouse, refCon):
+        return self._ui_click(self.cineHits, x, y, inMouse)
+
+    # ============================ cockpit light tuner ===============================
+    # Find a light's position/aim/cone/size in-sim, then paste the answer into the DSL.
+    #
+    # An OBJ light's geometry is read ONCE, at aircraft load - there is no dataref that
+    # moves it afterwards - so every change here means rewriting lights_inn.obj and
+    # reloading. That is why edits are staged in memory and applied in one batch: nudge
+    # eight numbers, then pay for a single reload. The quick reload puts the camera back
+    # where it was, so consecutive iterations frame the identical shot.
+    #
+    # ⚠ THE OBJ IS BUILD OUTPUT. "Log DSL" is the point of the tool; the file it writes
+    # is scratch that the next `build_objs.py build --write` will overwrite. All tuning
+    # belongs in src/lights/lights.layout.phdsl.
+
+    # Slot layout AFTER each command's own prefix. LIGHT_PARAM's prefix is the light
+    # class name; LIGHT_SPILL_CUSTOM has none and carries a trailing dataref token
+    # instead. The twelve numbers line up either way, which is what lets one editor
+    # drive both - only slot 6 differs in meaning (rheostat index vs. baked alpha) and
+    # nothing here touches it.
+    TUNER_SLOTS = (
+        ("X",     0,  "pos"),
+        ("Y",     1,  "pos"),
+        ("Z",     2,  "pos"),
+        ("Dir X", 8,  "dir"),
+        ("Dir Y", 9,  "dir"),
+        ("Dir Z", 10, "dir"),
+        ("Size",  7,  "size"),
+        ("Cone",  11, "cone"),
+    )
+    TUNER_NUM_COUNT = 12
+
+    @staticmethod
+    def _fmt_num(v):
+        """3 dp with trailing zeros stripped - the same shape build_objs.fmt emits, so a
+        tuner-written line is textually indistinguishable from a generated one."""
+        s = "%.3f" % v
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return "0" if s in ("", "-0") else s
+
+    def _aircraft_dir_raw(self):
+        """The aircraft folder with its real casing (unlike _current_aircraft_dir, whose
+        normcase output is for COMPARING paths, not opening files)."""
+        try:
+            fileName, path = xp.getNthAircraftModel(0)
+            if path:
+                return os.path.dirname(os.path.abspath(path))
+        except Exception:
+            _log("could not resolve aircraft folder:\n" + traceback.format_exc())
+        return None
+
+    def _tuner_load(self):
+        """(Re)parse the installed lights_inn.obj into an editable light list."""
+        self.tunerOrder, self.tunerLights, self.tunerVals = [], {}, {}
+        self.tunerLines, self.tunerPath = [], None
+        acf = self._aircraft_dir_raw()
+        if not acf:
+            self.tunerNote = "no aircraft loaded"
+            return
+        path = os.path.join(acf, TunerObjRelPath)
+        if not os.path.isfile(path):
+            self.tunerNote = "not found: %s" % TunerObjRelPath
+            _log("tuner: %s does not exist (interior mod not installed?)" % path)
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                self.tunerLines = f.read().split("\n")
+        except Exception:
+            self.tunerNote = "read failed"
+            _log("tuner read failed:\n" + traceback.format_exc())
+            return
+
+        fixture, ordinal = "?", 0
+        for idx, raw in enumerate(self.tunerLines):
+            s = raw.strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                # The generator labels each gated block "# <Fixture> -> <Branch>", and
+                # that comment - NOT ANIM_begin - is what starts a new light block.
+                # Mounted fixtures (the map lamps) nest several ANIM_begin levels for
+                # their ckpt/lights/<n> transform stack, so resetting on ANIM_begin
+                # would restart the ordinal partway through a fixture.
+                if "->" in s:
+                    fixture = s.lstrip("#").split("->")[0].strip()
+                    ordinal = 0
+                continue
+            toks = s.split()
+            cmd = toks[0]
+            if cmd == "LIGHT_PARAM":
+                prefix, numStart = toks[1:2], 2
+            elif cmd == "LIGHT_SPILL_CUSTOM":
+                prefix, numStart = [], 1
+            else:
+                continue
+            nums = toks[numStart:numStart + self.TUNER_NUM_COUNT]
+            if len(nums) < self.TUNER_NUM_COUNT:
+                continue
+            try:
+                nums = [float(n) for n in nums]
+            except ValueError:
+                continue
+            tail = toks[numStart + self.TUNER_NUM_COUNT:]
+            key = (fixture, ordinal)
+            ordinal += 1
+            entry = self.tunerLights.get(key)
+            if entry is None:
+                entry = {"cls": prefix[0] if prefix else "SPILL_CUSTOM", "refs": []}
+                self.tunerLights[key] = entry
+                self.tunerOrder.append(key)
+                # The working copy comes from the FIRST branch. All branches share
+                # geometry and differ only in colour, so any one of them is right.
+                self.tunerVals[key] = list(nums)
+            # Keep each line's own leading whitespace: mounted fixtures sit several
+            # ANIM_trans levels deep, so a fixed indent would silently reflow them.
+            indent = raw[:len(raw) - len(raw.lstrip())]
+            entry["refs"].append((idx, indent, cmd, prefix, list(nums), tail))
+
+        self.tunerPath = path
+        self.tunerSel = min(self.tunerSel, max(0, len(self.tunerOrder) - 1))
+        self.tunerNote = "%d lights, %d branches" % (
+            len(self.tunerOrder),
+            len(self.tunerLights[self.tunerOrder[0]]["refs"]) if self.tunerOrder else 0)
+        _log("tuner loaded %s (%s)" % (path, self.tunerNote))
+
+    def _tuner_key(self):
+        if not self.tunerOrder:
+            return None
+        return self.tunerOrder[max(0, min(self.tunerSel, len(self.tunerOrder) - 1))]
+
+    def _tuner_select(self, delta):
+        if self.tunerOrder:
+            self.tunerSel = (self.tunerSel + delta) % len(self.tunerOrder)
+
+    def _tuner_nudge(self, slot, kind, sign):
+        key = self._tuner_key()
+        if key is None:
+            return
+        step = (TunerCoarseStep if self.tunerCoarse else TunerFineStep)[kind]
+        self.tunerVals[key][slot] += sign * step
+        self.tunerNote = "edited (not applied)"
+
+    def _tuner_revert(self):
+        key = self._tuner_key()
+        if key is None:
+            return
+        self.tunerVals[key] = list(self.tunerLights[key]["refs"][0][4])
+        self.tunerNote = "reverted %s" % (key[0],)
+
+    def _tuner_render(self, indent, cmd, prefix, nums, tail):
+        parts = prefix + [self._fmt_num(n) for n in nums] + tail
+        return indent + cmd + "\t" + " ".join(parts)
+
+    def _tuner_apply(self, reload_after=True):
+        """Write every staged edit into the OBJ, then reload so X-Plane re-reads it."""
+        if not self.tunerPath or not self.tunerOrder:
+            self.tunerNote = "nothing loaded"
+            return
+        edited = 0
+        lines = list(self.tunerLines)
+        for key in self.tunerOrder:
+            vals = self.tunerVals[key]
+            base = self.tunerLights[key]["refs"][0][4]
+            if all(abs(vals[i] - base[i]) < 1e-9 for _, i, _ in self.TUNER_SLOTS):
+                continue
+            for idx, indent, cmd, prefix, nums, tail in self.tunerLights[key]["refs"]:
+                out = list(nums)
+                # Only the geometric slots are copied across; r/g/b and slot 6 stay as
+                # each branch had them, so applying an edit never flattens the three
+                # colour variants into one.
+                for _, slot, _ in self.TUNER_SLOTS:
+                    out[slot] = vals[slot]
+                lines[idx] = self._tuner_render(indent, cmd, prefix, out, tail)
+                edited += 1
+        if not edited:
+            self.tunerNote = "no changes to apply"
+            return
+        try:
+            # temp + os.replace: the same atomic-write discipline build_objs uses, so a
+            # reload can never race a half-written OBJ (that combination crashed the sim
+            # once already - see docs/dev-tools.md).
+            tmp = self.tunerPath + ".photon-tuner.tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write("\n".join(lines))
+            os.replace(tmp, self.tunerPath)
+        except Exception:
+            self.tunerNote = "WRITE FAILED - see log"
+            _log("tuner write failed:\n" + traceback.format_exc())
+            return
+        _log("tuner wrote %d light lines to %s" % (edited, self.tunerPath))
+        self.tunerNote = "applied %d lines" % edited
+        self._tuner_log_dsl()
+        if reload_after:
+            self.Trigger()
+
+    def _tuner_log_dsl(self):
+        """Print the selected light as a DSL fragment, ready to paste into
+        src/lights/lights.layout.phdsl - the actual deliverable of a tuning session."""
+        key = self._tuner_key()
+        if key is None:
+            return
+        v = self.tunerVals[key]
+        fmt = self._fmt_num
+        _log("---- DSL for %s (light %d) ----" % (key[0], key[1] + 1))
+        _log("  pos: %s %s %s;  dir: %s %s %s;" %
+             (fmt(v[0]), fmt(v[1]), fmt(v[2]), fmt(v[8]), fmt(v[9]), fmt(v[10])))
+        _log("  size: %s;  cone: %s;   (light type %s)" %
+             (fmt(v[7]), fmt(v[11]), self.tunerLights[key]["cls"]))
+        _log("-------------------------------")
+
+    def TunerDraw(self, windowID, refCon):
+        try:
+            l, t, r, b = xp.getWindowGeometry(windowID)
+            mx, my = xp.getMouseLocationGlobal()
+            fh = _font_height()
+            lineH, btnH = fh + 8, fh + 10
+            self.tunerHits = []
+            key = self._tuner_key()
+
+            y = t - UI_TOP_INSET
+            title = "%s  (light %d of %d)" % (key[0], self.tunerSel + 1, len(self.tunerOrder)) \
+                    if key else "no lights loaded"
+            _draw_text(COL_BRIGHT, l + UI_PAD, y, title)
+            y -= lineH
+            _draw_text(COL_DIM, l + UI_PAD, y, self.tunerNote)
+            y -= lineH + UI_GAP
+
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.tunerHits, [
+                ("< Prev", lambda: self._tuner_select(-1)),
+                ("Next >", lambda: self._tuner_select(+1)),
+                ("Fine", lambda: setattr(self, "tunerCoarse", False), not self.tunerCoarse),
+                ("Coarse", lambda: setattr(self, "tunerCoarse", True), self.tunerCoarse),
+            ])
+            y -= btnH + UI_GAP * 2
+
+            if key is not None:
+                vals = self.tunerVals[key]
+                base = self.tunerLights[key]["refs"][0][4]
+                for label, slot, kind in self.TUNER_SLOTS:
+                    _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, label)
+                    changed = abs(vals[slot] - base[slot]) > 1e-9
+                    _draw_text(COL_ACTIVE if changed else COL_BRIGHT,
+                               l + UI_PAD + 52, y - btnH + 4, self._fmt_num(vals[slot]))
+                    self._ui_button_row(
+                        l + UI_PAD + 120, y - btnH, y, mx, my, self.tunerHits,
+                        [("-", (lambda s=slot, k=kind: self._tuner_nudge(s, k, -1))),
+                         ("+", (lambda s=slot, k=kind: self._tuner_nudge(s, k, +1)))],
+                        minWidth=34)
+                    y -= btnH + 4
+                y -= UI_GAP
+
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.tunerHits, [
+                ("Apply & Reload", self._tuner_apply),
+                ("Revert", self._tuner_revert),
+                ("Log DSL", self._tuner_log_dsl),
+                ("Rescan", self._tuner_load),
+            ])
+        except Exception:
+            _log("TunerDraw error:\n" + traceback.format_exc())
+
+    def TunerClick(self, windowID, x, y, inMouse, refCon):
+        return self._ui_click(self.tunerHits, x, y, inMouse)
+
+    def ShowTunerWindow(self):
+        if not self.tunerOrder:
+            self._tuner_load()
+        if self.tunerWin is not None:
+            xp.setWindowIsVisible(self.tunerWin, 1)
+            xp.bringWindowToFront(self.tunerWin)
+            return
+        fh = _font_height()
+        height = (UI_TOP_INSET + 2 * (fh + 8) + UI_GAP
+                  + (fh + 10) + UI_GAP * 3
+                  + len(self.TUNER_SLOTS) * (fh + 14)
+                  + (fh + 10) + UI_PAD * 3)
+        self.tunerWin = self._create_window("Photon Dev - Cockpit Light Tuner",
+                                            400, height, self.TunerDraw, self.TunerClick)
+
     # ---------------------------------------------------------------- menu
     def CreateMenu(self):
         try:
             self.pluginsMenuItem = xp.appendMenuItem(xp.findPluginsMenu(), "Photon Dev", 0)
             self.menuID = xp.createMenu("Photon Dev", xp.findPluginsMenu(),
                                         self.pluginsMenuItem, self.MenuHandler, 0)
+            # FLAT menu, no submenus: XPPython3 4.7a1 crashes in native menu
+            # click-dispatch at level 2+ (see docs/dev-tools.md). The native .xpl is
+            # free to nest; this plugin is not.
             xp.appendMenuItem(self.menuID, "Quick Reload (snapshot -> reload -> restore)", "reload")
+            xp.appendMenuItem(self.menuID, "Plain Reload (reload only)", "plain")
             xp.appendMenuItem(self.menuID, "Release Camera", "release")
+            if hasattr(xp, "appendMenuSeparator"):
+                xp.appendMenuSeparator(self.menuID)
+            xp.appendMenuItem(self.menuID, "Cinematic Camera...", "cine")
+            xp.appendMenuItem(self.menuID, "Cockpit Light Tuner...", "tuner")
             if hasattr(xp, "appendMenuSeparator"):
                 xp.appendMenuSeparator(self.menuID)
             xp.appendMenuItem(self.menuID, "Log Plugin List", "plugins")
@@ -848,8 +1731,14 @@ class PythonInterface:
         try:
             if itemRefCon == "reload":
                 self.Trigger()
+            elif itemRefCon == "plain":
+                self.PlainReload()
             elif itemRefCon == "release":
                 self._release_camera_to_free()
+            elif itemRefCon == "cine":
+                self.ShowCineWindow()
+            elif itemRefCon == "tuner":
+                self.ShowTunerWindow()
             elif itemRefCon == "plugins":
                 self._log_plugin_list()
         except Exception:
