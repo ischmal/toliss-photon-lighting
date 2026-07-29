@@ -7,7 +7,7 @@ and the notes in this box as what actually happened.
 
 **What was built** — `reference/gus/` vendored (3 OBJs + the 11-file canonical texture
 set, ~57 MB); the N-way emitter with the exterior provably byte-identical; the interior
-DSL (axis, palettes, 6 light types, 7 fixtures, 4 map-lamp mounts); multi-OBJ plumbing
+DSL (axis, palettes, 6 light types, 7 fixtures, 4 panel-flood mounts); multi-OBJ plumbing
 through `build_objs` / `make_release` / `payload`; `build/patch_acf.py`; the plugin's
 4 interior datarefs, ternary values, own profile enum, nested Exterior/Interior submenus,
 13-row × 2-or-3-column Custom window, additive prefs, and the map-spill array; the
@@ -47,7 +47,7 @@ forums, and that is the name and link used everywhere credit appears.
 ---
 
 **Verdict: feasible.** Interior light data has the same shape as the exterior data
-Photon already generates — one geometry, three colour variants — so the DSL +
+Photon already generates — one geometry, three color variants — so the DSL +
 `ANIM_show` + per-category-dataref machinery transfers almost unchanged. The two things
 that looked like blockers (the Plane Maker `.acf` step, and 2-way→3-way switching) are
 solved in §3.4 and §3.1. What remains is plumbing and in-sim tuning.
@@ -68,7 +68,7 @@ give you.
 | 5 | Texture recompression: **tabled**, not a blocker. |
 | 6 | Gus gets **heavy credit** in docs and user-facing surfaces (§7). |
 | 7 | Textures ship **bundled** in the four per-platform bundles. The All-Platforms zip is a maintainer convenience, not distributed, so its size is irrelevant. |
-| 8 | `.acf`: patch the variant-independent geometry at install, move **colour** into the OBJ where it becomes runtime-switchable (§3.4). An `.acf` requirement is a problem to solve, not a hard block. |
+| 8 | `.acf`: patch the variant-independent geometry at install, move **color** into the OBJ where it becomes runtime-switchable (§3.4). An `.acf` requirement is a problem to solve, not a hard block. |
 | 9 | Category granularity: the **four rheostat-derived categories** of §2.2. |
 | 10 | Interior selection persists **per livery**, same as exterior. |
 | 11 | Patch **all four `.acf`** per airframe (XP12 HD + StdDef, XP11 HD + StdDef). |
@@ -87,6 +87,39 @@ Two corrections to earlier assumptions, both from the project owner:
   stating: once brightness is the only dynamic parameter, `airplane_panel_sp` provides
   it natively, so custom lights are used in exactly two places (§3.3), not everywhere.
 
+### 0.1 Integration principle — fidelity is a check, not a goal
+
+**Gus's data was the starting point, not the specification.** Photon's job is a smooth,
+logical integration into a switchable lighting system, and where his original mod's
+choices work against that, **Photon's structure wins**. This is a deliberate reversal of
+how revisions 1–3 of this document read, and it settles a question that has now cost
+real time twice.
+
+Concretely:
+
+- **His naming carries no authority.** Names in the DSL, the docs and the mounts are
+  chosen to describe what a light *is* — its rheostat, its role, its position. They are
+  not required to match his comments, and "that is what he called it" is never a reason
+  to keep a misleading name. His three files are lightly commented and sometimes not at
+  all (the four panel flood groups are labelled only `# Lamp`), so there is often no
+  original name to preserve in the first place. See the §1.2 box for the case that
+  motivated this.
+- **His structure carries no authority either.** Light *grouping*, fixture layout,
+  transform rigging and how many OBJ lines implement one fixture are Photon's to choose.
+  Where his file uses a workaround that a modern X-Plane no longer needs, replacing it is
+  an improvement, not a deviation to be justified.
+- **His measured values are still the trusted baseline** — positions, colors, cones and
+  intensities are the product of real in-sim tuning and should not be churned without a
+  reason. This is where fidelity genuinely earns its keep.
+- **`GusFidelityTests` records where we diverge; it does not forbid diverging.** Its
+  purpose is that a change is *deliberate and visible* in the diff, not that his values
+  are frozen. Updating it alongside an intentional change is correct and expected.
+
+**Credit is unaffected and non-negotiable.** The interior lighting is Gus's work,
+vendored with permission, and he keeps heavy credit in the docs, the installer and every
+user-facing surface (decision #6, §7). Crediting him and re-organising his data are
+independent; nothing in this section reduces the former.
+
 ---
 
 ## 1. Source data
@@ -104,15 +137,15 @@ change.
 | The three variants are **byte-identical except RGB triplets** (99 lines, 4070 bytes) | One geometry, three palettes — the exterior pattern exactly |
 | A320 and A321 variants are **byte-identical**; A319's `new`/`led` match too | One shared config, no per-airframe placement work |
 | Stock `lights_inn.obj` is **identical across A319/A320/A321** (md5 `c56be6a5fe6c90544617f7ebfb90146b`, 77 lines, 13 lights) | Confirms a single shared source file |
-| Gus's file has **23 lights vs stock's 13** | Adds CA/FO table + tablet lights and extra lamps per map group — not just a recolour |
-| Intensities are retuned (pedestal flood `5.0`→`2.0`, console `1.3`→`0.4`, map lamps `1.2`→`0.471`) | Variant-**independent** → base values in the DSL, not in profile branches |
+| Gus's file has **23 lights vs stock's 13** | Adds CA/FO table + tablet lights and extra lamps per map group — not just a recolor |
+| Intensities are retuned (pedestal flood `5.0`→`2.0`, console `1.3`→`0.4`, panel floods `1.2`→`0.471`) | Variant-**independent** → base values in the DSL, not in profile branches |
 
 ### 1.2 The canonical light table (authoritative — transcribe from here)
 
 From `.scratch/gus-lighting/A320/a20n-light_mod (2)/objects/lights_inn_{current,new,led}.obj`.
 Line format is `LIGHT_PARAM <class> <px> <py> <pz> <R> <G> <B> <INDEX> <SIZE> <dx> <dy> <dz> <W>`.
 
-Four colours appear across the whole mod:
+Four colors appear across the whole mod:
 
 | Key | RGB | Name |
 |---|---|---|
@@ -136,33 +169,83 @@ Four colours appear across the whole mod:
 | 10 | Console R | `airplane_inst_sp` | `1.1471 0.0333 -4.2` | 23 | 0.4 | `0.0 -0.3 0.0` | 0.4 | **P2** |
 | 11 | Console R | `airplane_inst_sp` | `1.3463 0.0032 -3.65` | 23 | 0.4 | `0.0 -0.3 0.0` | 0.4 | **P2** |
 | 12 | Console R | `airplane_inst_sp` | `1.4369 -0.0101 -3.3` | 23 | 0.4 | `0.0 -0.3 0.0` | 0.4 | **P2** |
-| 13 | map lamp 1 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -0.15 -0.1` | 0.819152 | **P3** |
-| 14 | map lamp 1 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -0.21 -0.15` | 0.906307 | **P3** |
-| 15 | map lamp 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.906307 | **P3** |
-| 16 | map lamp 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.866025 | **P3** |
-| 17 | map lamp 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.642787 | **P3** |
-| 18 | map lamp 3 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.906307 | **P3** |
-| 19 | map lamp 3 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -1.50 0.40` | 0.866025 | **P3** |
-| 20 | map lamp 3 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -1.50 0.40` | 0.642787 | **P3** |
-| 21 | map lamp 4 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -0.15 -0.1` | 0.819152 | **P3** |
-| 22 | map lamp 4 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -0.21 -0.15` | 0.9063077 | **P3** |
+| 13 | panel flood 1 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -0.15 -0.1` | 0.819152 | **P3** |
+| 14 | panel flood 1 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -0.21 -0.15` | 0.906307 | **P3** |
+| 15 | panel flood 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.906307 | **P3** |
+| 16 | panel flood 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.866025 | **P3** |
+| 17 | panel flood 2 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.642787 | **P3** |
+| 18 | panel flood 3 | `airplane_panel_sp` | `0 0 0` | 1 | 0.471 | `0 -1.50 0.40` | 0.906307 | **P3** |
+| 19 | panel flood 3 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -1.50 0.40` | 0.866025 | **P3** |
+| 20 | panel flood 3 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -1.50 0.40` | 0.642787 | **P3** |
+| 21 | panel flood 4 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -0.15 -0.1` | 0.819152 | **P3** |
+| 22 | panel flood 4 | `airplane_panel_sp` | `0 0 0` | 2 | 0.471 | `0 -0.21 -0.15` | 0.9063077 | **P3** |
 
 Lights 13–22 sit inside four nested `ANIM_trans` groups keyed on
-`ckpt/lights/{1,2,3,4}/{x,y,z}/dir` — ToLiss's movable map lamps. Transcribe those
+`ckpt/lights/{1,2,3,4}/{x,y,z}/dir`. They are on `panel[1]`/`[2]`, the FLOOD LT MAIN PNL
+rheostat, and belong to category `mainpnl` (§2.2b).
+
+> **"Map lamp" was never Gus's name.** This table, the DSL and the mounts all called them
+> that until 2026-07-28, on the stated grounds that it kept the transcription diffing 1:1
+> against his file. That was simply false: **his three files never use the word "map"
+> anywhere**, and his only label on these four blocks is `# Lamp`. The name was this
+> project's own invention, it contradicted the category, the dataref and the menu label,
+> and it caused the same misidentification twice (§1.3c, §2.2b). Renamed throughout to
+> `int_panelflood` / `panelflood{n}`. **Identify a light by its rheostat and position,
+> never by its name.**
+
+Transcribe those
 `ANIM_trans` stacks verbatim from the source file into a **mount snippet**
-(`src/lights/mounts/a3xx/maplamp{1,2,3,4}.stock.obj`), the same treatment
+(`src/lights/mounts/a320/panelflood{1,2,3,4}.stock.obj`), the same treatment
 `beacon_fus` / `gear_left` already get. Note the `SIZE` on 21/22 differs in the last
 digit from 13/14 (`0.9063077` vs `0.906307`) — Gus's own inconsistency; keep it or
 normalise, it is visually irrelevant, but *decide* rather than drift.
 
-**The colour ramps.** Gus's own data has three, after decision #1's normalisation of
+#### 1.2b The panel floods against **stock ToLiss** (2026-07-28)
+
+The installer's backup of the untouched aircraft file is the authority for what is
+Gus's and what is ToLiss's, and it answers several standing questions at once. Read it
+at `<X-Plane>/Aircraft/ToLiss<type>/objects/Photon Backup Files/lights_inn.obj`.
+
+| Lamp | Stock lines | Stock `INDEX` | Stock `dir` | Stock `cone` | Stock `SIZE` | Gus lines | Gus `INDEX` |
+|---|---|---|---|---|---|---|---|
+| 1 | 1 | `1` | `0 -0.21 -0.1` | 0.819152 | 1.2 | 2 | `1,1` |
+| 2 | 1 | `1` | `0 -1 0` | 0.819152 | 1.2 | 3 | `1,1,1` |
+| 3 | 1 | **`2`** | `0 -1 0` | 0.819152 | 1.2 | 3 | **`1,2,2`** |
+| 4 | 1 | `2` | `0 -0.21 -0.1` | 0.819152 | 1.2 | 2 | `2,2` |
+
+Four conclusions, all load-bearing:
+
+1. **Stock is one light per lamp — four lights, not ten.** The multi-line stacks are
+   entirely Gus's addition.
+2. **The rheostat split is 2+2**: lamps 1,2 on `panel[1]`, lamps 3,4 on `panel[2]`.
+   Clean, with no lamp straddling. Hence decision #5 (§1.3e).
+3. **The graduated cones are Gus's, and they are deliberate.** Stock uses a single cone
+   (`0.819152`) on every lamp. He cut `SIZE` from `1.2` to `0.471` — a 61% reduction —
+   and rebuilt the light pool by layering 2–3 coincident cones per lamp. That is forced
+   by the light type: `LIGHT_PARAM airplane_panel_sp` has **no intensity slot**, only
+   `INDEX` (which knob) and `SIZE`, so stacking copies is the only way to vary
+   brightness across a beam. Three cones at 25°/30°/50° give 3× intensity in the core,
+   2× in the middle ring, 1× at the rim. **Do not read the stacks as sloppiness** — and
+   note that collapsing them to one `LIGHT_SPILL_CUSTOM` each is therefore *not*
+   mechanical: the stack **is** the brightness curve, and a spill's `alpha` would have
+   to be re-derived in-sim rather than computed from his numbers.
+4. **Non-normalised direction vectors are ToLiss's practice, not Gus's.** Stock's
+   `0 -0.21 -0.1` has length 0.233. This weakens the standing suspicion (§9, open
+   question 4) that non-normalisation is what makes `cone` edits look inert.
+
+Stock also confirms that **all four lamps share one rest position and one 10 cm travel
+range** — so the coincidence flagged in §2.2b is ToLiss's design, not something Gus
+introduced, and the four are independently positionable by
+`ckpt/lights/<n>/{x,y,z}/dir`.
+
+**The color ramps.** Gus's own data has three, after decision #1's normalisation of
 #4 and #9's LED value from **A** to **D**:
 
 | Ramp | old / new / led | Lights | Count |
 |---|---|---|---|
 | **P1** | A / B / **C** | dome L, dome R, pedestal flood | 3 |
 | **P2** | D / D / D *(constant)* | CA+FO table, 6 console | 8 |
-| **P3** | A / B / **D** | CA+FO tablet, 10 map lamps | 12 |
+| **P3** | A / B / **D** | CA+FO tablet, 10 panel flood lines | 12 |
 
 3 + 8 + 12 = 23 ✓. The LED variant is therefore 3 × cool + 20 × warm.
 
@@ -173,23 +256,23 @@ Photon reshuffles that into four. Decision #2 (§1.3b) takes the two dome lights
 |---|---|---|---|
 | **P1** | A / B / **C** | pedestal flood, CA+FO table | 3 |
 | **P2** | D / D / D *(constant)* | 6 console | 6 |
-| **P3** | A / B / **D** | CA+FO tablet, 10 map lamps | 12 |
+| **P3** | A / B / **D** | CA+FO tablet, 10 panel flood lines | 12 |
 | **P4** | **E** / **E** / **C** | dome L, dome R | 2 |
 
-3 + 6 + 12 + 2 = 23 ✓, with a fifth colour **E** = `0.95 0.95 0.88`, fluorescent white.
-P1 is now exactly "the pedestal rheostat's era-coloured lights" and P2 is the console
+3 + 6 + 12 + 2 = 23 ✓, with a fifth color **E** = `0.95 0.95 0.88`, fluorescent white.
+P1 is now exactly "the pedestal rheostat's era-colored lights" and P2 is the console
 strips alone.
 
 ### 1.3 Decision #1 in detail
 
 In Gus's `led` file, lights #4 and #9 (the CA/FO tablet lights) carry **A**
 (`1.00 0.37 0.16`) — old-halogen orange in the LED variant, while every comparable
-small directed lamp (the map lamps) goes **D**. Treated as an oversight: normalise both
+small directed lamp (the panel floods) goes **D**. Treated as an oversight: normalise both
 to **D**, which collapses them into ramp P3.
 
 ### 1.3b Decision #2 — the dome lights leave the era ramp
 
-Reported in-sim **2026-07-28**: the dome/storm light *changes colour temperature*
+Reported in-sim **2026-07-28**: the dome/storm light *changes color temperature*
 between the two halogen profiles, which reads wrong. It does — Gus puts it on **P1**,
 so it swings **A** old-halogen orange → **B** amber → **C** LED blue-white, exactly like
 the pedestal flood.
@@ -197,7 +280,7 @@ the pedestal flood.
 That is faithful to his files but not to the aeroplane. The A320's dome light is the
 general cockpit floodlight — a **white fluorescent fitting**, physically unrelated to
 the incandescent integral lighting behind the panel legends. It has no halogen era to
-follow. Integral/flood lighting genuinely is era-coloured; the dome is not.
+follow. Integral/flood lighting genuinely is era-colored; the dome is not.
 
 So the dome takes **P4**: one fluorescent white **E** `0.95 0.95 0.88` across *both*
 halogen profiles, and Gus's **C** under LED (unchanged — the LED variant needed no
@@ -207,17 +290,17 @@ Scope is deliberately narrow:
 
 - **The two dome lamps and `int_spot1` only.** `int_spot1` is the re-added `.acf` dome
   spot: same physical fitting, so it must share the ramp or one overhead fixture draws
-  two colours at once. Pinned by `test_dome_spot_tracks_the_dome_lamps_in_every_branch`.
+  two colors at once. Pinned by `test_dome_spot_tracks_the_dome_lamps_in_every_branch`.
 - **The pedestal flood stays on P1.** It is integral lighting and *should* swing with
   the era. Restoring the white-dome-over-warm-panels contrast is the entire point of
   the change, so flattening it too would undo it. Pinned by
-  `test_pedestal_flood_stays_era_coloured`.
+  `test_pedestal_flood_stays_era_colored`.
 - **The constant-warm P2 lights are untouched** — Gus's CA/FO table and console lamps
   keep **D** in all three profiles.
 
 **E** is an aesthetic seed, not a derived value. Retune it at the `fluoro` entry in the
 three `int_*` palettes in `lights.style.phdsl`; the dev tuner moves geometry only, never
-colour.
+color.
 
 ### 1.3c Decision #3 — the table lamps join the pedestal flood
 
@@ -232,15 +315,16 @@ brighten and dim together while disagreeing about the era. Under old halogen the
 goes deep orange and the seat wash stays near-white, which reads as a mismatch rather
 than as a design.
 
-Moved to **P1**, so they carry the flood's colour in all three profiles. The 6 console
-strips keep **P2** — they are on their own `inst[22]/[23]` bank, so nothing about them
-contradicts anything.
+Moved to **P1**, so they carry the flood's color in all three profiles. That left the 6
+console strips as ramp P2's only remaining member — which turned out to be a problem of
+its own, see §1.3d.
 
-**Geometry is untouched.** Decision #3 changes colour only; both lamps keep Gus's
+**Geometry is untouched.** Decision #3 changes color only; both lamps keep Gus's
 `cone: 0.701` (45.5°) and stay a mirror pair. A 2026-07-28 request to narrow "the
 captain's flood" was applied to `int_table#ca` first and was **aimed at the wrong
 light** — the reporter meant the MAIN PNL flood, not the footwell wash — and has been
-reverted. `test_table_lamps_are_a_symmetric_pair` holds the line.
+reverted. `test_table_lamps_are_a_symmetric_pair` holds the line. The light actually
+meant is one of the ten `mainpnl` lamp lines (§2.2b), still untuned.
 
 Worth recording for whichever light does eventually get tuned: `cone` is
 **cos(half-spread)**, so it runs backwards. A *bigger* number is a *narrower* beam,
@@ -252,13 +336,68 @@ which makes "reduce the cone" an edit that *raises* the value.
 | `0.772` | 39.5° | | `0.906` | 25° |
 | `0.809` | 36° | | `0.940` | 20° |
 
+### 1.3d Decision #4 — the console strips join the era ramp
+
+Reported in-sim **2026-07-28**: *"the Console Lights option doesn't seem to do anything
+visibly in the simulator — the actual console lights don't appear to be connected with
+our mod at all."*
+
+They were connected. The gating was correct, every branch present, the dataref switching
+exactly as designed — and all three branches emitted **byte-identical** `LIGHT_PARAM`
+lines, because ramp **P2** is the constant warm white `1.00 0.89 0.81` in all three of
+Gus's files. A switch between three identical looks is indistinguishable, in the
+cockpit, from the mod not being installed at all.
+
+Moved to **P3** (`color: white; @int_led { color: warm; }`), the ramp Gus already uses
+for every other small directed lamp: era-colored across the two halogen looks, warm
+white — not cool — under LED. Two reasons for P3 over P1:
+
+- The console strips are **integral console lighting**, so they follow the panel era.
+- Taking them to the LED cool blue-white instead would leave the only warm surface in an
+  LED cockpit at the pilots' elbows, which is backwards — Gus's own instinct is that the
+  *small* lamps stay warm under LED, and these are the smallest fittings in the cockpit
+  (`size: 0.4`).
+
+This is the **second** dead menu row of the day; the dome was the first (§2.2c). Both had
+perfect gating and identical content, and both were reported as "the menu does nothing".
+`test_every_category_row_actually_changes_something` now asserts that each category
+renders exactly as many distinct looks as it has values — no dead branches, no
+unreachable ones.
+
+### 1.3e Decision #5 — panel flood 3 moves wholly onto its own rheostat (2026-07-28)
+
+The first deviation that is **not** a color change, and the first that fixes an outright
+bug in the source rather than making a judgement call.
+
+Gus's panel flood 3 carries `INDEX 1` on the first of its three lines and `INDEX 2` on
+the other two, so a third of that lamp dims on the wrong knob. Three things say this is a
+slip, not intent:
+
+- **Stock ToLiss has that lamp wholly on `panel[2]`** (§1.2b) — there is no second
+  rheostat to straddle.
+- **His flood 2 and flood 3 are otherwise byte-identical** — same direction
+  `0 -1.5 0.4`, same three cones `0.906 / 0.866 / 0.643`. Flood 3 is a duplicated block.
+- Flood 2 is `(1,1,1)` and flood 3 is `(1,2,2)`: exactly what a find-and-replace that
+  missed the first line leaves behind.
+
+Photon sets all three to `2`, restoring stock's clean 2+2 split (lamps 1,2 → `panel[1]`;
+lamps 3,4 → `panel[2]`).
+
+**This one is invisible to the `(position, color)` deviation machinery** — position,
+color, size, direction and cone are all untouched — so it is cancelled explicitly in
+`test_each_branch_matches_gus_except_the_documented_normalisation` and pinned by
+`test_panel_flood_3_sits_wholly_on_one_rheostat`. That test asserts **both** directions:
+that Gus's vendored file really does still carry the bug (so re-vendoring a fixed
+upstream trips it rather than passing quietly) and that our output really is corrected.
+Both counts are taken **with multiplicity** — flood 2's `INDEX 1` line is byte-identical
+to the buggy flood 3 one, so they collapse to a single key in the record multiset and the
+bug is invisible unless the count is honoured.
+
 ---
 
-Decisions #1, #2 and #3 are the *only* deliberate deviations from Gus's data;
-everything else is transcribed verbatim. `GusFidelityTests` pins all three — it asserts
-the exact `(position, colour)` records that differ in each variant, so a fourth
-deviation, or any of these spreading to more lights, fails the suite rather than
-passing quietly.
+Decisions #1–#4 are the deliberate **color** deviations; #5 is a bug fix.
+`GusFidelityTests` pins all five, so an *unnoticed* drift fails the suite rather than
+passing quietly. Per §0.1, that suite records deviations — it does not forbid them.
 
 ### 1.4 Textures
 
@@ -309,7 +448,7 @@ silently reverts the exterior mod.
 
 | Photon mechanism | Applies? |
 |---|---|
-| DSL: one geometry + per-profile colour branches | **Yes, directly** |
+| DSL: one geometry + per-profile color branches | **Yes, directly** |
 | `ANIM_show`/`ANIM_hide` range gating | **Yes.** Stock `lights_inn.obj` already wraps `LIGHT_PARAM` in `ANIM_begin`; the exterior config already uses a 3-way range (`hide: 1.5 2.5 …` on `tail_nav`) |
 | `XPluginStart` dataref registration (gotchas #1, #4) | **Yes**, same requirement and solution |
 | Per-livery prefs JSON | **Yes** (decision #10) — absent keys default, so old prefs stay valid |
@@ -326,18 +465,19 @@ driving brightness — `panel_brightness_ratio_{auto,manual}[INDEX]` and
 
 | Category | Dataref | Index | Lights | Label |
 |---|---|---|---|---|
-| `dome` | `ToLissPhoton/interior/dome` | panel `[0]` | 0–1 (2) | Dome Lights |
-| `map` | `ToLissPhoton/interior/map` | panel `[1]`,`[2]` | 13–22 (10) | Map Lights |
-| `mainpnl` | `ToLissPhoton/interior/mainpnl` | `ckpt/lights/map` | *spot 3* (1) | Main Panel Flood |
-| `pedestal` | `ToLissPhoton/interior/pedestal` | panel `[3]` | 2,3,4,8,9 (5) | Pedestal & Tables |
+| `dome` | `ToLissPhoton/interior/dome` | panel `[0]` | 0–1 (2) + spot 1 | Dome Lights |
+| `map` | `ToLissPhoton/interior/map` | panel `[3]` + `ckpt/lights/map` | 4,9 (2) + *spot 3* | Map Lights |
+| `mainpnl` | `ToLissPhoton/interior/mainpnl` | panel `[1]`,`[2]` | 13–22 (10) | Main Panel Flood |
+| `pedestal` | `ToLissPhoton/interior/pedestal` | panel `[3]` | 2,3,8 (3) + spot 2 | Pedestal & Tables |
 | `console` | `ToLissPhoton/interior/console` | inst `[22]`,`[23]` | 5–7,10–12 (6) | Console Lights |
 
-Note `pedestal` spans several colour ramps (light 2 is P1, 3/8 are P1 after decision #3,
-4/9 are P3). That is fine and matches how the exterior works — the *light type* carries
-the colour ramp, the *fixture* carries the category.
+Note `map` spans two color ramps and two brightness sources. Multiple ramps in one
+category is normal and matches how the exterior works — the *light type* carries the
+color ramp, the *fixture* carries the category. Multiple brightness sources is the one
+documented exception, §2.2d.
 
-**Value encoding:** `0` = old halogen, `1` = new halogen, `2` = LED. `ANIM_show` ranges
-`-0.5 0.5`, `0.5 1.5`, `1.5 2.5`.
+**Value encoding:** `0` = old halogen, `1` = new halogen, `2` = LED — except `dome`,
+which is two-valued (`0` = fluorescent, `1` = LED); see §2.2c.
 
 #### 2.2b `mainpnl` — why it is not part of `map` (2026-07-28)
 
@@ -346,25 +486,114 @@ makes a category mean anything: the lights in one dim together on one knob, so t
 should switch look together.
 
 The re-added `.acf` spot 3 (§3.4) breaks the index scheme — its brightness comes from
-ToLiss's `ckpt/lights/map` dataref, not a rheostat `INDEX`. It was originally filed under
-`map` on the strength of that dataref's *name*. That was wrong: in the cockpit it is
-driven by the **MAIN PNL** knob, while the four movable reading lamps on `panel[1]`/`[2]`
-are driven by their own. One colour switch sat across two rheostats, so changing the
-reading lamps also changed the main panel flood. Found in-sim by flipping single rows in
-the Cockpit Custom window.
+ToLiss's `ckpt/lights/map` dataref, not a rheostat `INDEX`. Filing it under `map`
+alongside the ten `panel[1]`/`[2]` lamp lines put one color switch across two rheostats,
+so changing one group changed the other. Found in-sim by flipping single rows in the
+Cockpit Custom window.
 
-**Naming rule that falls out of this:** ToLiss's dataref name and the cockpit placard
-disagree. The **placard wins for anything the user sees** (the category, its menu row,
-the label) and the **dataref name wins for anything internal** (`kMapRheostatRef`, and
-our own `ToLissPhoton/interior/spill/map`, which mirrors the thing it reads). Do not
-"tidy" either into agreement — they are describing different things.
+**Which half is which was then got backwards, and corrected the same day.** The split
+first shipped with the ten lamp lines as `map` and spot 3 as `mainpnl`, on the strength
+of the DSL calling those ten lines "map lamps" and of `ckpt/lights/map` being the knob
+the placard labels MAIN PNL. Both readings were wrong. In-sim, turning the **Map Lights**
+row changed the **main panel flood**; the correct assignment is:
+
+- **`panel[1]`/`[2]` → `mainpnl`** — the ten lamp lines, on the strength of the in-sim
+  observation above. All four fixtures sit clustered at `x -0.19, y 0.245, z -4.61`, on
+  the *captain's* side, which is where the original scorched-geometry report put it.
+- **`ckpt/lights/map` → `map`** — spot 3, at `x +0.244` (FO side). The only light on that
+  rheostat.
+
+**The category carries the truth; the name does not.** This is the second time a light
+was misidentified from its label rather than its rheostat — see also §1.3c. There is no
+placard-vs-dataref conflict after all: `ckpt/lights/map` really is the map light. The
+misleading DSL names were removed 2026-07-28 (§1.2).
+
+> ⚠ **OPEN — the geometry argument above was overstated, and `mainpnl` now rests on a
+> single in-sim observation.** An earlier revision of this section cited the clustering
+> as positive evidence that these are floods "over the main panel". It is not. All four
+> mounts bake the **same** rest position, so the four are *coincident*, not spread across
+> the panel; they differ from one another in **direction** instead (lamps 1/4 shallow
+> down-forward, lamps 2/3 steeply down-aft). The only x spread available is ToLiss's own
+> `ckpt/lights/<n>/x/dir`, keyframed `0 → 0.1` — **10 cm**. And `y 0.245` is *below* the
+> table lamps (0.333) and far below the pedestal flood (0.8): footwell height, not the
+> glareshield height where a panel flood would mount.
+>
+> Four fixtures inside a 10 cm box, each with its own adjustable x/y/z, is equally
+> consistent with four **stowed movable lamps**. Expected shape of a real main panel
+> flood set: four lights sharing direction, `y` and `z`, differing only in `x`. That is
+> not what is here.
+>
+> This may also be what parked the debug-tool axis hunt — "the **outer** floods are wrong
+> under every one of the 48 permutations" is exactly what you would see if there are no
+> outer floods at rest. See `docs/dev-tools.md`.
+
+**Why spot 3 looked dead.** It is the only light on the map rheostat, so with that knob
+down the plugin drives its alpha to 0 and it is invisible — indistinguishable from "the
+menu row does nothing". Turn the map light up before judging any change to it.
 
 **Prefs migration:** a file written before the split has no `mainpnl` key, so the loader
-gives it **`map`'s value** rather than the 0 default. Defaulting would silently reset an
-existing Custom cockpit's flood to old halogen.
+gives it **`map`'s value** rather than the 0 default. This stays correct after the
+correction above — pre-split, the single `map` key governed both groups, so inheriting it
+is right whichever group ended up under which key.
 
-Pinned by `test_mainpnl_is_the_spill_light_and_map_is_the_reading_lamps` and by the
+Pinned by `test_map_holds_the_reading_lamps_and_mainpnl_the_panel_lamps` and by the
 per-category light counts in `test_categories_carry_the_expected_lights`.
+
+#### 2.2c `dome` — why it is two-valued (2026-07-28)
+
+Every other category is ternary. The dome is `0 = fluorescent`, `1 = LED`, because
+decision #2 (§1.3b) put it on ramp **P4**, whose two halogen entries are deliberately the
+*same* fluorescent white. A third branch would therefore have emitted a byte-identical
+duplicate of the first, and the Cockpit Custom window would have shown two buttons —
+Halogen (Old) and Halogen (New) — that produced the same cockpit. A menu control that
+does nothing is worse than one that isn't there.
+
+Three things follow, and all three are load-bearing:
+
+1. **2 is not a legal value on this dataref.** A two-value category takes the exterior's
+   one-line gate encoding (`ANIM_hide 1 1` on branch 0, `ANIM_hide 0 0` on branch 1), so
+   at 2 *nothing* hides and both branches draw — a dome lit fluorescent and LED at once.
+   Every writer in `plugin.cpp` goes through `IntValueForProfile` (now per-category: for
+   a two-valued category, LED → 1 and everything else → 0) or `ClampIntValue`, and the
+   prefs loader clamps on the way in.
+2. **Prefs need a schema marker, not a clamp.** A pre-change file's `dome: 1` meant *new
+   halogen* → fluorescent → 0; a current file's `dome: 1` means *LED* → 1. Same number,
+   opposite look, and nothing in the value itself distinguishes them. Hence
+   `interior_schema` (currently `2`) written alongside `interior_categories`; absent
+   means 1 and triggers the `2→1, else 0` remap of the dome key only.
+3. **The Custom window grid had to learn to span.** Buttons sit on a fixed column grid
+   sized over every row; a row with fewer buttons than columns lets its *first* button
+   span the leading columns. So the dome shows a wide `Fluorescent` covering both halogen
+   columns — which is exactly what it replaced — and `LED` in the LED column, keeping
+   that column aligned down the window. `RowButtons` in `plugin.cpp`.
+
+The profile *enum* stays three-way. A profile names an era for the whole cockpit, and the
+dome simply maps both halogen eras onto its single fluorescent look.
+
+#### 2.2d `map` — the one category not grouped by rheostat (2026-07-28)
+
+Reported in-sim the same day as §1.3d: *"the Map Lights option doesn't seem to do
+anything visibly... I believe the Map Lights are what are pointed at the tablets, but
+they're being grouped with the Pedestal for color. I think the mix-up is because the Map
+Lights are adjusted by the Pedestal's knob — this is how ToLiss has it set up."*
+
+That is exactly right, and it is the one case where the one-category-per-rheostat rule
+gives the wrong answer. Gus's `CA tablet` / `FO tablet` lamps (#4 and #9) sit at
+`y 0.7, x ±0.8` aimed down, forward and outboard: they land on each pilot's tray table
+and side console. They are the **map / reading lights**. ToLiss drives them from
+`panel[3]`, the pedestal knob, so grouping by rheostat filed them under `pedestal`.
+
+Both halves of that were bad in-sim:
+
+- **Map Lights** then held only spot 3, which is invisible whenever the map knob is down
+  — so the row looked dead, for the second time and for a second unrelated reason.
+- **Pedestal & Tables** silently recolored the reading lamps, which are not pedestal
+  lights by any description a pilot would recognise.
+
+So `map` groups by **fixture role**: the two reading lamps plus the `ckpt/lights/map`
+spot. The cost is real and is accepted — dimming the pedestal knob dims a light the Map
+row recolors. It is the *only* such exception; `mainpnl` (§2.2b) is still separate from
+`map` for precisely the rheostat reason, and merging it back would not be the same trade.
 
 ---
 
@@ -507,7 +736,7 @@ brightness source:
    `_spot1_3d_xyz/1 = 4.0`, `_spot_angle/0 = 50`, `_spot_size/{0,1,2} = 8/9/10`,
    `_spot_the/0 = -60`, `_spot_psi/0 = 180`. Variant-independent → no runtime state.
 2. **Disable the three spots** via `_spot_name_3d/{0,1,2} = none` — the A339's own
-   pattern (it ships `_spot_name_3d/2 none`), cleaner than relying on black-colour
+   pattern (it ships `_spot_name_3d/2 none`), cleaner than relying on black-color
    semantics.
 3. **Re-add spots 1 and 2** as `LIGHT_PARAM airplane_panel_sp` in `lights_inn.obj`,
    three `ANIM_show` branches deep, `INDEX` = 0 / 3 — rheostat tie reproduced natively,
@@ -519,7 +748,7 @@ brightness source:
    `ToLissPhoton/interior/spill/map` as our own float[9]; the plugin reads
    `ckpt/lights/map` via the existing type-detecting `ReadDataRefDouble` helper and
    writes it into the `a` slot, passing the other eight params through unmodified.
-   Colour still comes from `ANIM_show` branches.
+   Color still comes from `ANIM_show` branches.
 
 This is the **only** per-frame interior work in the shipping plugin: one dataref read
 plus one array write, for one light group. Degraded state: plugin absent ⇒ dref not
@@ -591,21 +820,43 @@ is `0 0 1 0` not `0 0 0 0`. Both stock and Gus's files declare `0 0 1 0` while c
 rather than introduce an untested difference. Note `TEXTURE` is followed by a tab and an
 empty value.
 
-### 3.7 Dev tuning harness (build this first)
+### 3.7 Dev tuning harness — **built 2026-07-28**
 
-A dev-only build emitting every interior light as `LIGHT_SPILL_CUSTOM` pointing at
-`ToLissPhoton/dev/spill[N]`, plus an in-sim window with sliders for
-r/g/b/a/size/direction/cone. Replaces the edit → build → reload loop (seconds per
-iteration, plus `watch.py`'s documented reload-race risk) with instant feedback; tuned
-values get baked back into the `.phdsl`.
+Shipped as `build --target interior --debug` plus Plugins ▸ Photon Dev ▸ *Live Light
+Debug…*. Full usage in `docs/dev-tools.md`; what matters here is what it changed from the
+plan above:
 
-The spec's modulation semantics make this pleasant: because baked OBJ params are the
-*input*, sliders start at the real authored value and show a live delta rather than
-reconstructing state from zeros.
+- **The datarefs are `ToLissPhoton/debug/light/<n>`**, a fixed pool of 64 registered at
+  `XPluginStart`, and they live in the **dev XPPython3 plugin**, not the shipping `.xpl`.
+  Keeping debug code out of the release binary is worth more than the convenience of
+  having it in C++, and the Python edit loop is far faster for a tool like this.
+- **The plugin writes all nine params**, it does not modulate baked ones. The plan
+  assumed X-Plane pre-fills the buffer with the OBJ's values so sliders could start from
+  the authored number and show a delta; that assumption is still unverified (§open
+  question 3) and this tool cannot depend on it. Instead the generator emits a
+  `lights_inn.debug.json` manifest of the authored values, the plugin seeds from it, and
+  the delta display works off that. Same experience, no dependency on unverified
+  behaviour — and if the debug lights look right while the shipped map spot does not,
+  that *is* the answer to the open question.
+- **A manifest was needed for brightness too.** `LIGHT_SPILL_CUSTOM` has no `INDEX` slot,
+  so a debug light cannot follow its rheostat on its own. The manifest records each
+  light's source (`panel[n]` / `inst[n]` / `ckpt/lights/map`) and the plugin multiplies it
+  into alpha — without which every light sits at full brightness and the tool loses the
+  main thing you identify a light by.
+- **Position is tunable too**, by a second mechanism. `LIGHT_SPILL_CUSTOM` keeps x/y/z
+  baked, but an OBJ8 `ANIM_trans` takes a dataref, so each light is wrapped in three of
+  them reading `ToLissPhoton/debug/pos[3n+axis]` as an offset in metres (∓2 m, clamped by
+  the keyframes). So the whole light is live and the older OBJ-rewriting Cockpit Light
+  Tuner is now only needed when you want the change *persisted into the installed OBJ*
+  rather than logged for pasting into the `.phdsl`.
+- **The debug OBJ has no category gating at all**, so it is not installable and the
+  Cockpit menu does nothing while it is in place. It carries a `NOT INSTALLABLE` banner
+  because that state otherwise looks exactly like the menu having broken.
 
-Build it before the authoring work. It is the only consumer of custom lights besides the
-map spot, so it carries no release risk — if it proves awkward we lose a tuning
-convenience, not a shipping feature.
+Identification, not tuning, turned out to be the feature that mattered: *Isolate*
+(black out all but the selected light), *Blink*, *Mark* (paint it magenta) and category
+jump answer "which light is this?" in seconds, which is the question that had cost the
+most time.
 
 ---
 
@@ -665,6 +916,29 @@ row, 3 per interior row (`Old Halogen` / `New Halogen` / `LED`). `RowRects` alre
 computes geometry from `kCategories`, so this is a per-row column count plus a section
 offset. Widen `gLabelColW` measurement to include interior labels.
 
+### 4.5 The Cockpit submenu is conditional (added 2026-07-28)
+
+§5.1 makes the interior opt-in, and decision #14 keeps the A339 out entirely — so the
+plugin runs on plenty of aircraft that have no cockpit mod. There the whole Cockpit axis
+is **inert**: stock `lights_inn.obj` names none of our datarefs, so every profile item and
+every Custom row changes nothing. That is indistinguishable from the "the menu does
+nothing" reports of §2.2c and §3.6.2, which twice had real causes — so the submenu is
+**omitted**, not greyed out, where the mod is absent.
+
+`DetectInterior` runs per aircraft load and asks whether `<aircraft>/objects/lights_inn.obj`
+contains `ToLissPhoton/interior/`. Deliberately **not** the installer's version marker: a
+`build --target interior --write` OBJ carries no marker and is fully switchable, and the
+dataref token is the property that actually matters. `UpdateMenuVisibility` rebuilds the
+menu when the answer changes between two ToLiss aircraft, since the submenu is decided at
+build time.
+
+The flag is **UI-only**. The 1 Hz interior Auto resolution and the per-frame
+`ckpt/lights/map` read stay unconditional, so a false negative loses the menu and nothing
+else; gating them would turn it into a frozen cockpit and a black map spot instead.
+Interior prefs are likewise untouched on an unmodded aircraft — nothing can write them
+with the submenu gone, and the read-modify-write saves carry them through — so a user's
+cockpit choice survives a trip in an aircraft that lacks the mod.
+
 ---
 
 ## 5. Installer
@@ -720,7 +994,7 @@ name/handle/links before shipping (§9).
 | **0** | Confirm `ckpt/lights/map`'s type in-sim (DataRefTool) | Type recorded in this doc |
 | **I** | Dev tuning harness (§3.7) | Sliders move a light in-sim; values round-trip into `.phdsl` |
 | **II** | N-way emitter (§3.1), exterior pinned at 2 | `build/build_objs.py check --airframe a320` still passes unchanged |
-| **II** | Interior DSL: axis, palettes, 4 fixtures, 4 map-lamp mount snippets (§1.2, §3.1) | `build --target interior` emits 23 lights × 3 branches; a diff against Gus's three files shows only the decision-#1 normalisation |
+| **II** | Interior DSL: axis, palettes, 4 fixtures, 4 panel-flood mount snippets (§1.2, §3.1) | `build --target interior` emits 23 lights × 3 branches; a diff against Gus's three files shows only the decision-#1 normalisation |
 | **III** | Multi-OBJ plumbing (§3.2) | Full `python -m unittest discover -s tests -v` green; the three ⚠ traps have named regression tests |
 | **IV** | Plugin: datarefs, interior profile, ternary values, nested menu, 3-column Custom rows, prefs, map-spill array (§4) | Old prefs files load unchanged; menu switches all four categories; `.xpl` builds on all three arches |
 | **V** | Installer: opt-in, textures, livery scan, four-`.acf` patch + line-presence detection, uninstall (§5) | Install → uninstall restores the aircraft byte-for-byte, `.acf` included; tests cover both `.acf` numeric formats |
@@ -752,7 +1026,7 @@ be done in either order; III is the larger.
   coexisting locally is encouraging but not proof.
 - **Fidelity of the spot replacement** — a spill light is not guaranteed to look
   identical to a sim 3D spot at the same position/cone. Fallback: leave the spots
-  enabled with an install-time colour and accept that they don't follow the in-sim
+  enabled with an install-time color and accept that they don't follow the in-sim
   switch.
 - **`.acf` numeric-format divergence** (§3.5) — a naive patcher works on XP12 and
   silently no-ops on XP11. Test with both formats as fixtures.

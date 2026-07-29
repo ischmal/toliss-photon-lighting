@@ -27,8 +27,8 @@ from pathlib import Path
 from installer import actions, config, detect, payload
 from installer import tui
 from installer.constants import (
-    AIRFRAMES, GITHUB_URL, INTERIOR_AIRFRAMES, VERSION, WING_ACTION_LABEL,
-    WING_LABEL, WINGS_FOR, XPLANE_ORG_URL,
+    AIRFRAMES, GITHUB_URL, INTERIOR_AIRFRAMES, INTERIOR_ORG_URL, VERSION,
+    WING_ACTION_LABEL, WING_LABEL, WINGS_FOR, XPLANE_ORG_URL,
 )
 from installer.log import Log
 from installer.tui import C, Back, flash, menu, render, text_prompt
@@ -389,30 +389,36 @@ def screen_interior(ac: dict) -> bool:
 
     Skipped entirely when the airframe is out of scope (the A330-900) or this
     build has no interior payload, rather than offering a step that would fail.
-    Declining is the default: it is the bigger, more invasive change of the two
-    (it retextures the cockpit and edits the .acf), so it should be chosen, not
-    defaulted into."""
+    Installing is the recommended choice; the third option opens Gus's own .org
+    page for this airframe and returns here rather than answering."""
     if ac["airframe"] not in INTERIOR_AIRFRAMES or not payload.interior_available():
         LOG.write(f"interior mod not offered for {ac['airframe']} "
                   f"(unsupported airframe or no payload)")
         return False
     options = [
-        "Exterior lighting only (recommended)",
-        "Also install the interior cockpit lighting",
+        "Yes (recommended)",
+        "No, install exterior lighting only",
+        "Open X-Plane.org page…",
     ]
     body = (
-        "The interior mod re-lights the COCKPIT — dome, map, pedestal, table and "
-        "console lights — and lets you switch them between old halogen, new "
-        "halogen and LED from the same menu as the exterior lights.\n\n"
-        "It is the work of GUS, used with permission and shipped with credit.\n\n"
-        "It installs ~57 MB of cockpit textures, and edits the aircraft's .acf "
-        "files to hand its three sim cockpit spotlights over to the mod. "
-        "Uninstalling puts all of it back."
+        "ToLiss Photon includes Light Mod by Gus Rodrigues, offering improved "
+        "cockpit lighting textures and three interior light profiles: "
+        "Halogen (Old), Halogen (New), and LED."
     )
-    choice = menu(STAGE_CONFIGURE, "Step 3d.  Interior cockpit lighting (optional)",
-                  body, options)
-    LOG.write(f"interior opt-in: {choice == 1}")
-    return choice == 1
+    idx, note = 0, None
+    while True:
+        choice = menu(STAGE_CONFIGURE,
+                      "Step 3d.  (Optional) Install enhanced cockpit lighting?",
+                      body, options, index=idx,
+                      footer_lines=(["", note] if note else None))
+        if choice == 2:
+            url = INTERIOR_ORG_URL[ac["airframe"]]
+            webbrowser.open(url)
+            LOG.write(f"opened the Light Mod page for {ac['airframe']}: {url}")
+            idx, note = 2, f"{C.BR_BLACK}Opened {url} in your browser.{C.RESET}"
+            continue
+        LOG.write(f"interior opt-in: {choice == 0}")
+        return choice == 0
 
 
 def screen_plugin_disposition(ac: dict, xplane_root: Path) -> bool:
@@ -514,7 +520,8 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
     else:
         summary = ("Uninstall complete — original ToLiss lighting restored."
                    if action == "uninstall" else
-                   f"Install complete — {ac['name']} now uses ToLiss Photon v{VERSION}.")
+                   f"Install complete — {ac['name']} now uses ToLiss Photon"
+                   f" v{VERSION} ({_variant_label(action, want_interior)}).")
         lines += ["", f"  {C.BR_GREEN}{summary}{C.RESET}"]
         if action == "uninstall":
             lines += [
@@ -530,24 +537,33 @@ def screen_perform(ac: dict, action: str, xplane_root: Path):
     render(STAGE_RUN, ["", title, *lines], cont="continue", focus=len(lines) + 2)
     while tui.read_key() != tui.KEY_ENTER:
         pass
-    return error is None
+    return error is None, want_interior
 
 
 # ─── screen 6: complete ───────────────────────────────────────────────────────
-def _complete_summary(ac: dict, action: str, success: bool) -> str:
+def _variant_label(action: str, interior: bool) -> str:
+    """What was installed, in one parenthetical: the wing variant plus the cockpit
+    axis when opted into — 'Default', 'Default + Cockpit', 'Durantula + Cockpit'.
+    The two axes install independently, so the label names both; the exterior-only
+    wording is unchanged."""
+    return WING_LABEL[action] + (" + Cockpit" if interior else "")
+
+
+def _complete_summary(ac: dict, action: str, success: bool,
+                      interior: bool = False) -> str:
     """One-line recap of what just happened, e.g. 'ToLiss Photon v0.4
-    (Durantula) installed in ToLiss A321.'"""
+    (Durantula + Cockpit) installed in ToLiss A321.'"""
     if not success:
         verb = "Uninstall" if action == "uninstall" else "Installation"
         return f"{C.YELLOW}{verb} did not complete — see the installer log for details.{C.RESET}"
     if action == "uninstall":
         return (f"{C.BR_WHITE}ToLiss Photon removed from {ac['name']} — original"
                 f" lighting restored.{C.RESET}")
-    return (f"{C.BR_WHITE}ToLiss Photon v{VERSION} ({WING_LABEL[action]}) installed in"
-            f" {ac['name']}.{C.RESET}")
+    return (f"{C.BR_WHITE}ToLiss Photon v{VERSION} ({_variant_label(action, interior)})"
+            f" installed in {ac['name']}.{C.RESET}")
 
 
-def screen_complete(ac: dict, action: str, success: bool):
+def screen_complete(ac: dict, action: str, success: bool, interior: bool = False):
     if not success:
         verb = "Uninstall" if action == "uninstall" else "Installation"
         title = f"Step 5.  {verb} failed"
@@ -555,7 +571,7 @@ def screen_complete(ac: dict, action: str, success: bool):
         title = "Step 5.  Uninstall complete"
     else:
         title = "Step 5.  Installation complete"
-    summary = _complete_summary(ac, action, success)
+    summary = _complete_summary(ac, action, success, interior)
     options = ["Exit installer", "Modify another aircraft", "View installer log…",
               "Open X-Plane.org Page…", "Open GitHub Project…"]
     note = None
@@ -650,11 +666,11 @@ def main():
                 except Back:
                     continue  # -> re-choose the action, still Step 3
                 try:
-                    success = screen_perform(ac, action, xplane_root)
+                    success, interior = screen_perform(ac, action, xplane_root)
                 except Back:
                     continue  # backed out of a sub-prompt (e.g. uninstall
                               # plugin disposition) -> re-choose the action
-                nxt = screen_complete(ac, action, success)
+                nxt = screen_complete(ac, action, success, interior)
                 if nxt == "exit":
                     raise SystemExit(_quit())
                 break  # "again" -> Step 2 (aircraft selection), same root

@@ -1,5 +1,5 @@
-# ToLiss movable map lamp 4 — z/x/y transform stack, lifted VERBATIM
-# from ToLiss's own lights_inn.obj (Gus's mod carries it unchanged).
+# Main panel flood lamp 4 — ToLiss's movable z/x/y transform stack, lifted
+# VERBATIM from ToLiss's own lights_inn.obj (Gus's mod carries it unchanged).
 ANIM_begin
 	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/4/z/dir
 	ANIM_begin

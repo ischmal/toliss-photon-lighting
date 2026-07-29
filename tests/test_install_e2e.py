@@ -28,7 +28,9 @@ sys.path.insert(0, str(REPO))
 
 import install
 from installer import actions, detect, payload, tui
-from installer.constants import VERSION
+from installer.constants import (
+    INTERIOR_AIRFRAMES, INTERIOR_ORG_URL, VERSION, XPLANE_ORG_URL,
+)
 
 RELEASE_DIR: Path | None = None
 FAKE_PLUGIN_DIR: Path | None = None
@@ -115,7 +117,7 @@ class InstallFlowE2ETest(unittest.TestCase):
             tui.KEY_ENTER,  # launch -> continue
             tui.KEY_ENTER,  # aircraft select -> first (only) entry
             tui.KEY_ENTER,  # action select -> first entry (stock install)
-            tui.KEY_ENTER,  # interior opt-in -> first entry (exterior only)
+            "2",            # cockpit opt-in -> "No, install exterior lighting only"
             tui.KEY_ENTER,  # perform -> continue
             tui.KEY_ENTER,  # complete -> first entry (Exit installer)
         ]
@@ -142,7 +144,7 @@ class InstallFlowE2ETest(unittest.TestCase):
             tui.KEY_ENTER,  # launch -> continue
             tui.KEY_ENTER,  # aircraft select -> first (only) entry
             tui.KEY_ENTER,  # action select -> first entry (stock install)
-            tui.KEY_ENTER,  # interior opt-in -> first entry (exterior only)
+            "2",            # cockpit opt-in -> "No, install exterior lighting only"
             tui.KEY_ENTER,  # perform -> continue
             "2",            # complete -> "Modify another aircraft"
             tui.KEY_ENTER,  # aircraft select -> first (only) entry, again
@@ -177,6 +179,59 @@ class A339ActionScreenTests(unittest.TestCase):
             tui.read_key = old_read_key
             install.LOG = old_log
         self.assertEqual(action, "uninstall")
+
+
+class InteriorOptInScreenTests(unittest.TestCase):
+    """The cockpit-lighting opt-in screen. Guards the two easy mistakes: the .org
+    link is a DIFFERENT file entry per airframe (not Photon's own XPLANE_ORG_URL),
+    and choosing it must return here rather than count as an answer."""
+
+    def setUp(self):
+        self._old = dict(read_key=tui.read_key, log=install.LOG,
+                         avail=payload.interior_available,
+                         browser=install.webbrowser.open)
+        install.LOG = _NullLog()
+        payload.interior_available = lambda: True
+        self.opened = []
+        install.webbrowser.open = self.opened.append
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        tui.read_key = self._old["read_key"]
+        install.LOG = self._old["log"]
+        payload.interior_available = self._old["avail"]
+        install.webbrowser.open = self._old["browser"]
+
+    def _run(self, keys, airframe="a320"):
+        tui.read_key = ScriptedKeys(keys)
+        with redirect_stdout(io.StringIO()):
+            return install.screen_interior({"airframe": airframe})
+
+    def test_first_option_installs_the_cockpit_lighting(self):
+        self.assertTrue(self._run(["1"]))
+
+    def test_second_option_is_exterior_only(self):
+        self.assertFalse(self._run(["2"]))
+
+    def test_enter_takes_the_recommended_yes(self):
+        self.assertTrue(self._run([tui.KEY_ENTER]))
+
+    def test_org_link_is_per_airframe_and_does_not_answer_the_question(self):
+        for af, expect in (("a319", "93336"), ("a320", "93337"), ("a321", "93338")):
+            self.opened.clear()
+            # "3" opens the link; the screen is still up, so "2" then answers it.
+            self.assertFalse(self._run(["3", "2"], airframe=af))
+            self.assertEqual(len(self.opened), 1)
+            self.assertIn(expect, self.opened[0])
+            self.assertNotEqual(self.opened[0], XPLANE_ORG_URL)
+
+    def test_skipped_for_out_of_scope_airframe(self):
+        tui.read_key = ScriptedKeys([])  # must not ask for input at all
+        self.assertFalse(install.screen_interior({"airframe": "a339"}))
+
+    def test_every_supported_airframe_has_a_link(self):
+        for af in INTERIOR_AIRFRAMES:
+            self.assertIn(af, INTERIOR_ORG_URL)
 
 
 class CloseXPlaneWaitTests(unittest.TestCase):
@@ -268,6 +323,22 @@ class CompleteSummaryTests(unittest.TestCase):
     def test_stock_install_summary(self):
         s = _plain(install._complete_summary({"name": "ToLiss A320"}, "stock", True))
         self.assertEqual(s, f"ToLiss Photon v{VERSION} (Default) installed in ToLiss A320.")
+
+    def test_install_summary_names_the_cockpit_axis_when_opted_in(self):
+        """The two axes install independently, so the recap has to say which ran: an
+        exterior-only install must not read like one that retextured the cockpit."""
+        s = _plain(install._complete_summary(
+            {"name": "ToLiss A320"}, "stock", True, interior=True))
+        self.assertEqual(
+            s, f"ToLiss Photon v{VERSION} (Default + Cockpit) installed in ToLiss A320.")
+        s = _plain(install._complete_summary(
+            {"name": "ToLiss A321"}, "durantula", True, interior=True))
+        self.assertIn("(Durantula + Cockpit)", s)
+
+    def test_uninstall_summary_never_mentions_the_cockpit_axis(self):
+        s = _plain(install._complete_summary(
+            {"name": "ToLiss A319"}, "uninstall", True, interior=True))
+        self.assertNotIn("Cockpit", s)
 
     def test_uninstall_summary(self):
         s = _plain(install._complete_summary({"name": "ToLiss A319"}, "uninstall", True))

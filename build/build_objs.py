@@ -80,6 +80,44 @@ OBJ_TARGETS = {
 
 TARGETS = ("exterior", "interior")
 
+# ─── debug light build (dev only, never shipped) ──────────────────────────────
+# `build --target interior --debug` re-emits the cockpit OBJ with every light as a
+# LIGHT_SPILL_CUSTOM bound to its own 9-float dataref, plus a JSON manifest beside
+# it; PI_PhotonDevReload.py drives them, making color/aim/cone/size live knobs with
+# no rebuild. One branch per fixture and NO category gate — the plugin owns color —
+# so a debug OBJ is not installable. See docs/dev-tools.md.
+DEBUG_LIGHT_DREF = "ToLissPhoton/debug/light"
+DEBUG_MANIFEST = "lights_inn.debug.json"
+# Position needs a separate mechanism: LIGHT_SPILL_CUSTOM keeps x/y/z in the OBJ and
+# passes only `r g b a size dx dy dz cone` through the dataref, so each debug light is
+# wrapped in three ANIM_trans blocks keyed on ∓DEBUG_POS_RANGE — the dataref then reads
+# directly as metres of offset. One shared array indexed [3n+axis]; a dataref per axis
+# per light would be 192 registrations.
+DEBUG_POS_DREF = "ToLissPhoton/debug/pos"
+# Metres of travel either way; keep in step with DebugPosRange in the dev plugin.
+# Deliberately far wider than a tuning nudge: the orientation cycler moves a light by
+# `permute(pos) - pos`, which is as large as the coordinates themselves (cockpit z
+# reaches ~-5 m), and X-Plane clamps outside the outermost keyframe.
+DEBUG_POS_RANGE = 12.0
+# A/B toggle: 0 shows the untouched original light lines, 1 the tunable spill copies.
+# Both are emitted for every light. See Emitter.debug_line.
+DEBUG_COMPARE_DREF = "ToLissPhoton/debug/compare"
+# Size of the dataref pool the dev plugin registers at XPluginStart — fixed, because at
+# that point there is no manifest to size it from. Raise BOTH this and DebugMaxLights.
+DEBUG_MAX_LIGHTS = 64
+
+DEBUG_BANNER = """\
+# ############################################################################
+# ##  DEBUG LIGHT BUILD — NOT INSTALLABLE, NOT SHIPPABLE                    ##
+# ############################################################################
+# Every light below is a LIGHT_SPILL_CUSTOM driven by ToLissPhoton/debug/light/N
+# and there is NO category gating at all, so the Cockpit profile menu does
+# nothing while this file is installed. Color comes from PI_PhotonDevReload.py
+# (XPPython3, dev only); without that plugin loaded these draw at their seed
+# colors and ignore every rheostat.
+#
+# Put the real file back with:  python build/build_objs.py build --target interior --write"""
+
 # airframe key -> supported wing-mod variants for that airframe. Source of truth
 # for which --wing values may be built/installed: resolve_mount()'s fallback to
 # an arbitrary mount variant when the requested one is missing would otherwise
@@ -114,13 +152,15 @@ HEADERS = {
 INTERIOR_CREDIT = """# ToLiss Photon Lighting — interior (cockpit) lights
 # GENERATED from src/lights/lights.{style,layout}.phdsl — do not hand-edit.
 #
-# Interior light design, placement, intensities and the three colour ramps are
+# Interior light design, placement, intensities and the three color ramps are
 # the work of GUS ("Gus Mod"), used with permission and vendored in
 # reference/gus/. Photon's contribution is only to fold his three separate
 # variant files into one runtime-switchable OBJ.
 #
-# Old halogen = 0, new halogen = 1, LED = 2, per category dataref:
-#   ToLissPhoton/interior/{dome,map,mainpnl,pedestal,console}"""
+# Per category dataref ToLissPhoton/interior/<category>:
+#   map, mainpnl, pedestal, console — 0 = old halogen, 1 = new halogen, 2 = LED
+#   dome                            — 0 = fluorescent, 1 = LED (two-valued: a
+#     fluorescent fitting has no incandescent era, so both halogen looks matched)"""
 
 
 def _rel(p: Path):
@@ -318,7 +358,8 @@ def reindent(text: str) -> str:
 # ─── emission ─────────────────────────────────────────────────────────────────
 class Emitter:
     def __init__(self, cfg: dict, airframe: str, variant: str = "stock",
-                 annotate: bool = False, target: str = "exterior"):
+                 annotate: bool = False, target: str = "exterior",
+                 debug: bool = False, debug_pos: bool = False):
         cfg_wing = cfg.get("wing")
         if cfg_wing is not None and cfg_wing != variant:
             raise SystemExit(
@@ -330,7 +371,19 @@ class Emitter:
         self.cfg = cfg
         self.airframe = airframe
         self.variant = variant  # wing-mod variant: stock | durantula | realwings
+        if debug and target != "interior":
+            raise SystemExit(
+                "--debug is interior-only: it exists to identify and tune cockpit "
+                "lights, and the exterior has frozen goldens that a debug build "
+                "would not match")
         self.target = target    # exterior | interior — selects fixtures + header
+        self.debug = debug      # dev light-tuner build (see DEBUG_LIGHT_DREF)
+        # Position tuning is OPT-IN. The ANIM_trans wrappers are the one part of a
+        # debug build that changes how lights RENDER rather than where their params
+        # come from, and in-sim (2026-07-28) they mis-place them — which made the tool
+        # unusable for the color/aim/cone work that does not need them.
+        self.debug_pos = bool(debug_pos) and self.debug
+        self.debug_lights = []  # manifest rows, filled during emit() when debug
         self.annotate = annotate  # emit "# @fixture|gi|li|side" tags (bootstrap)
         self.palettes = cfg["palettes"]
         self.categories = cfg["categories"]
@@ -359,10 +412,89 @@ class Emitter:
     def dref(self, category):
         return f"ToLissPhoton/{self.target}/{category}"
 
-    def light_line(self, light, *, profile, side, group, fixture, mirror):
+    def debug_line(self, merged, *, original, cls, pos, d, cone, rgb, index, size,
+                   category, fixture_name, mount):
+        """One light, re-expressed as a tunable LIGHT_SPILL_CUSTOM, plus the
+        manifest row the dev plugin needs to drive it.
+
+        The 9 dataref floats are `r g b a size dx dy dz cone`; position comes from
+        the ANIM_trans wrappers below, applied INSIDE any mount stack so a mounted
+        lamp is nudged relative to where ToLiss's animation puts it.
+
+        Alpha is baked at 1 and the plugin multiplies in the rheostat named by the
+        manifest's `source`/`index` — LIGHT_SPILL_CUSTOM has no INDEX slot, so a
+        debug light would otherwise ignore the knob it is identified by."""
+        n = len(self.debug_lights)
+        if n >= DEBUG_MAX_LIGHTS:
+            raise SystemExit(
+                f"debug build needs more than {DEBUG_MAX_LIGHTS} light slots; "
+                f"raise DEBUG_MAX_LIGHTS here and DebugMaxLights in "
+                f"src/plugin/PI_PhotonDevReload.py together")
+        if "spill_dref" in merged:
+            # A spill that DECLARES an `index:` is on a rheostat like any other
+            # light; only an index-less one is on the map knob (int_spot3). Tested
+            # on declaration, not on the resolved value: `index` defaults to 0,
+            # itself a real rheostat (panel[0], the dome). A spill carries no light
+            # class, so "panel" is the default family.
+            if "index" in merged:
+                source, idx = "panel", index
+            else:
+                source, idx = "map", 0
+        elif cls == "airplane_inst_sp":
+            source, idx = "inst", index
+        else:
+            source, idx = "panel", index
+        label = merged.get("label")
+        self.debug_lights.append({
+            "n": n,
+            "name": merged.get("_type", "?") + (f"#{label}" if label else ""),
+            "fixture": fixture_name,
+            "category": category,
+            "class": cls or "LIGHT_SPILL_CUSTOM",
+            "source": source,
+            "index": idx,
+            "mount": mount,
+            "pos": pos,
+            "rgb": rgb,
+            "size": size,
+            "dir": d,
+            "cone": cone,
+        })
+        nums = pos + rgb + [1, size] + d + [cone]
+        light = ("LIGHT_SPILL_CUSTOM\t" + " ".join(fmt(x) for x in nums)
+                 + f" {DEBUG_LIGHT_DREF}/{n}")
+
+        # A/B PAIR, each side gated on DEBUG_COMPARE_DREF. Converting a light to
+        # LIGHT_SPILL_CUSTOM is not self-evidently a no-op — `airplane_panel_sp` is a
+        # NAMED light resolved through X-Plane's own SPILL_SW handler — so the original
+        # line is kept alongside. Original right + Debug wrong blames the conversion;
+        # both alike blames the .phdsl. Nothing else can tell those apart in-sim.
+        original_block = ["ANIM_begin",
+                          f"ANIM_hide {fmt(0.5)} {fmt(1.5)} {DEBUG_COMPARE_DREF}",
+                          original.lstrip("\t"),
+                          "ANIM_end"]
+        lines = ["ANIM_begin",
+                 f"ANIM_hide {fmt(-0.5)} {fmt(0.5)} {DEBUG_COMPARE_DREF}"]
+        # Opt-in (--debug-pos); without them the light is a bare LIGHT_SPILL_CUSTOM at
+        # its baked coordinate, the only form seen to sit where it should.
+        if self.debug_pos:
+            for axis, unit in enumerate(((1, 0, 0), (0, 1, 0), (0, 0, 1))):
+                lo = " ".join(fmt(-DEBUG_POS_RANGE * c) for c in unit)
+                hi = " ".join(fmt(DEBUG_POS_RANGE * c) for c in unit)
+                lines.append("ANIM_begin")
+                lines.append(f"ANIM_trans\t{lo}\t{hi}\t"
+                             f"{fmt(-DEBUG_POS_RANGE)} {fmt(DEBUG_POS_RANGE)}\t"
+                             f"{DEBUG_POS_DREF}[{n * 3 + axis}]")
+        lines.append(light)
+        lines += ["ANIM_end"] * (4 if self.debug_pos else 1)
+        return "\n".join(original_block + lines)
+
+    def light_line(self, light, *, profile, side, group, fixture, mirror,
+                   fixture_name="", category="", mount=None):
         # appearance from the light type; placement (position/dir) from the light
         tpl = self.types[light["type"]] if "type" in light else {}
         merged = {**tpl, **{k: v for k, v in light.items() if k != "type"}}
+        merged["_type"] = light.get("type", "?")   # for the debug manifest only
         # LIGHT_SPILL_CUSTOM carries no light class; everything else must name
         # one. The empty default still resolves the `sp` palette swatch, which
         # is right — a spill light is not a billboard.
@@ -384,8 +516,8 @@ class Emitter:
         # color is an explicit property of the light type (per-side where it
         # differs); swatch (bb/sp) comes from the class. Resolved through
         # field() rather than a bare pick_side because the interior conditions
-        # colour on the PROFILE too (ramp P3 goes warm only under @int_led);
-        # for the exterior, whose colours are only ever side-conditioned, this
+        # color on the PROFILE too (ramp P3 goes warm only under @int_led);
+        # for the exterior, whose colors are only ever side-conditioned, this
         # walks the identical path and yields the identical name.
         cname = self.field(merged.get("color", "white"), profile, side)
         rgb = [rnd(v) for v in self.palettes[profile][cname][swatch_for(cls)]]
@@ -416,12 +548,21 @@ class Emitter:
             alpha = self.field(merged.get("alpha", 1), profile, side)
             nums = pos + rgb + [alpha, slot] + d + [cone]
             fields = [fmt(x) for x in nums]
-            return ("\tLIGHT_SPILL_CUSTOM\t" + " ".join(fields)
-                    + f" {merged['spill_dref']}")
+            original = ("\tLIGHT_SPILL_CUSTOM\t" + " ".join(fields)
+                        + f" {merged['spill_dref']}")
+        else:
+            nums = pos + rgb + [index, slot] + d + [cone]
+            fields = [fmt(x) if isinstance(x, (int, float)) else str(x) for x in nums]
+            original = f"\tLIGHT_PARAM\t{cls} " + " ".join(fields)
 
-        nums = pos + rgb + [index, slot] + d + [cone]
-        fields = [fmt(x) if isinstance(x, (int, float)) else str(x) for x in nums]
-        return f"\tLIGHT_PARAM\t{cls} " + " ".join(fields)
+        # Built last, from the fully resolved values above, so the debug copy is the
+        # same light made adjustable rather than a different one.
+        if self.debug:
+            return self.debug_line(
+                merged, original=original, cls=cls, pos=pos, d=d, cone=cone, rgb=rgb,
+                index=index, size=self.field(merged.get("size", 1), profile, side),
+                category=category, fixture_name=fixture_name, mount=mount)
+        return original
 
     def groups_of(self, fixture):
         if "groups" in fixture:
@@ -492,7 +633,13 @@ class Emitter:
     def emit_branch(self, fixture, category, *, branch, side, mirror, indent="", name=""):
         profile = self.profiles_of(category)[branch]
         lines = [f"{indent}ANIM_begin"]
-        lines += [f"{indent}\t" + g for g in self.branch_gate(category, branch)]
+        # No category gate in a debug build: the dev plugin drives color, so a gate
+        # could only hide the light being looked at.
+        if not self.debug:
+            lines += [f"{indent}\t" + g for g in self.branch_gate(category, branch)]
+        mount = fixture["gating"].get("mount")
+        if isinstance(mount, dict):
+            mount = mount.get(side)
         for gi_idx, g in enumerate(self.groups_of(fixture)):
             gate = g.get("gate")
             gi = indent + "\t"
@@ -500,9 +647,14 @@ class Emitter:
             for li_idx, light in enumerate(g["lights"]):
                 if self.annotate:
                     body.append(f"{gi}\t# @{name}|{gi_idx}|{li_idx}|{side or 'c'}")
-                body.append(gi + "\t" + self.light_line(
+                # A debug light is a multi-line block, so split rather than assume
+                # one line. reindent() recomputes depth from ANIM nesting later.
+                emitted = self.light_line(
                     light, profile=profile, side=side,
-                    group=g, fixture=fixture, mirror=mirror).lstrip("\t"))
+                    group=g, fixture=fixture, mirror=mirror,
+                    fixture_name=name, category=category, mount=mount)
+                for sub in emitted.split("\n"):
+                    body.append(gi + "\t" + sub.lstrip("\t"))
             if gate:
                 lo, hi = gate["hide"]
                 lines.append(f"{gi}ANIM_begin")
@@ -515,9 +667,12 @@ class Emitter:
         return "\n".join(lines)
 
     def emit_side(self, fixture, category, *, side, mirror, name=""):
+        # One branch in a debug build (see emit_branch); branch 0 supplies the seed
+        # colors, which the tuner overwrites as soon as it loads.
+        nbranch = 1 if self.debug else len(self.profiles_of(category))
         blocks = [self.emit_branch(fixture, category, branch=b, side=side, mirror=mirror,
                                    name=name)
-                  for b in range(len(self.profiles_of(category)))]
+                  for b in range(nbranch)]
         body = "\n".join(blocks)
 
         mount = fixture["gating"].get("mount")
@@ -583,6 +738,20 @@ class Emitter:
         parts = []
         if self.target == "interior":
             parts.append(INTERIOR_CREDIT)
+            parts.append("")
+        if self.debug:
+            parts.append(DEBUG_BANNER)
+            # State which half this file has: "the X/Y/Z knobs do nothing" and "the
+            # tool is broken" look identical from the cockpit.
+            parts.append(
+                "# POSITION TUNING IS ON (--debug-pos): every light is wrapped in "
+                "three ANIM_trans\n#   blocks reading ToLissPhoton/debug/pos. These "
+                "MOVE the lights — rebuild without\n#   --debug-pos if you are tuning "
+                "anything other than position."
+                if self.debug_pos else
+                "# Position tuning is OFF. Lights sit at their baked coordinates and "
+                "the X/Y/Z rows\n#   are hidden in the dev window. Add --debug-pos to "
+                "make position live too.")
             parts.append("")
         emitted = 0   # counted separately: the credit banner above is not a fixture
         for name, fixture in af["fixtures"].items():
@@ -886,13 +1055,34 @@ def cmd_build(args):
                 if target != "both":
                     raise SystemExit(f"{af} has no {tgt!r} target")
                 continue
-            text = Emitter(cfg, af, args.wing, target=tgt).emit()
+            # --debug-pos implies --debug: the wrappers are meaningless without the
+            # dataref-driven lights they wrap.
+            debug_pos = bool(getattr(args, "debug_pos", False))
+            debug = (bool(getattr(args, "debug", False)) or debug_pos) \
+                and tgt == "interior"
+            em = Emitter(cfg, af, args.wing, target=tgt, debug=debug,
+                         debug_pos=debug_pos)
+            text = em.emit()
             # mirror the X-Plane tree: <root>/A320/objects/lights_out320_XP12.obj
             dest = root / folder / "objects" / fname if not args.flat else root / fname
             atomic_write_bytes(dest, text.encode("utf-8"))
             print(f"wrote {_rel(dest)} ({len(text)} bytes)")
             if args.write:
                 _write_live(af, dest)
+            if debug:
+                # Same name stem as the OBJ, so the dev plugin finds it from the
+                # aircraft path alone and a stale one is obvious in the listing.
+                mdest = dest.with_name(DEBUG_MANIFEST)
+                # pos_tunable says whether the ANIM_trans wrappers are really in the
+                # OBJ; without it the dev window shows X/Y/Z knobs that move nothing.
+                blob = json.dumps({"version": 1, "airframe": af,
+                                   "obj": fname, "pos_tunable": em.debug_pos,
+                                   "lights": em.debug_lights},
+                                  indent=1)
+                atomic_write_bytes(mdest, blob.encode("utf-8"))
+                print(f"wrote {_rel(mdest)} ({len(em.debug_lights)} lights)")
+                if args.write:
+                    _write_live(af, mdest)
     if not args.flat:
         print("note: dist/ holds OBJs only — the plugin is now the native .xpl "
               "(src/native/), built + installed separately (see src/native/README.md).")
@@ -1006,6 +1196,18 @@ def main():
                    help="which OBJ(s) to build: exterior (lights_out3xx), "
                         "interior (lights_inn, the cockpit 'Gus Mod' lights), "
                         "or both (default)")
+    b.add_argument("--debug", action="store_true",
+                   help="DEV ONLY. Emit the interior OBJ with every light turned "
+                        "into a plugin-driven LIGHT_SPILL_CUSTOM, plus a "
+                        f"{DEBUG_MANIFEST} manifest, so the Cockpit Light Tuner "
+                        "in PI_PhotonDevReload.py can adjust color/aim/cone/size "
+                        "live. Ignores the profile menu — NOT installable. See "
+                        "docs/dev-tools.md.")
+    b.add_argument("--debug-pos", action="store_true",
+                   help="DEV ONLY, implies --debug. Also wrap every debug light in "
+                        "three dataref-driven ANIM_trans blocks so its X/Y/Z position "
+                        "is live. Off by default — the wrappers currently mis-place "
+                        "the lights, so enable them only when hunting position.")
     b.add_argument("--out", help="output dir (default: dist/)")
     b.add_argument("--flat", action="store_true",
                    help="write bare OBJs side by side instead of the X-Plane tree "

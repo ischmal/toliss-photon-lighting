@@ -165,7 +165,7 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
         "",
         "CREDIT",
         "  The interior (cockpit) lighting - its design, placement, intensities and",
-        "  the three colour looks - is the work of GUS, used with permission. Photon",
+        "  the three color looks - is the work of GUS, used with permission. Photon",
         "  only folds his three separate variant files into one that can be switched",
         "  in-sim. All credit for how the cockpit looks belongs to him.",
         "",

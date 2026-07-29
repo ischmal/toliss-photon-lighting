@@ -604,6 +604,10 @@ def _offset_value(v, where):
 
 def light_to_old(l, axes, where, base=None):
     out = {"type": l["type"]}
+    # The `#label` suffix (int_dome#left) is carried through only so the debug
+    # manifest can name a light the way the .phdsl does; the Emitter ignores it.
+    if l.get("label"):
+        out["label"] = l["label"]
     out.update(_expand_props(l["props"], axes, f"{where} {l['type']}", base))
     return out
 

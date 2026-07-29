@@ -69,45 +69,97 @@ static const char* kStrobeAlwaysOn = "ToLissPhoton/debug/strobe_always_on"; // h
 // ------------------------------- interior ------------------------------------
 // The cockpit ("Gus Mod") lights. A SEPARATE axis from the exterior in every
 // respect: its own categories, its own profile enum, its own persisted keys.
-// Unlike the exterior's boolean 0/1, these are TERNARY:
+// Where the exterior is boolean 0/1 throughout, these are mostly TERNARY:
 //     0 = old halogen, 1 = new halogen, 2 = LED
-// which is why the generated lights_inn.obj gates each branch with a PAIR of
-// ANIM_hide lines (the open-ended range below its own value and the one above)
-// where the two-valued exterior needs only one (see build/build_objs.py
-// Emitter::branch_gate). One category per BRIGHTNESS SOURCE — that is the rule,
-// and it is what makes a category meaningful: everything in one switches colour
-// together because everything in one dims together.
-//   panel[0]        dome      | panel[1],[2]   map
+// which is why lights_inn.obj gates each branch with a PAIR of ANIM_hide lines
+// (the open-ended range either side) where a two-valued one needs only one. See
+// build/build_objs.py Emitter::branch_gate.
+//
+// `dome` is TWO-valued — 0 = fluorescent, 1 = LED. Its ramp (P4, `fluoro`) is the
+// same white in both halogen eras on purpose: a dome light is a fluorescent
+// fitting with no incandescent era to follow, so a third branch would duplicate
+// the first. `values` carries that; nothing here may assume 3.
+//
+// ⚠ Nothing may ever write 2 to the dome dataref: the two-value encoding hides
+// branch 0 at exactly 1 and branch 1 at exactly 0, so at 2 NEITHER hides and both
+// draw. Every writer goes through IntValueForProfile or ClampIntValue.
+//
+// ONE CATEGORY PER BRIGHTNESS SOURCE, so everything in a category switches look
+// together because it dims together:
+//   panel[0]        dome      | panel[1],[2]   mainpnl
 //   panel[3]        pedestal  | inst[22],[23]  console
-//   ckpt/lights/map mainpnl
+//   panel[3] + ckpt/lights/map  map            (the documented exception —
+//     grouped by fixture role, so the two overhead reading lamps sit with the
+//     map spot; without them the row holds only a light the map knob can hide)
+//
+// panel[1],[2] is the FLOOD LT MAIN PNL knob, not the map lights — that pair
+// shipped the wrong way round once. The `mainpnl` assignment rests on a single
+// in-sim observation; see the OPEN note on the fixtures in lights.layout.phdsl.
 static const int NINT = 5;
-struct IntCategory { const char* key; const char* dataref; const char* label; };
+struct IntCategory {
+    const char* key;
+    const char* dataref;
+    const char* label;
+    int         values;      // 2 or 3 — how many looks this category has
+    const char* valueLabel[3];   // [values] used; the tail is nullptr
+};
 static const IntCategory kIntCategories[NINT] = {
-    {"dome",     "ToLissPhoton/interior/dome",     "Dome Lights"},
-    {"map",      "ToLissPhoton/interior/map",      "Map Lights"},
-    {"mainpnl",  "ToLissPhoton/interior/mainpnl",  "Main Panel Flood"},
-    {"pedestal", "ToLissPhoton/interior/pedestal", "Pedestal & Tables"},
-    {"console",  "ToLissPhoton/interior/console",  "Console Lights"},
+    {"dome",     "ToLissPhoton/interior/dome",     "Dome Lights",       2,
+     {"Fluorescent", "LED", nullptr}},
+    {"map",      "ToLissPhoton/interior/map",      "Map Lights",        3,
+     {"Halogen (Old)", "Halogen (New)", "LED"}},
+    {"mainpnl",  "ToLissPhoton/interior/mainpnl",  "Main Panel Flood",  3,
+     {"Halogen (Old)", "Halogen (New)", "LED"}},
+    {"pedestal", "ToLissPhoton/interior/pedestal", "Pedestal & Tables", 3,
+     {"Halogen (Old)", "Halogen (New)", "LED"}},
+    {"console",  "ToLissPhoton/interior/console",  "Console Lights",    3,
+     {"Halogen (Old)", "Halogen (New)", "LED"}},
 };
 // Needed only by the prefs migration below. Kept next to the table so a reorder
 // is caught by eye rather than by a wrong-looking cockpit.
+static const int kIntDomeIndex    = 0;
 static const int kIntMapIndex     = 1;
 static const int kIntMainPnlIndex = 2;
 
-// The one custom light in the interior OBJ: the re-added MAIN PNL flood spot.
-// Its brightness source is ToLiss's own `ckpt/lights/map`, not a rheostat INDEX,
-// so airplane_panel_sp cannot express it and it becomes a LIGHT_SPILL_CUSTOM
-// whose 9-float dataref we own. See ReadSpillMap and docs/interior_plan.md §3.4.
+// Force a category's value into its own legal range. Every path that sets an
+// interior value ends here, so nothing out of range can reach a dataref.
+static int ClampIntValue(int idx, int v) {
+    int last = kIntCategories[idx].values - 1;
+    if (v < 0) return 0;
+    if (v > last) return last;
+    return v;
+}
+
+// Prefs schema version for `interior_categories`. Bumped when a category's VALUE
+// SPACE changes, which a clamp cannot recover from: a v1 `dome: 1` meant new
+// halogen, a v2 `dome: 1` means LED — same number, opposite look. Absent == 1.
+static const int kIntPrefsSchema = 2;
+
+// The one custom light in the interior OBJ: the re-added map light spot, and the
+// only light on the map rheostat. Its brightness comes from ToLiss's
+// `ckpt/lights/map` rather than a rheostat INDEX, which airplane_panel_sp cannot
+// express, so it is a LIGHT_SPILL_CUSTOM on a 9-float dataref we own. See
+// ReadSpillMap and docs/interior_plan.md §3.4.
 //
-// The `spill/map` and `kMapRheostatRef` names below stay "map" ON PURPOSE: they
-// mirror ToLiss's own `ckpt/lights/map`, which is the thing they read. Only the
-// CATEGORY was renamed to mainpnl, because that is the knob the user turns —
-// ToLiss's dataref name and the cockpit placard disagree, and the menu should
-// follow the placard.
+// With the map knob down gMapSpillAlpha is 0 and the light is invisible, so the
+// Map Lights row looks inert. That is the rheostat, not the gating.
 static const char* kSpillMapDataRef = "ToLissPhoton/interior/spill/map";
 static const char* kMapRheostatRef  = "ckpt/lights/map";
 static const int   kSpillParamCount = 9;   // r g b a s dx dy dz semi
 static const int   kSpillAlphaSlot  = 3;   // the ONLY slot we drive
+
+// Is the cockpit mod on this aircraft? It is an independent opt-in install, and
+// without it every Cockpit menu item is inert (the stock lights_inn.obj names
+// none of our datarefs) — which reads as a broken mod. So the submenu is built
+// only when the modded OBJ is really there.
+//
+// The sentinel is the OBJ BINDING OUR DATAREFS, not the installer's version
+// marker: `build --target interior --write` installs a generated OBJ with no
+// marker, and that build is as switchable as a released one. Keep in step with
+// installer/constants.py INTERIOR_OBJ and the gate names the DSL emits.
+static const char*  kInteriorObjName     = "lights_inn.obj";
+static const char*  kInteriorObjNeedle   = "ToLissPhoton/interior/";
+static const size_t kInteriorObjMaxBytes = 4u * 1024u * 1024u;   // sanity cap
 
 // profiles
 enum { PROFILE_AUTO = 0, PROFILE_CLASSIC = 1, PROFILE_HYBRID = 2,
@@ -135,10 +187,9 @@ static const ProfileItem kIntProfileItems[] = {   // cockpit submenu order
 };
 static const int NINTPROFILE = (int)(sizeof(kIntProfileItems) / sizeof(kIntProfileItems[0]));
 
-// The three interior looks, in dataref-value order (0/1/2). Used for the Cockpit
-// window's three buttons per row. Same wording as the submenu above, deliberately:
-// the row buttons and the profile items name the same three looks.
-static const char* kIntValueLabel[3] = {"Halogen (Old)", "Halogen (New)", "LED"};
+// Row button labels come from kIntCategories[row].valueLabel — the dome offers
+// two looks where the rest offer three. The wording matches the submenu profile
+// items deliberately: the same name selects the same look.
 
 // Shown in the About window. Bump with installer/constants.py VERSION.
 static const char* kPhotonVersion = "0.6";
@@ -146,6 +197,9 @@ static const char* kOrgUrl =
     "https://forums.x-plane.org/files/file/"
     "100717-toliss-photon-exterior-lighting-mod-for-toliss-a319a320a321";
 static const char* kGitHubUrl = "https://github.com/ischmal/toliss-photon-lighting";
+// The cockpit lighting's author, credited on the About window.
+static const char* kGusUrl =
+    "https://forums.x-plane.org/profile/6767-gusrodrigues/";
 
 // Categories that are LED in Hybrid LED (position/anti-collision); beam lights stay
 // halogen. Mirrors HybridLedCategories = ("beacon", "strobe", "nav").
@@ -574,11 +628,20 @@ struct Entry {
 };
 static std::map<std::string, Entry> gProfiles;   // liveryKey -> entry
 
+// Whether THIS aircraft carries the cockpit mod (see kInteriorObjNeedle).
+// Re-detected on every aircraft load; false for any non-ToLiss.
+static bool gInteriorInstalled = false;
+
 // menu
 static bool       gMenuCreated = false;
+// What gInteriorInstalled was when the menu was BUILT. The Cockpit submenu is
+// decided at build time, so switching between two ToLiss aircraft that disagree
+// about the cockpit mod has to rebuild — see UpdateMenuVisibility.
+static bool       gMenuHasInterior = false;
 static XPLMMenuID gMenuID = nullptr;          // level 1: ToLiss Photon
 static XPLMMenuID gExtMenuID = nullptr;       // level 2: Exterior
-static XPLMMenuID gIntMenuID = nullptr;       // level 2: Cockpit
+static XPLMMenuID gIntMenuID = nullptr;       // level 2: Cockpit — absent when
+                                              // the cockpit mod is not installed
 static int        gPluginsMenuItem = -1;
 static int        gProfileItemIndex[NPROFILE];
 static int        gIntProfileItemIndex[NINTPROFILE];
@@ -636,7 +699,7 @@ static float ReadIntCategoryFloat(void* refcon) { return (float)gIntValues[(int)
 // buffer with them and the accessor modifies in place (the same
 // "getDatavf fills in place" behaviour noted at the top of this file). So we
 // touch ONLY the alpha slot and leave the other eight exactly as the OBJ baked
-// them — colour keeps coming from the visible ANIM_hide branch, geometry from the DSL.
+// them — color keeps coming from the visible ANIM_hide branch, geometry from the DSL.
 // Writing all nine here would duplicate the DSL's values in C++ and create a
 // third place that has to agree, which is precisely the failure mode the
 // skin-glow triple already documents.
@@ -831,8 +894,13 @@ static int ResolveIntAutoProfile() {
     return INT_PROFILE_OLD;      // Classic, Custom, anything unexpected
 }
 
-// profile enum -> the 0/1/2 the four datarefs carry
-static int IntValueForProfile(int profile) {
+// profile enum -> the value category `idx` should carry. PER-CATEGORY, because the
+// value spaces differ: the ternary categories take the profile at face value while
+// the two-valued dome folds BOTH halogen profiles onto 0 and LED onto 1. Routing
+// every non-Custom write through here is what keeps 2 off the dome dataref.
+static int IntValueForProfile(int idx, int profile) {
+    if (kIntCategories[idx].values == 2)
+        return profile == INT_PROFILE_LED ? 1 : 0;
     if (profile == INT_PROFILE_NEW) return 1;
     if (profile == INT_PROFILE_LED) return 2;
     return 0;                                  // Old Halogen
@@ -842,8 +910,7 @@ static void ApplyIntProfileToValues() {
     if (gIntProfile == INT_PROFILE_CUSTOM) return;   // Custom keeps its values
     int effective = (gIntProfile == INT_PROFILE_AUTO) ? ResolveIntAutoProfile()
                                                       : gIntProfile;
-    int v = IntValueForProfile(effective);
-    for (int i = 0; i < NINT; ++i) gIntValues[i] = v;
+    for (int i = 0; i < NINT; ++i) gIntValues[i] = IntValueForProfile(i, effective);
 }
 
 // What the four interior datarefs now read. The OBJ's ANIM_hide branches are the
@@ -896,6 +963,8 @@ static bool EntryFromJson(const json::Value& v, Entry& out) {
                                                                   : INT_PROFILE_AUTO;
         if (out.intProfile == INT_PROFILE_CUSTOM) {
             const json::Value* icats = v.find("interior_categories");
+            const json::Value* isch  = v.find("interior_schema");
+            int schema = isch && isch->type == json::Value::Int ? (int)isch->i : 1;
             out.hasIntCats = true;
             bool haveMainPnl = false;
             for (int i = 0; i < NINT; ++i) {
@@ -913,6 +982,15 @@ static bool EntryFromJson(const json::Value& v, Entry& out) {
             // cockpit looking exactly as the user left it; defaulting to 0 would
             // silently reset their MAIN PNL flood to old halogen.
             if (!haveMainPnl) out.intCats[kIntMainPnlIndex] = out.intCats[kIntMapIndex];
+            // MIGRATION schema 1 -> 2, the dome going two-valued: on the old
+            // ternary scale both halogen values meant fluorescent and only 2 meant
+            // LED. A stored 1 read on the new scale would come back as LED, which
+            // is the one case a clamp cannot fix — hence the marker.
+            if (schema < 2)
+                out.intCats[kIntDomeIndex] = out.intCats[kIntDomeIndex] == 2 ? 1 : 0;
+            // Whatever the file said, nothing leaves here out of range.
+            for (int i = 0; i < NINT; ++i)
+                out.intCats[i] = ClampIntValue(i, out.intCats[i]);
         }
         return true;
     }
@@ -974,6 +1052,7 @@ static void SaveProfilesFile() {
             if (e.intProfile != INT_PROFILE_AUTO) {
                 f << ", \"interior_profile\": " << e.intProfile;
                 if (e.intProfile == INT_PROFILE_CUSTOM && e.hasIntCats) {
+                    f << ", \"interior_schema\": " << kIntPrefsSchema;
                     f << ", \"interior_categories\": {";
                     for (int i = 0; i < NINT; ++i)
                         f << (i ? ", " : "") << "\"" << kIntCategories[i].key << "\": "
@@ -1006,10 +1085,8 @@ static void LoadProfileForCurrentLivery() {
         }
         gIntProfile = it->second.intProfile;
         if (gIntProfile == INT_PROFILE_CUSTOM && it->second.hasIntCats) {
-            for (int i = 0; i < NINT; ++i) {
-                int v = it->second.intCats[i];
-                gIntValues[i] = (v >= 0 && v <= 2) ? v : 0;
-            }
+            for (int i = 0; i < NINT; ++i)
+                gIntValues[i] = ClampIntValue(i, it->second.intCats[i]);
         } else {
             // ApplyIntProfileToValues resolves Auto against the exterior, which
             // was set just above — so order matters here.
@@ -1023,6 +1100,9 @@ static void LoadProfileForCurrentLivery() {
 // Exterior and interior are INDEPENDENTLY installable and independently
 // selectable, so each save must preserve the other side's fields rather than
 // overwrite the whole entry. These helpers read-modify-write one entry.
+// That also keeps a saved Cockpit choice intact on an aircraft without the cockpit
+// mod: with no Cockpit submenu nothing can change those fields, and every exterior
+// save carries them through untouched.
 static Entry& CurrentEntry() {
     return gProfiles[CurrentLiveryKey()];   // default-constructs if absent
 }
@@ -1090,48 +1170,77 @@ static void ClearSaved() {
 // Still plain windows (not menus), so CreatePhotonMenu's level-2 crash note holds.
 //
 // TWO SEPARATE WINDOWS, one per axis — Exterior (9 rows x 2 looks) and Cockpit
-// (4 rows x 3 looks). They were one stacked window; splitting them matches how
-// the axes actually behave (independent profiles, independent persistence,
-// independently installable) and lets each open from its own submenu. Everything
-// below is parameterised on a ConfigWindow so the two share one implementation
-// and cannot drift apart.
-static const int kPadX = 4, kGap = 8, kTopInset = 20, kBtnPadX = 10, kLabelPad = 4;
+// (5 rows, 3 looks each except the dome's 2). They were one stacked window;
+// splitting them matches how the axes actually behave (independent profiles,
+// independent persistence, independently installable) and lets each open from
+// its own submenu. Everything below is parameterised on a ConfigWindow so the
+// two share one implementation and cannot drift apart.
+//
+// Buttons sit on a fixed COLUMN GRID — `cols` columns measured once over every
+// row — but a row may carry FEWER buttons than columns, in which case one button
+// spans. That is how the two-valued dome fits the three-wide cockpit grid without
+// knocking the other rows out of alignment. See RowButtons.
+//
+// kTopInset is the gap above the first line of content, shared by all three
+// windows. It is both where drawing starts and part of the computed height, so
+// changing it moves content and shrinks the window by the same amount.
+static const int kPadX = 4, kGap = 8, kTopInset = 0, kBtnPadX = 10, kLabelPad = 4;
 static const int kHeaderTopGap = 4, kHeaderBotGap = 16;   // header spacing above / below
 static const char* kBullet = "\xE2\x80\xA2 ";   // U+2022 "• " prefix on the active button
 static const int kMaxCols = 3;
+static const int kMaxBtns = kMaxCols;   // a row can never have more buttons than columns
 
 struct ConfigWindow {
     bool         interior;    // which axis this window edits
     const char*  title;       // window chrome title
     const char*  header;      // one header line above the rows
     int          rows;        // NCAT or NINT
-    int          cols;        // 2 (classic/LED) or 3 (the interior ternary)
+    int          cols;        // grid width = the MOST looks any one row offers
     XPLMWindowID id;
     // layout, computed once at creation then stable for the window's life
     int fontH, btnH, rowStride, headerH, labelColW;
     int colW[kMaxCols];
-    // the button the mouse is currently holding down (-1 = none)
-    int pressRow, pressCol;
+    // the button the mouse is currently holding down (-1 = none). `pressBtn` is
+    // an index into the row's buttons, NOT a column — the two differ on a row
+    // that spans.
+    int pressRow, pressBtn;
 };
 
 static ConfigWindow gExtWin = {
-    false, "ToLiss Photon - Exterior", "Select the look for each exterior light:",
+    false, "ToLiss Photon - Exterior", "Custom exterior lights - configure:",
     NCAT, 2, nullptr, 0, 0, 0, 0, 0, {0, 0, 0}, -1, -1,
 };
 static ConfigWindow gIntWin = {
-    true, "ToLiss Photon - Cockpit", "Cockpit lights (mod by Gus) - select a look:",
+    true, "ToLiss Photon - Cockpit", "Custom cockpit lighting (mod by Gus Rodrigues) - configure:",
     NINT, 3, nullptr, 0, 0, 0, 0, 0, {0, 0, 0}, -1, -1,
 };
 
-// The label shown on button `col` of `row`.
-static std::string ButtonLabel(const ConfigWindow& w, int row, int col) {
-    if (w.interior) return kIntValueLabel[col];
-    return col == 0 ? kCategories[row].classic : "LED";
-}
+// One clickable button: the dataref value it selects, its label, and the grid
+// columns it covers (colFirst == colLast for the ordinary case).
+struct RowButton { int value; const char* label; int colFirst, colLast; };
 
-// The dataref value button `col` selects. Exterior: 0 classic / 1 LED. Interior:
-// the column IS the value (0 old halogen / 1 new halogen / 2 LED).
-static int ButtonValue(int col) { return col; }
+// The buttons of `row`, left to right. Returns how many.
+//
+// When a row has fewer looks than the grid has columns — today only the dome —
+// its FIRST button spans the leading columns and the rest keep the trailing ones.
+// So "Fluorescent" covers both slots the other rows use for their halogen looks,
+// and the LED column still lines up down the window.
+static int RowButtons(const ConfigWindow& w, int row, RowButton out[kMaxBtns]) {
+    if (!w.interior) {
+        out[0] = {0, kCategories[row].classic, 0, 0};
+        out[1] = {1, "LED", 1, 1};
+        return 2;
+    }
+    const IntCategory& c = kIntCategories[row];
+    int n = c.values < w.cols ? c.values : w.cols;
+    int span = w.cols - n;              // extra columns the first button absorbs
+    out[0] = {0, c.valueLabel[0], 0, span};
+    for (int i = 1; i < n; ++i) {
+        int col = span + i;
+        out[i] = {i, c.valueLabel[i], col, col};
+    }
+    return n;
+}
 
 static const char* RowLabel(const ConfigWindow& w, int row) {
     return w.interior ? kIntCategories[row].label : kCategories[row].label;
@@ -1146,34 +1255,48 @@ static int RowTop(const ConfigWindow& w, int winT, int row) {
     return winT - kTopInset - w.headerH - row * w.rowStride;
 }
 
+// Left/right edge of each grid COLUMN, given where the button area starts.
+static void ColumnEdges(const ConfigWindow& w, int x0, int xl[kMaxCols], int xr[kMaxCols]) {
+    int x = x0;
+    for (int c = 0; c < w.cols; ++c) {
+        xl[c] = x;
+        xr[c] = x + w.colW[c];
+        x = xr[c] + kGap;
+    }
+}
+
 // Per-row geometry from the live window top-left — shared by draw + hit-test so a
-// click always lands on the button it looks like. Fills `bl[]`/`br[]` with the
-// left/right edge of each of the row's w.cols buttons.
-static void RowRects(const ConfigWindow& w, int winL, int winT, int row,
-                     int& labelX, int& baseline,
-                     int bl[kMaxCols], int br[kMaxCols], int& top, int& bottom) {
+// click always lands on the button it looks like. Fills `btn[]` with the row's
+// buttons and `bl[]`/`br[]` with the left/right edge of each, spans resolved.
+static int RowRects(const ConfigWindow& w, int winL, int winT, int row,
+                    int& labelX, int& baseline, RowButton btn[kMaxBtns],
+                    int bl[kMaxBtns], int br[kMaxBtns], int& top, int& bottom) {
     labelX = winL + kPadX;
     top    = RowTop(w, winT, row);
     bottom = top - w.btnH;
-    int x = labelX + w.labelColW + kGap;
-    for (int c = 0; c < w.cols; ++c) {
-        bl[c] = x;
-        br[c] = x + w.colW[c];
-        x = br[c] + kGap;
+    int xl[kMaxCols], xr[kMaxCols];
+    ColumnEdges(w, labelX + w.labelColW + kGap, xl, xr);
+    int n = RowButtons(w, row, btn);
+    for (int i = 0; i < n; ++i) {
+        bl[i] = xl[btn[i].colFirst];
+        br[i] = xr[btn[i].colLast];
     }
     baseline = bottom + (w.btnH - w.fontH) / 2 + 1;
+    return n;
 }
 
-// which button covers (x,y); row = -1 if none
+// which button covers (x,y); row = -1 if none. `outBtn` indexes the ROW's
+// buttons, so it is what RowButtons returns — not a grid column.
 static void ButtonAt(const ConfigWindow& w, int winL, int winT, int x, int y,
-                     int& outRow, int& outCol) {
-    outRow = -1; outCol = -1;
+                     int& outRow, int& outBtn) {
+    outRow = -1; outBtn = -1;
     for (int i = 0; i < w.rows; ++i) {
-        int labelX, baseline, bl[kMaxCols], br[kMaxCols], top, bottom;
-        RowRects(w, winL, winT, i, labelX, baseline, bl, br, top, bottom);
+        int labelX, baseline, bl[kMaxBtns], br[kMaxBtns], top, bottom;
+        RowButton btn[kMaxBtns];
+        int n = RowRects(w, winL, winT, i, labelX, baseline, btn, bl, br, top, bottom);
         if (y < bottom || y > top) continue;
-        for (int c = 0; c < w.cols; ++c)
-            if (x >= bl[c] && x <= br[c]) { outRow = i; outCol = c; return; }
+        for (int c = 0; c < n; ++c)
+            if (x >= bl[c] && x <= br[c]) { outRow = i; outBtn = c; return; }
     }
 }
 
@@ -1231,15 +1354,16 @@ static void DrawConfigWindow(XPLMWindowID win, void* refcon) {
                    nullptr, xplmFont_Proportional);
 
     for (int i = 0; i < w.rows; ++i) {
-        int labelX, baseline, bl[kMaxCols], br[kMaxCols], top, bottom;
-        RowRects(w, l, t, i, labelX, baseline, bl, br, top, bottom);
+        int labelX, baseline, bl[kMaxBtns], br[kMaxBtns], top, bottom;
+        RowButton btn[kMaxBtns];
+        int n = RowRects(w, l, t, i, labelX, baseline, btn, bl, br, top, bottom);
         XPLMDrawString(white, labelX, baseline, RowLabel(w, i), nullptr, xplmFont_Proportional);
         int cur = RowCurrentValue(w, i);
-        for (int c = 0; c < w.cols; ++c) {
-            bool sel = cur == ButtonValue(c);
-            std::string text = (sel ? kBullet : "") + ButtonLabel(w, i, c);
+        for (int c = 0; c < n; ++c) {
+            bool sel = cur == btn[c].value;
+            std::string text = (sel ? kBullet : "") + std::string(btn[c].label);
             bool over  = mx >= bl[c] && mx <= br[c] && my >= bottom && my <= top;
-            bool press = over && w.pressRow == i && w.pressCol == c;   // held down on it
+            bool press = over && w.pressRow == i && w.pressBtn == c;   // held down on it
             DrawButton(bl[c], bottom, br[c], top, baseline, sel, over && !press, press, text);
         }
         // 1px divider centered in the gap below each row, except after the last.
@@ -1257,19 +1381,21 @@ static int HandleConfigClick(XPLMWindowID win, int x, int y, XPLMMouseStatus sta
     ConfigWindow& w = *(ConfigWindow*)refcon;
     int l, t, r, b;
     XPLMGetWindowGeometry(win, &l, &t, &r, &b);
-    int row, col;
-    ButtonAt(w, l, t, x, y, row, col);
+    int row, btnIdx;
+    ButtonAt(w, l, t, x, y, row, btnIdx);
     if (status == xplm_MouseDown) {
-        w.pressRow = row; w.pressCol = col;
+        w.pressRow = row; w.pressBtn = btnIdx;
     } else if (status == xplm_MouseUp) {
-        if (row >= 0 && row == w.pressRow && col == w.pressCol) {
-            int want = ButtonValue(col);
+        if (row >= 0 && row == w.pressRow && btnIdx == w.pressBtn) {
+            RowButton btn[kMaxBtns];
+            RowButtons(w, row, btn);
+            int want = btn[btnIdx].value;
             if (want != RowCurrentValue(w, row)) {
                 // Toggling ANY category switches that axis to Custom and persists
                 // all of its categories — but only that axis. Changing a cockpit
                 // light must not knock the exterior off Auto.
                 if (w.interior) {
-                    gIntValues[row] = want;
+                    gIntValues[row] = ClampIntValue(row, want);
                     gIntProfile = INT_PROFILE_CUSTOM;
                     SaveIntCustom();
                     Log(std::string("custom cockpit: ") + kIntCategories[row].key
@@ -1284,7 +1410,7 @@ static int HandleConfigClick(XPLMWindowID win, int x, int y, XPLMMouseStatus sta
                 UpdateChecks();
             }
         }
-        w.pressRow = -1; w.pressCol = -1;
+        w.pressRow = -1; w.pressBtn = -1;
     }
     return 1;   // our window owns clicks within it
 }
@@ -1314,16 +1440,36 @@ static void CreateConfigWindow(ConfigWindow& w) {
 
     // Column widths are per-COLUMN, measured over every row, so the buttons line
     // up in a grid. The exterior's first column holds "Halogen" or "Xenon"
-    // depending on the row, so it is the widest of those; the cockpit's three
-    // columns each hold one fixed label.
-    int rowW = 0;
-    for (int c = 0; c < w.cols; ++c) {
-        int textW = 0;
-        for (int i = 0; i < w.rows; ++i)
-            textW = std::max(textW, MeasureText(std::string(kBullet) + ButtonLabel(w, i, c)));
-        w.colW[c] = textW + 2 * kBtnPadX;
-        rowW += w.colW[c] + (c ? kGap : 0);
+    // depending on the row, so it is the widest of those.
+    //
+    // Two passes, because a SPANNING button belongs to no single column: pass one
+    // sizes each column from the buttons sitting in exactly one, pass two widens
+    // the span's last column if the label still would not fit. Sizing a column
+    // from a spanning label directly would inflate it for every other row.
+    for (int c = 0; c < w.cols; ++c) w.colW[c] = 0;
+    for (int i = 0; i < w.rows; ++i) {
+        RowButton btn[kMaxBtns];
+        int n = RowButtons(w, i, btn);
+        for (int k = 0; k < n; ++k) {
+            if (btn[k].colFirst != btn[k].colLast) continue;
+            int need = MeasureText(std::string(kBullet) + btn[k].label) + 2 * kBtnPadX;
+            w.colW[btn[k].colFirst] = std::max(w.colW[btn[k].colFirst], need);
+        }
     }
+    for (int i = 0; i < w.rows; ++i) {
+        RowButton btn[kMaxBtns];
+        int n = RowButtons(w, i, btn);
+        for (int k = 0; k < n; ++k) {
+            if (btn[k].colFirst == btn[k].colLast) continue;
+            int have = 0;
+            for (int c = btn[k].colFirst; c <= btn[k].colLast; ++c)
+                have += w.colW[c] + (c > btn[k].colFirst ? kGap : 0);
+            int need = MeasureText(std::string(kBullet) + btn[k].label) + 2 * kBtnPadX;
+            if (need > have) w.colW[btn[k].colLast] += need - have;
+        }
+    }
+    int rowW = 0;
+    for (int c = 0; c < w.cols; ++c) rowW += w.colW[c] + (c ? kGap : 0);
 
     int bodyW = std::max(rowW, MeasureText(w.header) - w.labelColW - kGap);
     int width  = kPadX + w.labelColW + kGap + bodyW + kPadX;
@@ -1397,17 +1543,20 @@ static const AboutLine kAboutLines[] = {
     {"Exterior and cockpit lighting for ToLiss Airbus aircraft.",    1},
     {"",                                                             1},
     {"Credits",                                                      0},
-    {"Photon by ischmal.",                                           1},
-    {"Cockpit lighting by Gus, used with permission.",               1},
-    {"Wing-mod support: Durantula's Wing Mod, RealWings.",           1},
+    {"Photon by schmal.",                                            1},
+    {"Cockpit lighting by Gus Rodrigues, used with permission.",     1},
     {"",                                                             1},
     {"Not affiliated with or endorsed by ToLiss.",                   2},
 };
 static const int NABOUT = (int)(sizeof(kAboutLines) / sizeof(kAboutLines[0]));
 
-static const int   NABOUTLINK = 2;
-static const char* kAboutLinkLabels[NABOUTLINK] = {"X-Plane.org Page", "GitHub Project"};
-static const char* AboutLinkUrl(int i) { return i == 0 ? kOrgUrl : kGitHubUrl; }
+struct AboutLink { const char* label; const char* url; };
+static const AboutLink kAboutLinks[] = {
+    {"X-Plane.org Page",             kOrgUrl},
+    {"GitHub Project",               kGitHubUrl},
+    {"Gus Rodrigues on X-Plane.org", kGusUrl},
+};
+static const int NABOUTLINK = (int)(sizeof(kAboutLinks) / sizeof(kAboutLinks[0]));
 
 static XPLMWindowID gAboutId = nullptr;
 static int gAboutFontH = 0, gAboutLineH = 0, gAboutBtnH = 0, gAboutBtnW[NABOUTLINK] = {0};
@@ -1431,7 +1580,9 @@ static void DrawAboutWindow(XPLMWindowID win, void*) {
 
     float bright[3] = {1.0f, 1.0f, 1.0f};
     float normal[3] = {0.86f, 0.86f, 0.86f};
-    float dim[3]    = {0.55f, 0.55f, 0.58f};
+    // "dim" only steps below `normal`; it must still read against the translucent
+    // window backing, which the old 0.55 grey did not.
+    float dim[3]    = {0.80f, 0.80f, 0.82f};
     for (int i = 0; i < NABOUT; ++i) {
         if (!kAboutLines[i].text[0]) continue;
         float* col = kAboutLines[i].tone == 0 ? bright
@@ -1451,7 +1602,7 @@ static void DrawAboutWindow(XPLMWindowID win, void*) {
         bool press = over && gAboutPress == i;
         int baseline = bottom + (gAboutBtnH - gAboutFontH) / 2 + 1;
         DrawButton(bl, bottom, br, top, baseline, false, over && !press, press,
-                   kAboutLinkLabels[i]);
+                   kAboutLinks[i].label);
     }
 }
 
@@ -1467,7 +1618,7 @@ static int HandleAboutClick(XPLMWindowID win, int x, int y, XPLMMouseStatus stat
     if (status == xplm_MouseDown) {
         gAboutPress = hit;
     } else if (status == xplm_MouseUp) {
-        if (hit >= 0 && hit == gAboutPress) OpenUrl(AboutLinkUrl(hit));
+        if (hit >= 0 && hit == gAboutPress) OpenUrl(kAboutLinks[hit].url);
         gAboutPress = -1;
     }
     return 1;
@@ -1484,7 +1635,7 @@ static void CreateAboutWindow() {
     for (int i = 0; i < NABOUT; ++i) textW = std::max(textW, MeasureText(kAboutLines[i].text));
     int btnRowW = 0;
     for (int i = 0; i < NABOUTLINK; ++i) {
-        gAboutBtnW[i] = MeasureText(kAboutLinkLabels[i]) + 2 * kBtnPadX;
+        gAboutBtnW[i] = MeasureText(kAboutLinks[i].label) + 2 * kBtnPadX;
         btnRowW += gAboutBtnW[i] + (i ? kGap : 0);
     }
     int width  = kPadX + std::max(textW + 4 * kPadX, btnRowW) + kPadX;
@@ -1632,23 +1783,31 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     gExtCustomItemIndex = XPLMAppendMenuItem(gExtMenuID, "Custom...",
                                              (void*)kMenuCustom, 0);
 
-    int intItem = XPLMAppendMenuItem(gMenuID, "Cockpit", nullptr, 0);
-    gIntMenuID = XPLMCreateMenu("Cockpit", gMenuID, intItem, InteriorMenuHandler, nullptr);
-    for (int i = 0; i < NINTPROFILE; ++i) {
-        gIntProfileItemIndex[i] = XPLMAppendMenuItem(gIntMenuID, kIntProfileItems[i].label,
-                                                    (void*)(intptr_t)i, 0);
-        if (kIntProfileItems[i].value == INT_PROFILE_AUTO) XPLMAppendMenuSeparator(gIntMenuID);
+    // The Cockpit submenu exists ONLY where the cockpit mod does — omitted, not
+    // greyed out. Everything downstream keys off gIntMenuID staying null:
+    // UpdateChecks skips the interior block, and with no menu item there is no
+    // path to InteriorMenuHandler or the Cockpit Custom window.
+    gMenuHasInterior = gInteriorInstalled;
+    if (gMenuHasInterior) {
+        int intItem = XPLMAppendMenuItem(gMenuID, "Cockpit", nullptr, 0);
+        gIntMenuID = XPLMCreateMenu("Cockpit", gMenuID, intItem, InteriorMenuHandler, nullptr);
+        for (int i = 0; i < NINTPROFILE; ++i) {
+            gIntProfileItemIndex[i] = XPLMAppendMenuItem(gIntMenuID, kIntProfileItems[i].label,
+                                                        (void*)(intptr_t)i, 0);
+            if (kIntProfileItems[i].value == INT_PROFILE_AUTO) XPLMAppendMenuSeparator(gIntMenuID);
+        }
+        XPLMAppendMenuSeparator(gIntMenuID);
+        gIntCustomItemIndex = XPLMAppendMenuItem(gIntMenuID, "Custom...",
+                                                 (void*)kMenuCustom, 0);
     }
-    XPLMAppendMenuSeparator(gIntMenuID);
-    gIntCustomItemIndex = XPLMAppendMenuItem(gIntMenuID, "Custom...",
-                                             (void*)kMenuCustom, 0);
 
     XPLMAppendMenuSeparator(gMenuID);
     XPLMAppendMenuItem(gMenuID, "About...", (void*)(intptr_t)0, 0);
 
     gMenuCreated = true;
     UpdateChecks();
-    Log("menu built (Exterior / Cockpit submenus)");
+    Log(gMenuHasInterior ? "menu built (Exterior / Cockpit submenus)"
+                         : "menu built (Exterior only - cockpit mod not installed)");
 }
 
 static void DestroyPhotonMenu() {   // not DestroyMenu: collides with the Win32 API
@@ -1666,6 +1825,7 @@ static void DestroyPhotonMenu() {   // not DestroyMenu: collides with the Win32 
         gPluginsMenuItem = -1;
     }
     gMenuCreated = false;
+    gMenuHasInterior = false;
 }
 
 // =========================== ToLiss detection ================================
@@ -1677,13 +1837,50 @@ static bool IsToLiss() {
     return blob.find("toliss") != std::string::npos;
 }
 
+// ======================= cockpit-mod ("Gus Mod") detection ===================
+// Does <aircraft>/objects/lights_inn.obj bind our interior datarefs? See
+// kInteriorObjNeedle for why that is the test. The OBJ is ~13 KB either way, so
+// this reads it whole; the cap only guards against an absurd file.
+static bool InteriorObjIsModded(const fs::path& obj) {
+    std::error_code ec;
+    if (!fs::is_regular_file(obj, ec)) return false;   // clears ec on success
+    uintmax_t size = fs::file_size(obj, ec);
+    if (ec || size == 0 || size > kInteriorObjMaxBytes) return false;
+    std::ifstream f(obj, std::ios::binary);
+    if (!f) return false;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return text.find(kInteriorObjNeedle) != std::string::npos;
+}
+
+// Re-detected per aircraft load, never per frame. XPLM_USE_NATIVE_PATHS is
+// enabled in XPluginStart, so the model path is a real filesystem path.
+static void DetectInterior() {
+    char fileName[512] = {0}, path[512] = {0};
+    XPLMGetNthAircraftModel(0, fileName, path);
+    gInteriorInstalled = false;
+    if (path[0]) {
+        fs::path obj = fs::path(path).parent_path() / "objects" / kInteriorObjName;
+        gInteriorInstalled = InteriorObjIsModded(obj);
+    }
+    Log(gInteriorInstalled ? "cockpit mod detected (lights_inn.obj binds our datarefs)"
+                           : "cockpit mod NOT installed - hiding the Cockpit menu");
+}
+
 static void UpdateMenuVisibility() {
     if (IsToLiss()) {
+        DetectInterior();
+        // The submenu is decided at menu-BUILD time, so switching between two
+        // ToLiss aircraft that disagree about the cockpit mod has to rebuild —
+        // otherwise it lingers on one without the mod or stays missing on one with.
+        if (gMenuCreated && gMenuHasInterior != gInteriorInstalled) DestroyPhotonMenu();
         if (!gMenuCreated) CreatePhotonMenu();
         ResolveGlowMap();      // pick the skin-glow index map for this airframe
+        // Cached whether or not the mod is installed: gating it would turn a
+        // detection false negative from "no menu" into "the map spot is black".
         ResolveMapRheostat();  // cache ckpt/lights/map off the per-frame path
     } else {
         if (gMenuCreated) DestroyPhotonMenu();
+        gInteriorInstalled = false;
         gGlowMapActive = false;
         gMapRheostat = nullptr;
         gMapRheostatType = 0;
@@ -1865,6 +2062,9 @@ static float AutoLoop(float, float, int, void*) {
     }
     // Interior Auto re-resolves on the same 1 Hz tick, and AFTER the exterior:
     // it mirrors the resolved exterior era, so it must see this tick's value.
+    // Deliberately NOT gated on gInteriorInstalled: five int writes a second keep
+    // a detection false negative costing only the menu. Gating it here would
+    // freeze a cockpit that IS modded at whatever it last loaded.
     if (gIntProfile == INT_PROFILE_AUTO) {
         int before[NINT];
         std::memcpy(before, gIntValues, sizeof(before));

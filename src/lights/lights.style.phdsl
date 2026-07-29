@@ -44,7 +44,7 @@ palette xenon {
 }
 
 // -- INTERIOR PALETTES (cockpit, "Gus Mod") --
-// `white` is the lamp colour that changes with the era; `warm` is the constant
+// `white` is the lamp color that changes with the era; `warm` is the constant
 // warm white Gus uses for the table and console lamps in ALL three variants.
 // Both are transcribed from reference/gus/lights_inn_{current,new,led}.obj.
 //   white:  A 1.00 0.37 0.16 (old halogen orange)
@@ -82,14 +82,26 @@ categories {
   wing: halogen;
   logo: halogen;
 
-  // interior — three-way, gated on ToLissPhoton/interior/<category>.
-  // ONE CATEGORY PER BRIGHTNESS SOURCE. That is the whole rule, and it is what
+  // interior — gated on ToLissPhoton/interior/<category>.
+  // ONE CATEGORY PER BRIGHTNESS SOURCE is the default rule, and it is what
   // makes a category mean anything: the lights in one dim together, so they
-  // should switch look together. `mainpnl` exists because the re-added .acf
-  // flood spot runs off ToLiss's `ckpt/lights/map` (the MAIN PNL knob) while
-  // the four movable reading lamps run off panel[1]/[2] — two knobs, so two
+  // should switch look together. `mainpnl` exists because the four panel flood
+  // lamps run off panel[1]/[2] (the FLOOD LT MAIN PNL knob) while the re-added
+  // .acf spot runs off ToLiss's `ckpt/lights/map` — two knobs, so two
   // categories. They were one until 2026-07-28; see interior_plan.md §2.2b.
-  dome: int_old int_new int_led;
+  //
+  // `map` is the ONE deliberate exception: a FIXTURE-role grouping, holding the
+  // two overhead reading lamps (panel[3], shared with the pedestal) alongside
+  // the ckpt/lights/map spot. See int_map_lamps in lights.layout.phdsl.
+  //
+  // `dome` is TWO-valued where the other four are ternary — fluorescent = 0,
+  // LED = 1. Its ramp P4 (`fluoro`) has both halogen entries identical, a
+  // fluorescent fitting having no incandescent era to follow, so a third branch
+  // would duplicate the first and put two menu buttons on one appearance. The
+  // plugin maps both halogen profiles onto 0 and clamps an old prefs 2 down to
+  // 1; nothing may ever write 2 here, since the two-value gate encoding leaves
+  // both branches visible at that value.
+  dome: int_old int_led;
   map: int_old int_new int_led;
   mainpnl: int_old int_new int_led;
   pedestal: int_old int_new int_led;
@@ -319,8 +331,8 @@ light wing_scan_bb extends wing_bb {
 // also what defines the four categories, so index and category must agree:
 //   panel[0] dome | panel[1],[2] map | panel[3] pedestal | inst[22],[23] console
 //
-// Four colour ramps fall out of three idioms:
-//   P1  color: white;                            -> A / B / C   (era-coloured)
+// Four color ramps fall out of three idioms:
+//   P1  color: white;                            -> A / B / C   (era-colored)
 //   P2  color: warm;                             -> D / D / D   (constant)
 //   P3  color: white; @int_led { color: warm; }  -> A / B / D
 //   P4  color: fluoro;                           -> E / E / C   (dome only)
@@ -336,15 +348,15 @@ light wing_scan_bb extends wing_bb {
 // A320's dome/storm light is a white fluorescent fitting: it is the general
 // cockpit floodlight, not integral panel lighting, and it does not follow the
 // incandescent era of the panels it lights. Reported in-sim 2026-07-28 as the
-// dome "changing colour temperature when it should not".
+// dome "changing color temperature when it should not".
 //
 // So the dome takes P4: one fluorescent white across BOTH halogen profiles,
 // Gus's LED blue-white under LED. Retuning is the `fluoro` entry in the three
-// int palettes above — the dev tuner does geometry only, not colour.
+// int palettes above — the dev tuner does geometry only, not color.
 //
 // int_spot1 (the re-added .acf dome spot) is the SAME physical fixture and must
 // stay on this ramp with it. The pedestal flood keeps P1 deliberately: integral
-// panel lighting IS era-coloured, which is the contrast this restores.
+// panel lighting IS era-colored, which is the contrast this restores.
 light int_dome {
   class: airplane_panel_sp;
   color: fluoro;
@@ -369,11 +381,11 @@ light int_flood {
 // DELIBERATE DEVIATION #3 from Gus's data (interior_plan.md §1.3c). Gus has
 // these constant warm white (D) in all three variants — ramp P2, alone with the
 // console strips. They share panel[3] with the pedestal flood, so they brighten
-// and dim with it while refusing to change colour with it, which in-sim reads as
+// and dim with it while refusing to change color with it, which in-sim reads as
 // two lights on one knob disagreeing about the era. Reported 2026-07-28.
 // Moved to P1 so they track the flood exactly.
 //
-// Note the asymmetry this leaves: colour is per-TYPE and so is shared, but the
+// Note the asymmetry this leaves: color is per-TYPE and so is shared, but the
 // captain's lamp carries a narrower cone as a per-light override in the layout.
 // That is why cone stays here as the pair's default rather than moving out.
 light int_table {
@@ -391,8 +403,14 @@ light int_table {
 // every comparable small directed lamp goes warm white. Treated as an
 // oversight and normalised to warm, which collapses them into ramp P3.
 //
-// Photon departs from his values in exactly TWO places: this one and the dome's
-// ramp P4 (see int_dome). Everything else is transcribed verbatim.
+// Photon departs from his COLORS in exactly FOUR places, all ramp moves and all
+// pinned record-by-record by GusFidelityTests: this one, the dome's P4
+// (int_dome), the CA/FO table lamps (int_table) and the console strips
+// (int_console). Everything else keeps his measured colors (interior_plan §0.1).
+//
+// These two are the cockpit's MAP/reading lights — see int_map_lamps in
+// lights.layout.phdsl. The "tablet" name is Gus's and kept because it is
+// accurate, not out of duty to his file; the CATEGORY carries the truth.
 light int_tablet {
   class: airplane_panel_sp;
   color: white;
@@ -401,19 +419,37 @@ light int_tablet {
   cone: 0.93969;
   index: 3;
 }
-// P2 — glareshield/console strip lamps. Note the *inst* class and its own
+// P3 — glareshield/console strip lamps. Note the *inst* class and its own
 // rheostat bank. Gus retunes these from stock 1.3 to 0.4.
+//
+// DELIBERATE DEVIATION #4 from Gus's data (interior_plan.md §1.3d). He has these
+// constant warm white (D) in all three variants — ramp P2, which after deviation
+// #3 took the table lamps off it left the strips as its only member. The Console
+// Lights row then emitted three byte-identical branches: gating fine, color never
+// changed, row did nothing. Reported in-sim 2026-07-28.
+//
+// Moved to P3, the ramp he already uses for every other small directed lamp:
+// era-colored across the halogen looks, warm — not cool — under LED. These are
+// integral console lighting, so they follow the panel era.
 light int_console {
   class: airplane_inst_sp;
-  color: warm;
+  color: white;
+  @int_led { color: warm; }
   size: 0.4;
   cone: 0.4;
   dir: 0 -0.3 0;
 }
-// P3 — the movable map lamps. Position is always 0 0 0: their real placement
-// comes from the ckpt/lights/<n>/{x,y,z}/dir animation in the mount snippet.
-// Gus retunes size from stock 1.2 to 0.471.
-light int_maplamp {
+// P3 — the four panel flood lamps (category `mainpnl`, NOT `map` — see the
+// fixture comment in lights.layout.phdsl). Position is always 0 0 0: their real
+// placement comes from the ckpt/lights/<n>/{x,y,z}/dir animation in the mount
+// snippet. Gus retunes size from stock 1.2 to 0.471.
+//
+// >>> TUNING: `size` here is shared by all ten lines; the per-line `cone` values
+//     live on the four fixtures in lights.layout.phdsl. cone is cos(half-spread)
+//     and runs BACKWARDS, so widening a beam means LOWERING it (0.906 = 25°,
+//     0.866 = 30°, 0.819 = 35°, 0.643 = 50°).
+//     After editing: python build/build_objs.py build --target interior --write
+light int_panelflood {
   class: airplane_panel_sp;
   color: white;
   @int_led { color: warm; }
@@ -422,7 +458,7 @@ light int_maplamp {
 
 // -- The three re-added .acf cockpit spots (docs/interior_plan.md §3.4) -------
 // The installer DISABLES ToLiss's three sim 3D spots (_spot_name_3d/* = none)
-// and they come back here as OBJ lights, so their colour follows the runtime
+// and they come back here as OBJ lights, so their color follows the runtime
 // switch instead of being frozen at install time.
 //
 // POSITIONS are DERIVED, not guessed — see the fixtures in lights.layout.phdsl.
@@ -455,19 +491,20 @@ light int_spot2 {          // was _spot*/1 — panel_brightness_ratio[3] (pedest
 // `alpha` is the BAKED value X-Plane draws when the dataref is NOT found — i.e.
 // the plugin-absent degraded state. Baked deliberately dim so that failure mode
 // is "map light too faint" rather than "map light glaring at full brightness".
-light int_spot3 {          // was _spot*/2 — ckpt/lights/map, the MAIN PNL knob
-  // Ramp P3, which it still SHARES with the map lamps even though it no longer
-  // shares their category — colour ramp and category are independent axes.
+light int_spot3 {          // was _spot*/2 — ckpt/lights/map, the map light knob
+  // Ramp P3, shared with the panel flood lamps even though it does NOT share
+  // their category — color ramp and category are independent axes.
   color: white;
   @int_led { color: warm; }
   alpha: 0.25;
-  // >>> THE KNOBS for this light's spread and reach. Reported 2026-07-28 as
-  //     scorching nearby geometry: 14° is very tight for something sitting this
-  //     close under the glareshield. cone is cos(half-spread) and runs
-  //     BACKWARDS — a bigger number is a NARROWER beam, so widening it means
-  //     LOWERING this value (0.866 = 30°, 0.766 = 40°, 0.643 = 50°).
+  // >>> THE KNOBS for this light's spread and reach, both still SEEDS. cone is
+  //     cos(half-spread) and runs BACKWARDS: to WIDEN, LOWER it (0.866 = 30°,
+  //     0.766 = 40°, 0.643 = 50°); to NARROW, RAISE it (0.985 = 10°, 0.996 = 5°).
+  //     Judge it with the map knob UP — at 0 the plugin drives alpha to 0 and
+  //     this light is invisible.
   //     After editing: python build/build_objs.py build --target interior --write
   size: 1;
-  cone: 0.97;              // cos(14°), stock _spot_angle/2 = 14 (unchanged by Gus)
+  cone: 0.97;              // cos(14°) — stock/Gus, still a seed and still narrow;
+                           // find the real number with the debug light tuner.
   spill_dref: ToLissPhoton/interior/spill/map;
 }

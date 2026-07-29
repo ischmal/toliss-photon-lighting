@@ -57,6 +57,7 @@ TUNE IN-SIM: the timing constants and (especially) the external-power dataref na
 are the parts to confirm in the sim. Every snapshot dataref is logged with found/value at
 trigger time, so tailing XPPython3Log.txt tells you immediately whether a name resolves.
 """
+import json
 import math
 import os
 import time
@@ -184,6 +185,90 @@ TunerObjRelPath = os.path.join("objects", "lights_inn.obj")
 TunerFineStep   = {"pos": 0.01, "dir": 0.02, "size": 0.05, "cone": 0.005}
 TunerCoarseStep = {"pos": 0.10, "dir": 0.10, "size": 0.25, "cone": 0.020}
 
+# ---- live light debug ---------------------------------------------------------------
+# The other half of the tuner above, which can only move geometry and only by rewriting
+# the OBJ and reloading. Build the cockpit OBJ with
+#
+#     python build/build_objs.py build --target interior --debug --write
+#
+# and every light becomes a LIGHT_SPILL_CUSTOM bound to ToLissPhoton/debug/light/<n>,
+# with a lights_inn.debug.json manifest beside it. We register those datarefs here and
+# feed them from the Live Light Debug window, so color, aim, cone, size and brightness
+# are live knobs with no rebuild and no reload.
+#
+# Mainly an IDENTIFICATION tool: Isolate (black out all but the selected light) and Mark
+# (paint it magenta) answer "which lamp is that?" in seconds.
+#
+# ⚠ A debug OBJ has NO category gating, so the Cockpit profile menu does nothing while it
+# is installed. Put the real one back with `build --target interior --write`.
+DebugManifestRelPath = os.path.join("objects", "lights_inn.debug.json")
+DebugDataRefPrefix   = "ToLissPhoton/debug/light/"
+# Position comes by a different route: the debug build wraps each light in three
+# dataref-driven ANIM_trans blocks reading DebugPosDataRef[3n+axis] as an offset in
+# metres. One shared array — a dataref per axis per light would be 192 registrations.
+# DebugPosRange is the ANIM keyframe span and must equal DEBUG_POS_RANGE in
+# build/build_objs.py; a mismatch silently rescales every position edit. It is far wider
+# than a tuning nudge needs because the orientation cycler below drives this array too,
+# by as much as the coordinates themselves (cockpit z runs to about -5 m).
+DebugPosDataRef = "ToLissPhoton/debug/pos"
+DebugPosRange   = 12.0
+# A/B toggle over the two lines the debug OBJ emits per light: 0 = untouched original,
+# 1 = tunable spill copy. The only way to tell a bad LIGHT_SPILL_CUSTOM conversion apart
+# from bad authored values — they look identical in the cockpit.
+DebugCompareDataRef = "ToLissPhoton/debug/compare"
+# Must match DEBUG_MAX_LIGHTS in build/build_objs.py. Registered at XPluginStart, before
+# any OBJ loads: an OBJ binds dataref names at LOAD time and a name that does not exist
+# yet reads 0 forever, leaving every debug light black.
+DebugMaxLights  = 64
+DebugParamCount = 9                       # r g b a size dx dy dz cone
+DebugPosCount   = 3                       # x y z OFFSET, slots 9..11 of a working value
+DebugPosSlot    = DebugParamCount         # where the offset starts in dbgVals
+DebugValCount   = DebugParamCount + DebugPosCount
+DebugFineStep   = {"rgb": 0.02, "alpha": 0.05, "size": 0.05, "dir": 0.02,
+                   "cone": 0.005, "pos": 0.01}
+DebugCoarseStep = {"rgb": 0.10, "alpha": 0.20, "size": 0.25, "dir": 0.10,
+                   "cone": 0.020, "pos": 0.10}
+DebugMarkColor = (1.0, 0.0, 1.0)         # magenta — nothing in a cockpit is this color
+DebugBlinkHz    = 2.0
+
+# ---------------------------------------------------------------- orientation cycler
+#
+# In-sim 2026-07-28 the debug lights sat in the wrong places and faced the wrong way,
+# while the originals were right — yet they were still in DISTINCT places and still
+# responded to the position knobs. The baked x/y/z are byte-identical between the two
+# lines (asserted by test) and the offsets start at zero, so nothing here moves them.
+# The remaining explanation is that the two light forms disagree about which axis is
+# which.
+#
+# So rather than guess, enumerate all 48 signed axis permutations (6 orderings x 8 sign
+# combinations) on a button and click until the cockpit snaps into place; the label is
+# then the answer. Index 0 is the identity, so a fresh session behaves as before.
+def _orientations():
+    out = []
+    for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+        for signs in ((1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+                      (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1)):
+            label = " ".join(("-" if signs[i] < 0 else "") + "XYZ"[perm[i]]
+                             for i in range(3))
+            out.append((perm, signs, label))
+    return out
+
+
+DebugOrientations = _orientations()
+
+
+def _orient(idx, vec):
+    """Apply orientation `idx` to a 3-vector. out[i] = sign[i] * vec[perm[i]]."""
+    perm, signs, _ = DebugOrientations[idx % len(DebugOrientations)]
+    v = list(vec) + [0.0, 0.0, 0.0]
+    return [signs[i] * v[perm[i]] for i in range(3)]
+# Brightness source -> the rheostat a light's alpha is multiplied by, keyed by the
+# manifest's `source`. LIGHT_SPILL_CUSTOM has no INDEX slot, so without this every debug
+# light would ignore the knob it is identified by.
+DebugPanelRheostat = "sim/cockpit2/electrical/panel_brightness_ratio"
+DebugInstRheostat  = "sim/cockpit2/electrical/instrument_brightness_ratio"
+DebugMapRheostat   = "ckpt/lights/map"
+
 # Command + menu identity
 CommandName = "ToLissPhoton/dev/quick_reload"
 CommandDesc = "Photon Dev: snapshot -> reload aircraft -> restore state & camera"
@@ -247,9 +332,12 @@ def _log(msg):
 UI_PAD, UI_GAP, UI_TOP_INSET, UI_BTN_PAD = 8, 6, 20, 8
 UI_BULLET = "• "
 
-COL_TEXT   = (0.86, 0.86, 0.86)
+COL_TEXT   = (0.90, 0.90, 0.90)
 COL_BRIGHT = (1.0, 1.0, 1.0)
-COL_DIM    = (0.55, 0.55, 0.58)
+# "Dim" is a de-emphasis, not a low-contrast grey: these windows draw on X-Plane's own
+# mid-grey chrome, where 0.55 grey-on-grey was unreadable. Rank by weight, not by
+# fading toward the background.
+COL_DIM    = (0.80, 0.80, 0.83)
 COL_ACTIVE = (0.0, 0.729, 1.0)
 
 
@@ -355,6 +443,42 @@ class PythonInterface:
         self.tunerCoarse = False
         self.tunerNote = "not loaded"
 
+        # live light debug (the --debug OBJ + its dataref pool)
+        self.dbgWin = None
+        self.dbgWinSlots = 0            # row count the window's height was sized for
+        self.dbgHits = []
+        self.dbgAccessors = []          # registered dataref refs, index == light n
+        self.dbgPosAccessor = None      # the one shared position-offset array
+        self.dbgCompareAccessor = None  # the A/B toggle
+        self.dbgCompare = 1             # 1 = tunable debug copies, 0 = original lines
+        self.dbgLights = []             # manifest rows
+        # working values, 12 per light: r,g,b,a,size,dx,dy,dz,cone + x,y,z OFFSET
+        self.dbgVals = []
+        self.dbgBase = []               # the manifest's own values, for Revert
+        self.dbgLoadTried = False       # one manifest load attempt per aircraft
+        # Does the installed OBJ carry the ANIM_trans position wrappers (manifest's
+        # `pos_tunable`)? False hides every position control — a knob that moves nothing
+        # reads as the light refusing to move, not as the feature being off.
+        self.dbgPosTunable = False
+        self.dbgSel = 0
+        self.dbgCoarse = False
+        self.dbgIsolate = False
+        self.dbgBlink = False
+        self.dbgMark = False
+        # Orientation hypothesis under test, as indices into DebugOrientations; 0 is the
+        # identity. Global, NOT per-light — one click re-tests every light at once,
+        # because "the whole cockpit snaps into place" is the signal to watch for.
+        self.dbgOrientPos = 0
+        self.dbgOrientDir = 0
+        # Linked by default: a real coordinate-space mismatch would hit position and
+        # direction alike, so that 48-click sweep is worth doing first. Unlinking opens
+        # the 48x48 case if it finds nothing.
+        self.dbgOrientLink = True
+        self.dbgNote = "not loaded"
+        self.dbgRheostatRefs = {}       # name -> dataref handle (or None if missing)
+        self.dbgFrameTime = -1.0        # rheostat cache stamp
+        self.dbgFrameVals = {}
+
     # ---------------------------------------------------------------- lifecycle
     def XPluginStart(self):
         try:
@@ -372,6 +496,9 @@ class PythonInterface:
             self.cineSlowerCmdRef = xp.createCommand(
                 CineSlowerCommandName, "Photon Dev: cinematic camera - next speed down")
             xp.registerCommandHandler(self.cineSlowerCmdRef, self.CineSlowerCmd, 1, 0)
+            # MUST be here, not in XPluginEnable: an OBJ binds dataref names when the
+            # aircraft loads, and a name registered later stays bound to nothing.
+            self._dbg_register_accessors()
             _log("started; commands registered (bind '%s' to a key/button)" % CommandName)
         except Exception:
             _log("XPluginStart error:\n" + traceback.format_exc())
@@ -395,6 +522,7 @@ class PythonInterface:
             self._release_camera()
             self._destroy_window("cineWin")
             self._destroy_window("tunerWin")
+            self._destroy_window("dbgWin")
             for loop in ("driverLoopID", "camWatchLoopID", "cineLoopID"):
                 if getattr(self, loop) is not None:
                     xp.destroyFlightLoop(getattr(self, loop))
@@ -413,6 +541,7 @@ class PythonInterface:
                                  (self.cineSlowerCmdRef, self.CineSlowerCmd)):
                 if ref is not None:
                     xp.unregisterCommandHandler(ref, handler, 1, 0)
+            self._dbg_unregister_accessors()
         except Exception:
             _log("XPluginStop error:\n" + traceback.format_exc())
 
@@ -420,6 +549,15 @@ class PythonInterface:
         try:
             if inMessage != MsgPlaneLoaded or inParam != 0:
                 return
+            # A reload re-reads the OBJ, so the manifest beside it may be new, newly
+            # present or newly gone. Re-read it and drop the working values with it —
+            # edits kept across a reload would describe lights that are no longer there.
+            # This is the belt; the lazy load in _dbg_values is the braces.
+            self.dbgLoadTried = True
+            self._dbg_load()
+            # A reload is how a --debug-pos build usually replaces a plain one, so the
+            # row count may have changed. Message context, so rebuilding is safe here.
+            self._dbg_resize_window()
             if self.state == ST_PLAIN:
                 # Bare reload: nothing to settle, nothing to restore. The one thing
                 # still owed is re-enabling the aircraft's plugins, and that has to
@@ -1492,7 +1630,7 @@ class PythonInterface:
             if s.startswith("#"):
                 # The generator labels each gated block "# <Fixture> -> <Branch>", and
                 # that comment - NOT ANIM_begin - is what starts a new light block.
-                # Mounted fixtures (the map lamps) nest several ANIM_begin levels for
+                # Mounted fixtures (the panel floods) nest several ANIM_begin levels for
                 # their ckpt/lights/<n> transform stack, so resetting on ANIM_begin
                 # would restart the ordinal partway through a fixture.
                 if "->" in s:
@@ -1523,7 +1661,7 @@ class PythonInterface:
                 self.tunerLights[key] = entry
                 self.tunerOrder.append(key)
                 # The working copy comes from the FIRST branch. All branches share
-                # geometry and differ only in colour, so any one of them is right.
+                # geometry and differ only in color, so any one of them is right.
                 self.tunerVals[key] = list(nums)
             # Keep each line's own leading whitespace: mounted fixtures sit several
             # ANIM_trans levels deep, so a fixed indent would silently reflow them.
@@ -1581,7 +1719,7 @@ class PythonInterface:
                 out = list(nums)
                 # Only the geometric slots are copied across; r/g/b and slot 6 stay as
                 # each branch had them, so applying an edit never flattens the three
-                # colour variants into one.
+                # color variants into one.
                 for _, slot, _ in self.TUNER_SLOTS:
                     out[slot] = vals[slot]
                 lines[idx] = self._tuner_render(indent, cmd, prefix, out, tail)
@@ -1690,6 +1828,643 @@ class PythonInterface:
         self.tunerWin = self._create_window("Photon Dev - Cockpit Light Tuner",
                                             400, height, self.TunerDraw, self.TunerClick)
 
+    # ========================= live light debug =====================================
+    # See the DebugManifestRelPath block up top for what this is. Registration happens
+    # in XPluginStart because an OBJ resolves dataref NAMES as it loads, and a name that
+    # does not exist yet reads 0 for the life of that aircraft.
+
+    def _dbg_register_accessors(self):
+        """Claim the whole ToLissPhoton/debug/light/<n> pool, once, at plugin start.
+
+        Fixed size rather than sized from the manifest: at XPluginStart there is no
+        aircraft, so there is no manifest. Slots past the end of the current one read
+        as a zeroed light, which draws nothing."""
+        for n in range(DebugMaxLights):
+            try:
+                # readRefCon, NOT refCon — XPPython3 has a separate refCon per
+                # direction. `refCon=` raises TypeError and registers nothing.
+                ref = xp.registerDataAccessor(DebugDataRefPrefix + str(n),
+                                              readFloatArray=self.DbgReadArray,
+                                              readRefCon=n)
+                self.dbgAccessors.append(ref)
+            except Exception:
+                _log("could not register %s%d:\n%s"
+                     % (DebugDataRefPrefix, n, traceback.format_exc()))
+                break
+        try:
+            self.dbgPosAccessor = xp.registerDataAccessor(
+                DebugPosDataRef, readFloatArray=self.DbgReadPos, readRefCon=0)
+        except Exception:
+            _log("could not register %s:\n%s"
+                 % (DebugPosDataRef, traceback.format_exc()))
+        try:
+            # BOTH int and float readers. ANIM_hide reads its dataref as a FLOAT;
+            # with only readInt registered X-Plane advertises the type wrong, the gate
+            # reads 0, and the A/B toggle sticks on "original".
+            self.dbgCompareAccessor = xp.registerDataAccessor(
+                DebugCompareDataRef,
+                readInt=lambda _r: int(self.dbgCompare),
+                readFloat=lambda _r: float(self.dbgCompare),
+                readDouble=lambda _r: float(self.dbgCompare))
+        except Exception:
+            _log("could not register %s:\n%s"
+                 % (DebugCompareDataRef, traceback.format_exc()))
+        _log("live light debug: %d dataref slots registered%s"
+             % (len(self.dbgAccessors),
+                " + position array" if self.dbgPosAccessor else " (NO position array)"))
+        self._dbg_publish_to_dataref_tools()
+
+    def _dbg_publish_to_dataref_tools(self):
+        """Tell DataRefTool / DataRefEditor these datarefs exist.
+
+        Custom datarefs are not discoverable: those tools scan X-Plane's own table plus
+        whatever plugins announce, so an unannounced accessor works perfectly while
+        appearing nowhere. Message 0x01000000, name as payload."""
+        names = [DebugDataRefPrefix + str(n) for n in range(len(self.dbgAccessors))]
+        if self.dbgPosAccessor is not None:
+            names.append(DebugPosDataRef)
+        if self.dbgCompareAccessor is not None:
+            names.append(DebugCompareDataRef)
+        found = []
+        for sig in ("com.leecbaker.datareftool", "xplanesdk.examples.DataRefEditor"):
+            try:
+                pid = xp.findPluginBySignature(sig)
+            except Exception:
+                continue
+            if pid is not None and pid != xp.NO_PLUGIN_ID:
+                found.append(sig)
+                for name in names:
+                    try:
+                        xp.sendMessageToPlugin(pid, 0x01000000, name)
+                    except Exception:
+                        break
+        _log("live light debug: announced to %s"
+             % (", ".join(found) if found else "no dataref browser (none loaded)"))
+
+    def _dbg_unregister_accessors(self):
+        for ref in self.dbgAccessors:
+            try:
+                xp.unregisterDataAccessor(ref)
+            except Exception:
+                pass
+        self.dbgAccessors = []
+        for attr in ("dbgPosAccessor", "dbgCompareAccessor"):
+            ref = getattr(self, attr, None)
+            if ref is not None:
+                try:
+                    xp.unregisterDataAccessor(ref)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def DbgReadArray(self, refCon, values, offset, count):
+        """X-Plane pulling one debug light's nine params, once per frame per light.
+
+        Writes ALL nine slots, never a modify-in-place of a pre-filled buffer: whether
+        X-Plane pre-fills one is an open question, and here the plugin owns every param
+        anyway.
+
+        Two XPPython3 conventions, both of which fail silently: `values` is an EMPTY
+        list to `.extend()`, not a buffer to index; and `count == -1` means "all of
+        them", not "none"."""
+        try:
+            if values is None:
+                return DebugParamCount             # size query
+            params = self._dbg_params(refCon)
+            if offset < 0:
+                offset = 0
+            if count < 0:
+                count = DebugParamCount
+            out = params[offset:min(DebugParamCount, offset + count)]
+            values.extend(out)
+            return len(out)
+        except Exception:
+            _log("DbgReadArray error:\n" + traceback.format_exc())
+            return 0
+
+    def DbgReadPos(self, refCon, values, offset, count):
+        """The shared position-offset array, `3 * DebugMaxLights` floats.
+
+        Read one element at a time in practice — each `ANIM_trans` references
+        `pos[3n+axis]`. Same list conventions as DbgReadArray."""
+        try:
+            total = DebugMaxLights * DebugPosCount
+            if values is None:
+                return total
+            if offset < 0:
+                offset = 0
+            if count < 0:
+                count = total
+            out = []
+            for i in range(offset, min(total, offset + count)):
+                n, axis = divmod(i, DebugPosCount)
+                out.append(self._dbg_pos_offset(n)[axis])
+            values.extend(out)
+            return len(out)
+        except Exception:
+            _log("DbgReadPos error:\n" + traceback.format_exc())
+            return 0
+
+    def _dbg_pos_offset(self, n):
+        """What the three ANIM_trans blocks for light `n` should read, in metres.
+
+        Two terms, kept separate so the orientation search stays usable:
+
+        * The ORIENTATION CORRECTION, `permute(pos) - pos` — the vector that relocates
+          the light from where the OBJ baked it to where the hypothesis says it belongs.
+          Zero at the identity, which is why nothing moves until you cycle.
+        * The MANUAL nudge, always in plain OBJ axes and deliberately NOT permuted, so
+          "X +" still moves along the axis the readout calls X.
+
+        Clamped per component because X-Plane clamps outside the outermost keyframe
+        anyway, and the window should agree with the sim about what was applied."""
+        vals = self._dbg_values(n)
+        # With no wrappers in the OBJ nothing reads this array, so a non-zero offset
+        # would only make the window disagree with the sim.
+        if not vals or not self.dbgPosTunable:
+            return [0.0, 0.0, 0.0]
+        baked = list(self.dbgLights[n].get("pos", [0, 0, 0])) + [0.0, 0.0, 0.0]
+        baked = baked[:3]
+        moved = _orient(self.dbgOrientPos, baked)
+        return [max(-DebugPosRange,
+                    min(DebugPosRange,
+                        moved[i] - baked[i] + vals[DebugPosSlot + i]))
+                for i in range(DebugPosCount)]
+
+    def _dbg_values(self, n):
+        """Working values for light `n`, loading the manifest on first use.
+
+        The lazy load matters: accessors are registered at XPluginStart, long before any
+        aircraft exists, and the window that used to trigger the read might never be
+        opened — which left every light reading zeros from the first frame. Loading on
+        first ACCESS happens after the OBJ loads and before anything is drawn.
+
+        `dbgLoadTried` keeps it to one attempt per aircraft, so a missing manifest (the
+        normal case) costs one stat(), not one per light per frame."""
+        if not self.dbgVals and not self.dbgLoadTried:
+            self.dbgLoadTried = True
+            self._dbg_load()
+        return self.dbgVals[n] if n < len(self.dbgVals) else None
+
+    def _dbg_rheostat(self, source, index):
+        """The 0..1 brightness knob a light rides, cached for the current frame.
+
+        Called once per light per frame, hence the cache. The array variants go through
+        getDatavf and ckpt/lights/map as a type-detected scalar: X-Plane returns 0 on a
+        type mismatch rather than erroring, which is how a light goes silently black."""
+        now = xp.getElapsedTime()
+        if now != self.dbgFrameTime:
+            self.dbgFrameTime = now
+            self.dbgFrameVals = {}
+        key = (source, index)
+        if key in self.dbgFrameVals:
+            return self.dbgFrameVals[key]
+        name = {"panel": DebugPanelRheostat,
+                "inst": DebugInstRheostat}.get(source, DebugMapRheostat)
+        if name not in self.dbgRheostatRefs:
+            self.dbgRheostatRefs[name] = xp.findDataRef(name)
+            if self.dbgRheostatRefs[name] is None:
+                _log("live light debug: rheostat %s NOT FOUND — those lights will "
+                     "sit at full brightness" % name)
+        ref = self.dbgRheostatRefs[name]
+        value = 1.0
+        if ref is not None:
+            try:
+                if source in ("panel", "inst"):
+                    out = []
+                    xp.getDatavf(ref, out, index, 1)
+                    value = out[0] if out else 0.0
+                else:
+                    types = xp.getDataRefTypes(ref)
+                    if types & TYPE_INT:
+                        value = float(xp.getDatai(ref))
+                    elif types & TYPE_DOUBLE:
+                        value = float(xp.getDatad(ref))
+                    else:
+                        value = float(xp.getDataf(ref))
+            except Exception:
+                value = 0.0
+        value = max(0.0, min(1.0, value))
+        self.dbgFrameVals[key] = value
+        return value
+
+    def _dbg_params(self, n):
+        """The nine spill floats slot `n` currently reads."""
+        vals = self._dbg_values(n)
+        if vals is None:
+            return [0.0] * DebugParamCount          # past the manifest: draws nothing
+        v = list(vals[:DebugParamCount])
+        # Aim goes through the orientation hypothesis on its way out, so one click
+        # re-aims every light at once. Slots 5..7 are dx/dy/dz.
+        v[5], v[6], v[7] = _orient(self.dbgOrientDir, v[5:8])
+        light = self.dbgLights[n]
+        selected = (n == self.dbgSel)
+        if self.dbgMark and selected:
+            v[0], v[1], v[2] = DebugMarkColor
+        alpha = v[3] * self._dbg_rheostat(light.get("source", "panel"),
+                                          int(light.get("index", 0)))
+        if self.dbgIsolate and not selected:
+            alpha = 0.0
+        if self.dbgBlink and selected:
+            # Square wave, not a fade: a hard on/off is easier to pick out of a cockpit
+            # where several lights already glow at similar levels.
+            alpha *= 1.0 if (xp.getElapsedTime() * DebugBlinkHz) % 1.0 < 0.5 else 0.0
+        v[3] = alpha
+        return v
+
+    def _dbg_load(self):
+        """(Re)read lights_inn.debug.json from the installed aircraft."""
+        self.dbgLights, self.dbgVals, self.dbgBase = [], [], []
+        self.dbgPosTunable = False      # re-asserted from the manifest below
+        acf = self._aircraft_dir_raw()
+        if not acf:
+            self.dbgNote = "no aircraft loaded"
+            return
+        path = os.path.join(acf, DebugManifestRelPath)
+        if not os.path.exists(path):
+            self.dbgNote = "no debug OBJ installed"
+            _log("live light debug: %s not found — build with "
+                 "`build_objs.py build --target interior --debug --write`" % path)
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.dbgLights = list(data.get("lights", []))
+            # Default False: a manifest is always written with its OBJ, so a missing key
+            # means an old or hand-made one, and hiding the controls is the safe read.
+            self.dbgPosTunable = bool(data.get("pos_tunable", False))
+        except Exception:
+            self.dbgNote = "manifest read failed"
+            _log("live light debug read failed:\n" + traceback.format_exc())
+            return
+        for light in self.dbgLights:
+            rgb = list(light.get("rgb", [1, 1, 1]))
+            d = list(light.get("dir", [0, 0, 0]))
+            # Seeded from the manifest — the OBJ's own authored values — so the window
+            # opens on the real light. The x/y/z tail is an OFFSET and starts at zero;
+            # the baked position it applies to is light["pos"].
+            vals = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0,
+                    float(light.get("size", 1)), float(d[0]), float(d[1]), float(d[2]),
+                    float(light.get("cone", 1)), 0.0, 0.0, 0.0]
+            self.dbgVals.append(vals)
+            self.dbgBase.append(list(vals))
+        if len(self.dbgLights) > len(self.dbgAccessors):
+            self.dbgNote = "TOO MANY LIGHTS (%d > %d slots)" % (
+                len(self.dbgLights), len(self.dbgAccessors))
+            _log("live light debug: manifest has %d lights but only %d dataref slots "
+                 "are registered — raise DebugMaxLights here AND DEBUG_MAX_LIGHTS in "
+                 "build/build_objs.py" % (len(self.dbgLights), len(self.dbgAccessors)))
+            return
+        self.dbgSel = min(self.dbgSel, max(0, len(self.dbgLights) - 1))
+        self.dbgNote = "%d lights" % len(self.dbgLights)
+        _log("live light debug loaded %s (%d lights)" % (path, len(self.dbgLights)))
+
+    # The X/Y/Z rows are OFFSETS from the baked position — the ANIM_trans wrappers
+    # translate the light, they do not place it. The window shows the resulting
+    # absolute position beside them.
+    DEBUG_SLOTS = (
+        ("Red",   0, "rgb"),
+        ("Green", 1, "rgb"),
+        ("Blue",  2, "rgb"),
+        ("Alpha", 3, "alpha"),
+        ("Size",  4, "size"),
+        ("Dir X", 5, "dir"),
+        ("Dir Y", 6, "dir"),
+        ("Dir Z", 7, "dir"),
+        ("Cone",  8, "cone"),
+    )
+
+    # Shown only when the installed OBJ has the ANIM_trans wrappers (--debug-pos). Split
+    # out rather than filtered inline so the window height can be computed from the rows
+    # that will really be drawn.
+    DEBUG_POS_SLOTS = (
+        ("X",     9,  "pos"),
+        ("Y",     10, "pos"),
+        ("Z",     11, "pos"),
+    )
+
+    def _dbg_slots(self):
+        return self.DEBUG_SLOTS + (self.DEBUG_POS_SLOTS if self.dbgPosTunable else ())
+
+    def _dbg_rescan(self):
+        """Re-read the manifest on demand, re-arming the one-shot lazy load so one that
+        has only just appeared is picked up.
+
+        Also the sanctioned place to resize: this runs from a click, a safe context to
+        destroy a window, whereas the lazy load runs from a dataref accessor."""
+        self.dbgLoadTried = True
+        self._dbg_load()
+        self._dbg_resize_window()
+
+    def _dbg_resize_window(self):
+        """Rebuild the window if the visible row count changed under it.
+
+        The X/Y/Z rows come and go with `--debug-pos` and the window has fixed resizing
+        limits, so a stale height clips the action buttons off the bottom."""
+        if self.dbgWin is None or self.dbgWinSlots == len(self._dbg_slots()):
+            return
+        self._destroy_window("dbgWin")
+        self.ShowDebugWindow()
+
+    def _dbg_select(self, delta):
+        if self.dbgLights:
+            self.dbgSel = (self.dbgSel + delta) % len(self.dbgLights)
+
+    def _dbg_select_category(self, delta):
+        """Jump to the first light of the next/previous CATEGORY — the fastest way from
+        "the Map Lights row does nothing" to the lights that row drives."""
+        if not self.dbgLights:
+            return
+        cats = []
+        for light in self.dbgLights:
+            if light.get("category") not in cats:
+                cats.append(light.get("category"))
+        cur = self.dbgLights[self.dbgSel].get("category")
+        want = cats[(cats.index(cur) + delta) % len(cats)]
+        for i, light in enumerate(self.dbgLights):
+            if light.get("category") == want:
+                self.dbgSel = i
+                return
+
+    def _dbg_nudge(self, slot, kind, sign):
+        if not self.dbgVals:
+            return
+        step = (DebugCoarseStep if self.dbgCoarse else DebugFineStep)[kind]
+        v = self.dbgVals[self.dbgSel]
+        v[slot] += sign * step
+        if kind in ("rgb", "alpha"):
+            v[slot] = max(0.0, min(1.0, v[slot]))
+        elif kind == "cone":
+            # cone is cos(half-spread): outside [-1, 1] it is not an angle at all.
+            v[slot] = max(-1.0, min(1.0, v[slot]))
+        elif kind == "size":
+            v[slot] = max(0.0, v[slot])
+        elif kind == "pos":
+            # X-Plane clamps outside the ∓DebugPosRange keyframes, so a larger value
+            # would move nothing while the window claimed it had.
+            v[slot] = max(-DebugPosRange, min(DebugPosRange, v[slot]))
+
+    def _dbg_normalise_dir(self):
+        """Scale the selected light's dir vector to unit length, leaving its aim alone.
+
+        Several of the transcribed vectors are far off unit (`0 -0.15 -0.1` has length
+        0.18, `0 -1.5 0.4` has 1.55) and `cone` is compared against a DOT PRODUCT with
+        that vector. If X-Plane does not normalise internally, a short vector shrinks
+        every dot product below the threshold and the cone control appears dead — a
+        symptom already reported on the main panel floods. One click tests it."""
+        if not self.dbgVals:
+            return
+        v = self.dbgVals[self.dbgSel]
+        length = math.sqrt(v[5] * v[5] + v[6] * v[6] + v[7] * v[7])
+        if length < 1e-9:
+            self.dbgNote = "dir is zero (omni) — nothing to normalise"
+            return
+        for i in (5, 6, 7):
+            v[i] /= length
+        self.dbgNote = "normalised dir (was length %.3f)" % length
+
+    def _dbg_cycle_orient(self, which, delta):
+        """Step the orientation hypothesis. `which` is "pos", "dir" or "both".
+
+        Logged every time: the value of this control is being able to report WHICH of
+        the 48 looked right, and that moment is not one for reading a window."""
+        n = len(DebugOrientations)
+        # Link is meaningless without the position wrappers: a "Dir >" click would
+        # silently advance a position hypothesis that nothing can apply.
+        link = self.dbgOrientLink and self.dbgPosTunable
+        if self.dbgPosTunable and (which in ("pos", "both") or link):
+            self.dbgOrientPos = (self.dbgOrientPos + delta) % n
+        if which in ("dir", "both") or link:
+            self.dbgOrientDir = (self.dbgOrientDir + delta) % n
+        self.dbgNote = "orient pos %s / dir %s" % (self._dbg_orient_text("pos"),
+                                                   self._dbg_orient_text("dir"))
+        _log("live light debug: %s" % self.dbgNote)
+
+    def _dbg_orient_text(self, which):
+        idx = self.dbgOrientPos if which == "pos" else self.dbgOrientDir
+        return "%d/%d %s" % (idx + 1, len(DebugOrientations),
+                             DebugOrientations[idx][2])
+
+    def _dbg_reset_orient(self):
+        self.dbgOrientPos = self.dbgOrientDir = 0
+        self.dbgNote = "orientation back to identity (X Y Z)"
+
+    def _dbg_toggle_compare(self):
+        self.dbgCompare = 0 if self.dbgCompare else 1
+        self.dbgNote = ("showing ORIGINAL light lines (tuner has no effect)"
+                        if not self.dbgCompare else "showing tunable debug lights")
+        _log("live light debug: %s" % self.dbgNote)
+
+    def _dbg_revert(self, everything=False):
+        if not self.dbgVals:
+            return
+        targets = range(len(self.dbgVals)) if everything else (self.dbgSel,)
+        for i in targets:
+            self.dbgVals[i] = list(self.dbgBase[i])
+        self.dbgNote = "reverted all" if everything else "reverted"
+
+    def _dbg_log_dsl(self):
+        """Dump the selected light in .phdsl shape — the deliverable of a session.
+
+        Split into the two files it belongs to, because color and geometry live apart
+        in this DSL: a palette entry carries the rgb, the light type or fixture carries
+        aim/cone/size. Pasting rgb into a light type would hard-code a color that is
+        supposed to change with the profile."""
+        if not self.dbgLights:
+            return
+        light = self.dbgLights[self.dbgSel]
+        v = self.dbgVals[self.dbgSel]
+        fmt = self._fmt_num
+        _log("---- DSL for %s (light %d of %d) ----"
+             % (light.get("name"), self.dbgSel + 1, len(self.dbgLights)))
+        _log("  fixture %s, category %s, %s[%s]%s"
+             % (light.get("fixture"), light.get("category"), light.get("source"),
+                light.get("index"),
+                ", mount %s" % light["mount"] if light.get("mount") else ""))
+        pos = self._dbg_abs_pos(self.dbgSel)
+        _log("  # lights.layout.phdsl — position is ABSOLUTE here (baked + your offset):")
+        _log("  %s { pos: %s %s %s;  dir: %s %s %s; }"
+             % (light.get("name"), fmt(pos[0]), fmt(pos[1]), fmt(pos[2]),
+                fmt(v[5]), fmt(v[6]), fmt(v[7])))
+        if light.get("mount"):
+            _log("    ^ MOUNT-LOCAL: this light rides the %s transform stack, so that "
+                 "pos is relative to it, exactly as the .phdsl fixture writes it."
+                 % light["mount"])
+        _log("  # lights.style.phdsl — the light TYPE carries these:")
+        _log("  size: %s;  cone: %s;" % (fmt(v[4]), fmt(v[8])))
+        _log("  # lights.style.phdsl — color belongs to a PALETTE entry, not the light:")
+        _log("  <color-name>: %s %s %s;   (alpha %s is the tuner's own multiplier and "
+             "has no .phdsl equivalent — it is the rheostat in the sim)"
+             % (fmt(v[0]), fmt(v[1]), fmt(v[2]), fmt(v[3])))
+        _log("  offset applied was %s %s %s from baked %s"
+             % (fmt(v[9]), fmt(v[10]), fmt(v[11]),
+                " ".join(fmt(x) for x in light.get("pos", []))))
+        # Always logged, even at the identity: a number copied out of a session with an
+        # orientation applied means something different, and the numbers do not say so.
+        _log("  orientation  pos %s   dir %s"
+             % (self._dbg_orient_text("pos"), self._dbg_orient_text("dir")))
+        _log("---------------------------------------")
+
+    def _dbg_abs_pos(self, n):
+        """Where light `n` actually ends up — what its `pos:` should become.
+
+        Goes through _dbg_pos_offset rather than adding the manual nudge directly, so
+        the number shown includes any orientation correction and its clamping."""
+        light = self.dbgLights[n]
+        baked = (list(light.get("pos", [0, 0, 0])) + [0.0, 0.0, 0.0])[:3]
+        off = self._dbg_pos_offset(n)
+        return [baked[i] + off[i] for i in range(DebugPosCount)]
+
+    def DbgDraw(self, windowID, refCon):
+        try:
+            l, t, r, b = xp.getWindowGeometry(windowID)
+            mx, my = xp.getMouseLocationGlobal()
+            fh = _font_height()
+            lineH, btnH = fh + 8, fh + 10
+            self.dbgHits = []
+            light = self.dbgLights[self.dbgSel] if self.dbgLights else None
+
+            y = t - UI_TOP_INSET
+            if light:
+                title = "%s   (%d of %d)" % (light.get("name"), self.dbgSel + 1,
+                                             len(self.dbgLights))
+            else:
+                title = "no debug lights loaded"
+            _draw_text(COL_BRIGHT, l + UI_PAD, y, title)
+            y -= lineH
+            if light:
+                sub = "%s / %s / %s[%s]%s" % (
+                    light.get("fixture"), light.get("category"), light.get("source"),
+                    light.get("index"),
+                    "  mount %s" % light["mount"] if light.get("mount") else "")
+            else:
+                sub = self.dbgNote
+            _draw_text(COL_DIM, l + UI_PAD, y, sub)
+            y -= lineH + UI_GAP
+
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
+                ("< Prev", lambda: self._dbg_select(-1)),
+                ("Next >", lambda: self._dbg_select(+1)),
+                ("<< Cat", lambda: self._dbg_select_category(-1)),
+                ("Cat >>", lambda: self._dbg_select_category(+1)),
+            ])
+            y -= btnH + UI_GAP
+
+            # The identification row — the reason this window exists.
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
+                ("Isolate", lambda: setattr(self, "dbgIsolate", not self.dbgIsolate),
+                 self.dbgIsolate),
+                ("Blink", lambda: setattr(self, "dbgBlink", not self.dbgBlink),
+                 self.dbgBlink),
+                ("Mark", lambda: setattr(self, "dbgMark", not self.dbgMark),
+                 self.dbgMark),
+                ("Fine", lambda: setattr(self, "dbgCoarse", False), not self.dbgCoarse),
+                ("Coarse", lambda: setattr(self, "dbgCoarse", True), self.dbgCoarse),
+            ])
+            y -= btnH + UI_GAP * 2
+
+            if light:
+                vals = self.dbgVals[self.dbgSel]
+                base = self.dbgBase[self.dbgSel]
+                for label, slot, kind in self._dbg_slots():
+                    _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, label)
+                    changed = abs(vals[slot] - base[slot]) > 1e-9
+                    _draw_text(COL_ACTIVE if changed else COL_BRIGHT,
+                               l + UI_PAD + 52, y - btnH + 4, self._fmt_num(vals[slot]))
+                    self._ui_button_row(
+                        l + UI_PAD + 120, y - btnH, y, mx, my, self.dbgHits,
+                        [("-", (lambda s=slot, k=kind: self._dbg_nudge(s, k, -1))),
+                         ("+", (lambda s=slot, k=kind: self._dbg_nudge(s, k, +1)))],
+                        minWidth=34)
+                    if kind == "cone":
+                        # cone runs BACKWARDS (bigger = narrower), so show the angle.
+                        c = max(-1.0, min(1.0, vals[slot]))
+                        _draw_text(COL_DIM, l + UI_PAD + 210, y - btnH + 4,
+                                   "= %.0f deg half-spread" % math.degrees(math.acos(c)))
+                    elif kind == "pos":
+                        # Offsets; show the absolute coordinate they produce, which is
+                        # the number that goes into the .phdsl.
+                        axis = slot - DebugPosSlot
+                        _draw_text(COL_DIM, l + UI_PAD + 210, y - btnH + 4,
+                                   "-> %s" % self._fmt_num(
+                                       self._dbg_abs_pos(self.dbgSel)[axis]))
+                    y -= btnH + 4
+                y -= UI_GAP
+
+            # A/B row, labelled with what is SHOWING rather than what clicking does:
+            # while "Original" is up the tuner controls nothing, which has to be obvious.
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
+                ("Debug lights", self._dbg_toggle_compare, bool(self.dbgCompare)),
+                ("Original lines", self._dbg_toggle_compare, not self.dbgCompare),
+                ("Norm dir", self._dbg_normalise_dir),
+            ])
+            y -= btnH + UI_GAP
+
+            # ORIENTATION SEARCH, applied to every light at once; the readout below the
+            # buttons is the answer to report. The POSITION half needs the wrappers —
+            # without them `permute(pos) - pos` has nothing to drive — while aim is
+            # permutable either way, going through the light's own dataref.
+            orientRow = []
+            if self.dbgPosTunable:
+                orientRow += [
+                    ("Orient <", lambda: self._dbg_cycle_orient("pos", -1)),
+                    ("Orient >", lambda: self._dbg_cycle_orient("pos", +1)),
+                ]
+            orientRow += [
+                ("Dir <", lambda: self._dbg_cycle_orient("dir", -1)),
+                ("Dir >", lambda: self._dbg_cycle_orient("dir", +1)),
+            ]
+            if self.dbgPosTunable:
+                orientRow.append(("Link", lambda: setattr(self, "dbgOrientLink",
+                                                          not self.dbgOrientLink),
+                                  self.dbgOrientLink))
+            orientRow.append(("Reset", self._dbg_reset_orient))
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits,
+                                orientRow, minWidth=52)
+            y -= btnH + 4
+            if self.dbgPosTunable:
+                moved = self.dbgOrientPos or self.dbgOrientDir
+                text = "pos %s     dir %s" % (self._dbg_orient_text("pos"),
+                                              self._dbg_orient_text("dir"))
+            else:
+                moved = self.dbgOrientDir
+                text = "dir %s        (position tuning off — build with --debug-pos)" \
+                    % self._dbg_orient_text("dir")
+            _draw_text(COL_ACTIVE if moved else COL_DIM, l + UI_PAD, y - btnH + 4, text)
+            y -= btnH + UI_GAP
+
+            self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
+                ("Log DSL", self._dbg_log_dsl),
+                ("Revert", self._dbg_revert),
+                ("Revert All", lambda: self._dbg_revert(True)),
+                ("Rescan", self._dbg_rescan),
+            ])
+        except Exception:
+            _log("DbgDraw error:\n" + traceback.format_exc())
+
+    def DbgClick(self, windowID, x, y, inMouse, refCon):
+        return self._ui_click(self.dbgHits, x, y, inMouse)
+
+    def ShowDebugWindow(self):
+        if not self.dbgLights:
+            self.dbgLoadTried = True
+            self._dbg_load()
+        if self.dbgWin is not None:
+            xp.setWindowIsVisible(self.dbgWin, 1)
+            xp.bringWindowToFront(self.dbgWin)
+            return
+        fh = _font_height()
+        height = (UI_TOP_INSET + 2 * (fh + 8) + UI_GAP
+                  + 2 * (fh + 10) + UI_GAP * 3
+                  + len(self._dbg_slots()) * (fh + 14)
+                  # A/B row, orientation buttons, orientation readout, actions row
+                  + 4 * (fh + 10) + UI_GAP * 3 + UI_PAD * 3)
+        # Remember what the height was sized for: swapping between a --debug-pos build
+        # and a plain one changes the row count.
+        self.dbgWinSlots = len(self._dbg_slots())
+        self.dbgWin = self._create_window("Photon Dev - Live Light Debug",
+                                          460, height, self.DbgDraw, self.DbgClick)
+
     # ---------------------------------------------------------------- menu
     def CreateMenu(self):
         try:
@@ -1706,6 +2481,7 @@ class PythonInterface:
                 xp.appendMenuSeparator(self.menuID)
             xp.appendMenuItem(self.menuID, "Cinematic Camera...", "cine")
             xp.appendMenuItem(self.menuID, "Cockpit Light Tuner...", "tuner")
+            xp.appendMenuItem(self.menuID, "Live Light Debug...", "lightdebug")
             if hasattr(xp, "appendMenuSeparator"):
                 xp.appendMenuSeparator(self.menuID)
             xp.appendMenuItem(self.menuID, "Log Plugin List", "plugins")
@@ -1739,6 +2515,8 @@ class PythonInterface:
                 self.ShowCineWindow()
             elif itemRefCon == "tuner":
                 self.ShowTunerWindow()
+            elif itemRefCon == "lightdebug":
+                self.ShowDebugWindow()
             elif itemRefCon == "plugins":
                 self._log_plugin_list()
         except Exception:

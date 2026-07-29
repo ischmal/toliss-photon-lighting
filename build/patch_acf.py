@@ -3,13 +3,13 @@
 ToLiss Photon Lighting — .acf cockpit-spot patcher (interior mod).
 
 ToLiss defines three sim 3D cockpit spot lights in the aircraft's `.acf`. Their
-COLOUR lives there too, which means it can only be changed by editing the file —
+COLOR lives there too, which means it can only be changed by editing the file —
 it can't follow a runtime switch. So the interior install:
 
   1. writes Gus's geometry values (variant-independent, so no runtime state),
   2. DISABLES all three spots via `_spot_name_3d/{0,1,2} = none`, and
   3. re-adds them as OBJ lights in lights_inn.obj, where `ANIM_show` can switch
-     their colour like every other interior light.
+     their color like every other interior light.
 
 Full rationale: docs/interior_plan.md §3.4 / §3.5.
 

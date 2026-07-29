@@ -49,6 +49,15 @@ INTERIOR_OBJ = "lights_inn.obj"
 # rheostat indices, and Gus's mod does not cover it.
 INTERIOR_AIRFRAMES = ("a319", "a320", "a321")
 
+# Gus Rodrigues' Light Mod on the .org — a SEPARATE file entry per variant, so the
+# opt-in screen's "Open X-Plane.org page…" picks by airframe rather than reusing
+# XPLANE_ORG_URL (Photon's own page). Keys must cover INTERIOR_AIRFRAMES; no a339.
+INTERIOR_ORG_URL = {
+    "a319": "https://forums.x-plane.org/files/file/93336-a319-light-mod/",
+    "a320": "https://forums.x-plane.org/files/file/93337-a320-light-mod/",
+    "a321": "https://forums.x-plane.org/files/file/93338-a321-light-mod/",
+}
+
 # Gus's canonical texture set, installed into <aircraft>/objects/.
 # NINE of these replace a stock ToLiss file and are restored from backup on
 # uninstall. The TWO in INTERIOR_TEXTURES_ADDED have NO stock counterpart, so
