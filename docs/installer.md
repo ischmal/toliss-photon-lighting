@@ -162,7 +162,7 @@ path only). Full rationale and the index table: `docs/a339_plan.md` §4.
 ### Cockpit spots (`build/patch_acf.py`)
 
 Part of the **opt-in interior** install only. ToLiss defines three sim 3D cockpit spot
-lights in the aircraft's `.acf`, colour included — which means their colour can only be
+lights in the aircraft's `.acf`, color included — which means their color can only be
 changed by editing the file, so it can't follow a runtime switch. The patch writes Gus's
 geometry values, **disables all three** (`_spot_name_3d/{0,1,2} = none`, the A339's own
 idiom), and the interior OBJ re-adds them as `ANIM_show`-gated lights instead.

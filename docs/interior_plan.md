@@ -845,8 +845,9 @@ plan above:
   main thing you identify a light by.
 - **Position is tunable too**, by a second mechanism. `LIGHT_SPILL_CUSTOM` keeps x/y/z
   baked, but an OBJ8 `ANIM_trans` takes a dataref, so each light is wrapped in three of
-  them reading `ToLissPhoton/debug/pos[3n+axis]` as an offset in metres (∓2 m, clamped by
-  the keyframes). So the whole light is live and the older OBJ-rewriting Cockpit Light
+  them reading `ToLissPhoton/debug/pos[3n+axis]` as an offset in metres (∓12 m, clamped by
+  the keyframes; `--no-debug-pos` leaves them out). So the whole light is live and the
+  older OBJ-rewriting Cockpit Light
   Tuner is now only needed when you want the change *persisted into the installed OBJ*
   rather than logged for pasting into the `.phdsl`.
 - **The debug OBJ has no category gating at all**, so it is not installable and the

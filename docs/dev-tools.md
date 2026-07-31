@@ -76,8 +76,8 @@ All tunables (including the snapshot dataref list) are a block at the top of the
 everything is try/except-guarded and falls back to idle on error.
 
 Plugins ▸ **Photon Dev** is a **flat** menu (Quick Reload / Plain Reload / Release Camera ─
-Cinematic Camera… / Cockpit Light Tuner… ─ Log Plugin List). It must stay flat: the level-2
-submenu crash below binds this plugin, not the native `.xpl`.
+Cinematic Camera… / Cockpit Light Tuner… / Live Light Debug… ─ Log Plugin List). It must
+stay flat: the level-2 submenu crash below binds this plugin, not the native `.xpl`.
 
 ### The state machine
 
@@ -262,7 +262,7 @@ Two details that are load-bearing:
 Menu ▸ *Cockpit Light Tuner…* — find a cockpit light's position/aim/cone/size in-sim.
 
 **Why it edits the OBJ.** An OBJ light's geometry is baked and read once, at aircraft load;
-no dataref moves it afterwards. (Colour and brightness *can* be driven live — that is exactly
+no dataref moves it afterwards. (Color and brightness *can* be driven live — that is exactly
 what `LIGHT_SPILL_CUSTOM` + `ToLissPhoton/interior/spill/map` does for the map spot — but
 position, direction, size and cone cannot.) So edits are staged in memory, written into the
 installed `objects/lights_inn.obj` in one batch, and picked up by the quick reload, whose
@@ -276,16 +276,479 @@ Parsing notes (each of these was a bug the round-trip test caught):
 
 - A light is keyed by `(fixture, ordinal)` where the fixture comes from the generator's
   `# <Fixture> -> <Branch>` comment. **The ordinal resets on that comment, never on
-  `ANIM_begin`** — mounted fixtures (the map lamps) nest several `ANIM_begin` levels for
+  `ANIM_begin`** — mounted fixtures (the panel floods) nest several `ANIM_begin` levels for
   their `ckpt/lights/<n>` transform stack, so resetting there restarts the count mid-fixture.
 - **Each line's own leading whitespace is preserved.** Mounted lights are four tabs deep; a
   fixed indent silently reflows 30 lines.
 - `LIGHT_PARAM` and `LIGHT_SPILL_CUSTOM` share one editor: after each command's own prefix
   (a class name / nothing) the same twelve numbers line up, and only slot 6 differs in
   meaning (rheostat index vs. baked alpha). Nothing touches slot 6 or r/g/b, so applying an
-  edit to all three branches **cannot flatten the three colour variants into one**.
+  edit to all three branches **cannot flatten the three color variants into one**.
 - Writes go through temp + `os.replace`, matching `build_objs.atomic_write_bytes` — a reload
   must never race a half-written OBJ (that crashed the sim once; see the crash lessons).
+
+### Live light debug
+
+Menu ▸ *Live Light Debug…* — the other half of the tuner above. Where that one moves
+geometry by rewriting the OBJ and reloading, this drives **color, aim, cone, size and
+brightness live**, with no rebuild and no reload at all.
+
+```
+python build/build_objs.py build --target interior --debug --write
+python build/build_objs.py build --target screens  --debug --write   # display glow
+```
+
+That emits an OBJ in which **every** light is a `LIGHT_SPILL_CUSTOM` bound to
+`ToLissPhoton/debug/light/<n>`, plus a manifest naming each one. The dev plugin
+registers the dataref pool at `XPluginStart` (it must — an OBJ binds dataref *names* at
+load time, and one that doesn't exist yet reads 0 forever), reads the manifest when the
+aircraft loads, and feeds all nine params per light every frame.
+
+**Two targets are debuggable, and only one at a time.** Each writes its own manifest —
+`lights_inn.debug.json` (cockpit, 26 lights) and `lights_screens.debug.json` (screens,
+6) — but **both number their dataref slots from 0**, so having both installed would put
+two lights on every slot. The plugin drives the **most recently written** manifest, which
+is whatever you just built, and names it in the window (`screens: 6 lights`). With both
+present it logs which it picked and says to rebuild the other without `--debug`.
+
+**Brightness source.** Each manifest row carries a `source`, which is the knob the
+plugin multiplies the light's alpha by — `LIGHT_SPILL_CUSTOM` has no `INDEX` slot, so
+without it every debug light would ignore the very knob it is identified by:
+
+| `source` | Dataref | Used by |
+|---|---|---|
+| `panel` | `sim/cockpit2/electrical/panel_brightness_ratio[index]` | most cockpit lamps |
+| `inst` | `sim/cockpit2/electrical/instrument_brightness_ratio[index]` | the console strips |
+| `map` | `ckpt/lights/map` | the re-added map spot |
+| `du` | `AirbusFBW/DUBrightness[index]` | the six screen-glow lights |
+
+`du` is also the **test for whether the screen mapping is right**: dim one display and
+exactly one glow should follow it. If the wrong one moves, fix `kScreenDU` in
+`plugin.cpp` and the matching `index:` in the DSL together — a test fails if only one
+of the two moves. See `docs/screens_plan.md`.
+
+**What it is actually for is identification.** "Which of the ten panel flood lamps is
+scorching the glareshield?" is a question the geometry tuner answers in a dozen
+edit/reload cycles and this one answers in seconds:
+
+| Control | Does |
+|---|---|
+| **Isolate** | blacks out every light except the selected one |
+| **Blink** | square-wave flashes the selected one, everything else left lit |
+| **Mark** | paints the selected one magenta — nothing in a cockpit is magenta |
+| **`<< Cat` / `Cat >>`** | jump to the next *category*, i.e. the next menu row's lights |
+| **Debug lights / Original lines** | A/B against the untouched originals (see below) |
+| **Norm dir** | scale the selected light's `dir` to unit length, aim unchanged |
+| **Orient `<` / `>`**, **Dir `<` / `>`**, **Link**, **Reset** | cycle the axis-orientation hypothesis (see below) |
+| **Log DSL** | dump the current values to `XPPython3Log.txt`, split by which `.phdsl` file they belong in |
+
+**The A/B toggle is the one to reach for when the lights look wrong.** The debug OBJ
+emits *both* the untouched original light line and the tunable spill copy for every
+light, gated on `ToLissPhoton/debug/compare` (0 = original, 1 = debug). This exists
+because converting a light to `LIGHT_SPILL_CUSTOM` is not self-evidently a no-op:
+`airplane_panel_sp` is a **named** light whose `SPILL_SW` overload X-Plane resolves
+through its own handler, and whether that handler treats position, direction or a
+non-normalised `dir` differently from a raw custom spill is not documented anywhere
+checkable. So:
+
+- **Original looks right, Debug does not** → the conversion is at fault, and the tuned
+  numbers are not trustworthy until it is understood.
+- **Both look the same** → the conversion is sound and the authored `.phdsl` values are
+  what is wrong. Tune away.
+
+While *Original lines* is showing, the tuner controls nothing — that is expected, and the
+button that is lit tells you which you are looking at.
+
+**`Norm dir` tests a specific suspicion.** Several transcribed direction vectors are a
+long way from unit length — `int_panelflood`'s `0 -0.15 -0.1` is 0.18, `int_console`'s
+`0 -0.3 0` is 0.30 — and `cone` is compared against a *dot product* with that vector. If
+X-Plane does not normalise internally, a short vector drags every dot product toward the
+cone threshold, so **aim and spread interact**. Two standing in-sim reports fit that
+shape: cone edits to the left-most main panel flood doing nothing, and cone edits to the
+screen glow appearing to move the light. One click tests it.
+
+**Nothing normalises `dir:` automatically** — not the DSL, not the generator, not the
+plugin. `build` now *reports* every non-unit vector with its unit form ready to paste:
+
+```
+note: 6 light type(s) have a non-unit `dir:`. ...
+    int_panelflood   dir 0 -0.15 -0.1   |d| 0.180   unit: 0 -0.832 -0.555
+```
+
+Deliberately a warning rather than a fix. Most offenders are Gus's *measured* values, and
+silently rescaling the trusted baseline is exactly the kind of quiet rewrite this project
+guards against; normalising is a visible, reviewable `.phdsl` edit. Note that `Norm dir`
+in the window changes the light's aim by **nothing** — it only changes the length — so if
+the beam moves when you click it, the sim is not normalising and that is the answer.
+
+### Step size — one button per decade
+
+The `-`/`+` buttons on every row move by whatever the lit **Step** button says: `10`,
+`1`, `0.1`, `0.01` or `0.001`, in that row's own units. The label *is* the amount added.
+`10` exists for the angle rows — swinging an aim through a quadrant at 1° a click is 90
+clicks — and doubles as a coarse position jump inside the ±12 m span.
+
+This replaced a `Fine`/`Coarse` pair whose amount also varied per row *kind* (`cone` fine
+was 0.005, `size` coarse 0.25, and so on). Two hidden variables meant the distance a click
+moved something was never on screen — and "did that click do anything?" is the question
+this window exists to answer. One ladder serves every row because each value is either a
+0..1 fraction (rgb, alpha, cone) or metres (pos, size, dir), and 1 → 0.001 spans both.
+
+Nudges are **rounded to 6 dp** as they are applied: 0.1 added ten times is
+`0.9999999999999999` in IEEE754, and those digits would otherwise fill the window and get
+pasted into the `.phdsl` via "Log DSL". Per-row *clamping* is unchanged — rgb and alpha
+stay in 0..1, `cone` in −1..1, `size` non-negative, position within `DebugPosRange`.
+
+### Aim is edited as angles, not as a vector
+
+The rows are **Pitch**, **Yaw** and **Spread**, all in degrees. There is no `Dir X/Y/Z`
+and no `Cone`.
+
+Steering a light by its three direction components was reported in-sim as "very difficult
+to get things pointed correctly", and it has a second failure mode beyond awkwardness: a
+hand-edited vector's **length is not free**, because X-Plane compares `cone` against a dot
+product with it (below). Angles cannot express a bad length at all.
+
+- `Pitch` — degrees above horizontal; clamped to ±90. Past the pole an aim would start
+  coming back down while yaw silently flipped 180°, which is unsteerable.
+- `Yaw` — aircraft heading: **0 is forward**, 90 right, 180 aft. Wraps, because −1 and
+  359 are the same heading. The window prints the direction in words next to the number
+  (`down`, `fwd-left`, `aft`) so the sign convention never has to be recalled.
+- `Spread` — the **half-angle**, the right way round: widening the beam raises this. Slot
+  8 still holds the cosine the light reads and the row shows it in brackets.
+
+`Aim` presets sit under the step row: `Fwd / Aft / Left / Right / Up / Down`, one click
+each, and they clear any leftover `Dir` orientation so the state is known.
+
+⚠ **`Spread` has been reported twice as having no visible effect** — see the note at the
+end of this section; it is an open bug, not a convention you are misreading.
+
+Internally slots 5..7 remain dx/dy/dz and are **derived** from pitch/yaw, one direction
+of flow only. So every vector this window can emit is unit length — which is why the old
+`Norm dir` button is gone: it can no longer apply.
+
+"Log DSL" prints `aim:`/`spread:` ready to paste, with the vector form beside it as a
+comment. Both are first-class in the DSL — see `docs/dsl.md`.
+
+### Position markers — seeing where a light actually is
+
+A spill light is **invisible in mid-air**. You see the pool it casts, never the source,
+and on a close-range light the bright part of that pool is nowhere near the origin — so
+placing one by eye has been guesswork on this project, and the same complaint has now
+been raised against the cockpit spots and the screen glow.
+
+So a debug build also emits, per light, a marker in three parts:
+
+| Part | Colour | What it is |
+|---|---|---|
+| origin | green | where the light actually sits |
+| axis | amber | 5 dots out to `reach`, along the aim |
+| cone rim | blue | 4 dots on the beam edge at that same distance |
+
+**The rim is what makes aim judgeable.** The first version drew only a 20 cm axis line,
+and that was reported as reflecting position well but "not fully oriented with the spill
+light" — which is what a short line looks like beside a pool of light a metre across. The
+ring draws the beam the `Spread` row claims you asked for, so "is the lit patch inside the
+ring?" becomes a question with a yes/no answer. Its radius is `tan(half-spread) × reach`,
+and the last axis dot lands exactly on the ring's plane.
+
+`reach` is adjustable for the same reason: the right arrow length depends entirely on how
+far the light throws.
+
+The `Marker` row switches it:
+
+| | |
+|---|---|
+| `Off` | default — a debug build looks like the cockpit until you ask it not to |
+| `This` | the selected light only; follows `Next >` |
+| `All` | every light at once — good for "is the whole set in the right plane?" |
+| `size - / +` | the sprite's size, stepped by the current **Step** |
+| `reach - / +` | how far out the arrow and the cone ring are drawn |
+
+`size` and `reach` are on that row and not elsewhere on purpose: a marker too small to
+see, one drawn too short to read, and one that is not being drawn at all look exactly
+alike, so the fixes have to sit next to the switch.
+
+Things that are load-bearing:
+
+- **One dataref gates every light's markers**, by value: `0` = off, `n+1` = light *n*,
+  `-1` = all. Each light's block hides on `[-0.5, n+0.5]` and `[n+1.5, big]` — the same
+  paired-`ANIM_hide` encoding the DSL uses for a ternary category — so `-1` escapes both
+  ranges and shows everything. That is what avoids 64 more registrations.
+- **The arrow is always `reach` long, whatever the vector's length.** It answers "which
+  way", and a light authored with a short `dir` would otherwise draw a stub next to its
+  neighbours', which the eye reads as a *weaker light* rather than a shorter vector.
+- **⚠ The arrow shows the aim you ASKED FOR, not the one the orientation cycler
+  produces.** It reads slots 5..7 directly instead of going through `_dbg_params`. This
+  is deliberate and it is the reverse of the first version: `_dbg_params` is where the
+  cycler is applied, so a marker that read through it moved the arrow and the light
+  *together* — which made the only instrument capable of exposing an axis mismatch
+  incapable of exposing one. The marker is the **reference**; the light is the sim's
+  answer. See "Finding an axis mismatch" below.
+- **The perpendicular basis for the ring seeds off the axis the aim leans on least**, so
+  the cross product cannot collapse. A fixed seed would degenerate for any light aimed
+  along it — and straight down and straight aft are the two commonest cockpit aims.
+- **The arrow goes through `_dbg_params`**, so it carries the orientation hypothesis
+  exactly as the light does. A marker still pointing the authored way mid-sweep would look
+  like evidence for whichever answer you were hoping for.
+- **The dots are outside the A/B compare gate.** "Where is this light" is a question you
+  have just as much on the Original side.
+- **No `ANIM_rotate` in the OBJ.** Rotation is about the *object* origin, so aiming a
+  cockpit light's arrow that way would swing it through a five-metre arc unless a static
+  translate went first — and the rig would then duplicate maths the plugin already does.
+  Every dot rides three dataref-driven `ANIM_trans` instead, exactly like the position
+  wrappers, and the plugin recomputes the offsets each frame.
+- **The primitive is `LIGHT_CUSTOM` with a `none`-style param dataref.** It is the only
+  OBJ8 light that is a plain textured billboard with author-controlled colour and size and
+  no dependency on sim state — a named `airplane_*_bb` is gated on that light being
+  switched on, which in a parked cockpit it is not. The accessor writes **all nine**
+  params rather than modifying in place, because whether X-Plane pre-fills a custom
+  light's buffer is still an open question here and a black marker would be read as the
+  feature not working.
+
+### Position tuning is on by default — `--no-debug-pos` opts out
+
+A `--debug` build wraps every light in three `ANIM_trans` blocks, so X/Y/Z are live knobs
+like everything else.
+
+This was briefly the other way round. On 2026-07-28 the debug lights turned up mis-placed
+in-sim and the wrappers — the one part of a debug build that changes how a light *renders*
+rather than merely where its parameters come from — were the obvious suspect, so they went
+behind a flag. That was a red herring: the cause was elsewhere (2026-07-29), and the
+default is back.
+
+```bash
+python build/build_objs.py build --target interior --debug --write                 # X/Y/Z live
+python build/build_objs.py build --target interior --debug --no-debug-pos --write  # without
+```
+
+**Keep the opt-out working.** It is how the wrappers get ruled out the next time position
+looks wrong, and it drives real plumbing: the manifest records which you built as
+`pos_tunable`, and the dev window **hides every position control** when it is false — the
+X/Y/Z rows and the position half of the orientation cycler both disappear, and the readout
+says why. A knob that moves nothing is worse than no knob: in a cockpit it reads as the
+light refusing to move, not as the feature being switched off. The OBJ header states which
+half it carries, for the same reason.
+
+Aim stays tunable either way — `dx/dy/dz` go through the light's own dataref and never
+needed `ANIM_trans`.
+
+Swapping between the two builds changes the window's row count; it rebuilds itself on
+`Rescan` and on aircraft reload, since its resizing limits are fixed at creation.
+
+### The slot probe — measuring what the nine dataref floats actually mean
+
+**ANSWERED 2026-07-30.** The dataref's order is not the OBJ line's:
+
+```
+OBJ8 line:   LIGHT_SPILL_CUSTOM x y z  r g b a  size  dx dy dz  semi  <dataref>
+dataref:                              r g b a  size  SEMI  dx dy dz
+```
+
+The cone comes **first** in the trailing group of four. Probing our slots 5/6/7/8 one at a
+time gave **omni / right / up / aft** — `SEMI / DX / DY / DZ`. Fixed by one translation at
+the wire (`DebugDataRefOrder`); `dbgVals` keeps the readable order everywhere else.
+
+That single rotation produced every symptom that had accumulated: `aim Fwd` pointing
+straight down (our `dz` → `DY`), pitch swinging the light horizontally (our `dy` → `DX`),
+the cone moving the aim (our `cone` → `DZ`), a direction changing the beam width (our `dx`
+→ `SEMI`), and `spread` appearing inert (`SEMI` was never being fed the cone). It is also
+why the **48-permutation axis hunt could not have found it** — a rotation of four slots is
+not an axis permutation — and why the A/B verdict was "Original right, Debug wrong": only
+dataref-driven aim was affected.
+
+Three successive explanations were offered before anyone measured, and **all three were
+wrong**: an axis permutation, non-unit `dir` lengths, and "the array is read one slot late"
+(which predicted `SIZE` = our `dx` = 0, an invisible light, contradicted by the light being
+visible). The probe below exists so that does not happen again.
+
+**`Probe 0`…`8`** sends `DebugProbeBaseline` with that one slot set to 1:
+
+```
+r=1 g=1 b=1 a=1 size=4 dx=0 dy=0 dz=0 cone=0      <- baseline
+                        ^ slot 5..7 zero, so a probe of one is the ONLY direction present
+```
+
+Nine clicks map our array onto X-Plane's parameters with no inference. Read it against the
+expectation printed on the row (`slot 5 = 1 -> expect: aim RIGHT (+x)`); markers switch on
+with the probe, so the arrow is the reference and the light is the answer.
+
+Load-bearing choices:
+
+- **The probe bypasses everything else** — orientation, rheostat, `Isolate`, `Blink`,
+  `Mark`. Each would be a second variable in an experiment designed to have one.
+- **Every other light goes dark.** Two lit lights and you cannot say which one moved.
+- **`dir 0 0 0` and `cone 0` in the baseline.** Omnidirectional means a probe of 5/6/7
+  introduces the only direction present; `cone 0` means that if slot 8 turns out to be a
+  direction component after all, it contributes nothing to the other probes.
+- **`size 4` m.** Big enough that the pool lands on real geometry — a cone restriction is
+  nearly invisible when every lit surface is two centimetres from the light, which is
+  probably part of why cone edits read as inert.
+
+Now that the layout is known, the probe doubles as its **regression test**: with
+`DebugDataRefOrder` right, all nine probes match the expectation printed on the row. Slot 8
+is the discriminator — pre-fix it swung the light aft, post-fix it does nothing (the
+baseline's `dir 0 0 0` is omnidirectional, so there is no cone to narrow).
+
+**What did NOT need changing, and must not be "fixed":**
+
+- `build/build_objs.py` bakes the **OBJ literal order** (`dx dy dz semi`). Correct as is.
+- `plugin.cpp` writes **only alpha**, and alpha is index 3 in *both* orderings, so
+  `kSpillAlphaSlot = 3` is right and the shipping lights were never affected. A test pins
+  that invariant — if alpha ever moves, the map spot and screen glow go dark or
+  full-bright.
+
+⚠ **Anything tuned through the debug tool before 2026-07-30 is not trustworthy.** Every
+`--debug` light was aimed by a rotated vector carrying its cone value in the `DZ` slot, so
+the interior numbers found that way need redoing.
+
+### Finding an axis mismatch
+
+**Reported in-sim 2026-07-30, and open.** On the screen-glow lights, with `Yaw 180`:
+editing **Pitch** to +22° swung the *light* 22° to the **right**; −22° swung it left. The
+markers moved up and down, as asked. So the aim the DSL states and the aim X-Plane renders
+disagree about which component is which.
+
+The arithmetic pins the candidate. At yaw 180 the authored vector is
+`(0, sin p, cos p)` — pitch only ever touches **y**. A light that moves horizontally on a
+y-only change is reading our y as its x, i.e. the mapping is `Y X Z` (or `Y -X Z`; the
+sign on the other axis is not constrained by one observation).
+
+**Use the `Aim` presets, not a sweep.** `Fwd / Aft / Left / Right / Up / Down` each put
+the selected light on one exact axis and **clear any leftover `Dir` orientation**, so one
+click fully determines what was asked for. Sweeping an angle and watching a pool travel
+through a cockpit full of surfaces is not a clean read — an interpolated arc can be
+interpreted several ways, which is how "pitching up makes it point right" ended up hard to
+act on.
+
+The method:
+
+1. `Isolate` on, `Marker: This`, and crank `size` up with the `10` step so the pool falls
+   on distant geometry instead of the panel two centimetres away.
+2. Click **`Up`**. Does the light go up? Then `Left`, then `Aft`. Three clicks name the
+   mapping outright: "Up sends it right" means our y is the sim's x.
+3. If it is wrong, cycle **`Dir >`** (turn `Link` **off** first, so position stays put)
+   until the pool lands inside the blue cone ring. **The arrow does not move**; only the
+   light does.
+4. The readout under the buttons and every `Log DSL` dump name the winning mapping. Report
+   it — it then gets baked into the aim conversion as a documented correction rather than
+   left as a live control.
+
+Predicted from the 2026-07-30 report: `Y X Z` (index 16), possibly `Y -X Z` (18). One
+observation does not fix the sign on the unobserved axis, which is what step 2 settles.
+
+`Log DSL` also prints the exact nine floats X-Plane reads for that light, labelled. That
+is what separates "our maths is wrong" from "the sim disagrees about what slot 5 means" —
+the two are indistinguishable from inside the cockpit.
+
+⚠ **Do not assume this is the same bug as the panel floods'** (`CLAUDE.md` thread 1b).
+That one has a competing explanation in the `dir` lengths; this one is on lights whose
+`dir` is unit by construction.
+
+### The orientation cycler
+
+*(Its position half needs the wrappers, i.e. anything but a `--no-debug-pos` build.)*
+
+Reported in-sim 2026-07-28: on **Original** the lights are right, on **Debug** they sit in
+the wrong places and face the wrong way — yet they are still in *distinct* places and they
+still respond to the position knobs.
+
+That pattern rules out most explanations. The baked x/y/z are byte-identical between the
+two lines (a test asserts it) and the offsets start at zero, so nothing in the tool is
+moving them; the geometry pipeline plainly works. What is left is that the two light forms
+disagree about **which axis is which**.
+
+There are 48 signed axis permutations and no way to reason out the right one from outside
+the sim, so the tool enumerates all 48 and puts them on a button. **Click until the cockpit
+snaps into place; the label under the buttons is then the answer**, and it also goes to
+`XPPython3Log.txt` on every click and in every "Log DSL" dump.
+
+- The correction applied to position is `permute(pos) − pos`, i.e. the light is physically
+  *relocated* from where the OBJ baked it to where the hypothesis says it belongs. It has
+  to be the difference: `permute(pos)` alone would land the light at double the coordinate
+  and make every hypothesis look wrong.
+- **Index 0 is the identity**, so a fresh session behaves exactly as it did before this
+  existed, and nothing moves until you cycle.
+- It is **global, not per-light** — one click re-tests the whole cockpit, because "the
+  cockpit suddenly looks right" is the signal you are watching for.
+- **Manual X/Y/Z nudges are never permuted.** They stay in plain OBJ axes and add on top,
+  so "X +" always moves along the axis the readout calls X even mid-search — otherwise the
+  two effects cannot be told apart.
+- **Link** (default on) steps position and direction together. A genuine coordinate-space
+  mismatch would hit both the same way, so that 48-click sweep is the one to run first;
+  unlink for the 48×48 case only if the linked sweep finds nothing.
+- This is why `DebugPosRange` is **12 m** and not the couple of metres tuning needs: a
+  permutation of a cockpit coordinate is metres, and X-Plane clamps outside the outermost
+  `ANIM_trans` keyframe. Too narrow a span would silently truncate exactly the hypotheses
+  worth testing and show a *correct* permutation as a wrong one — the one failure this
+  search cannot survive. A test checks the span covers every permutation of a realistic
+  cockpit coordinate.
+
+**Result so far (2026-07-28).** `pos 1` with `dir 9` makes the **middle two** main-panel
+flood lamps look right — and several other directions do the same — but the **outer**
+floods stay wrong under every combination. A single rigid axis swap cannot do that: it
+would be right for all of them or none. That points at the transform *stacking* with
+something else per-fixture (the mount rigging is the obvious suspect) rather than at a
+global coordinate-space mismatch, which is a different investigation.
+
+Things worth knowing before using it:
+
+- **Everything is editable** — color, alpha, size, aim, cone, and (unless you built
+  `--no-debug-pos`) x/y/z. Position takes a different route: `LIGHT_SPILL_CUSTOM` keeps x/y/z
+  baked in the OBJ and passes only the other nine params through its dataref, but an OBJ8
+  `ANIM_trans` takes a dataref of its own, so the debug build wraps every light in three
+  of them (one per axis) reading `ToLissPhoton/debug/pos[3n+axis]`. Keyframes span
+  ∓12 m keyed on the same values, so the dataref reads directly as **metres of offset**
+  and X-Plane's keyframe clamping bounds it. (The span is set by the orientation cycler's
+  needs, not by tuning's — see above. It costs no precision.)
+  - The X/Y/Z rows are therefore **offsets**, not coordinates. The window prints the
+    resulting absolute position beside each, and "Log DSL" emits the absolute `pos:`.
+  - For a mounted lamp the offset applies *inside* ToLiss's `ckpt/lights/<n>` stack, so
+    it nudges the light relative to where the animation puts it — which is the frame the
+    `.phdsl` fixture writes in anyway.
+  - `DebugPosRange` (plugin) and `DEBUG_POS_RANGE` (generator) are the same keyframe span
+    and must not drift, or every position edit is silently rescaled. A test pins them.
+- **A debug OBJ has no category gating at all**, so the Cockpit profile menu does nothing
+  while one is installed — which is indistinguishable from the menu being broken. The
+  generated file carries a `DEBUG LIGHT BUILD — NOT INSTALLABLE` banner for exactly that
+  reason. Put the real one back with a plain
+  `build_objs.py build --target interior --write`.
+- **Brightness is applied by the plugin, not the sim.** `LIGHT_SPILL_CUSTOM` has no INDEX
+  slot, so the manifest records each light's rheostat (`panel[n]`, `inst[n]`, or
+  `ckpt/lights/map`) and the plugin multiplies it into alpha. Without that every debug
+  light would sit at full brightness and Isolate would be the only usable control.
+- **`cone` runs backwards** — it is cos(half-spread), so a *bigger* number is a
+  *narrower* beam. The window prints the angle beside the value so you don't have to hold
+  that in your head, and the `Spread` row edits the angle directly.
+- **⚠ OPEN: `Spread` appears to do nothing.** Reported on the main panel floods
+  (2026-07-28) and again on the screen glow (2026-07-30). The `cone/|dir|` explanation
+  offered in between is **doubtful**: it predicted that normalising `dir` would restore
+  control, and the screens' `dir` is unit by construction yet their spread is still inert.
+  What has been ruled out: the accessor's `count < 0` handling (correct — it would
+  otherwise silently drop slot 8, which is exactly this symptom), the slot layout
+  (`LIGHT_SPILL_CUSTOM`'s 9 floats put `semi` at index 8, the same position
+  `airplane_panel_sp` puts `WIDTH`), and an attachment-row rotation (all
+  `_v10_att_{psi,the,phi}_ref` are 0).
+  Still to try, cheapest first:
+  1. Sweep `Spread` 1° → 89° with the `10` step — nine clicks. If *nothing* changes across
+     the entire range, slot 8 is not being read at all, which is a different bug from a
+     subtle one. Crank `size` up first: a cone restriction is nearly invisible when every
+     lit surface is 2 cm from the light.
+  2. Check the A/B row. On **Original lines** you are looking at a light whose cone is
+     baked and untunable — while the markers respond regardless, because they sit outside
+     the compare gate. That alone produces "indicators move, light does not".
+  3. `Log DSL` prints the exact nine floats X-Plane reads, labelled. Confirm slot 8 is
+     carrying what the row claims.
+- **`DebugMaxLights` in the dev plugin and `DEBUG_MAX_LIGHTS` in `build_objs.py` size the
+  same pool** and must not drift; a light past the end of the pool binds to a dataref that
+  was never registered and draws black. A test pins them together.
+- **The manifest is read on first ACCESS, not on window-open.** Accessors are registered
+  at `XPluginStart`, when no aircraft exists and so no manifest can be read; the window
+  might never be opened at all. Loading lazily from the first accessor call is what
+  guarantees the read happens after the OBJ has loaded and before anything draws.
+  Window-open-only left every light reading zeros — a cockpit of black lights that looked
+  exactly like the tool being broken. `MSG_PLANE_LOADED` re-reads on top of that, since a
+  reload can swap the OBJ underneath.
 
 ---
 
@@ -295,7 +758,34 @@ These apply to the dev plugin only — the shipping runtime is C++ (see
 `src/native/README.md`). Kept because they were verified the hard way.
 
 - `xp.registerDataAccessor(name, readInt=, writeInt=, readFloat=, writeFloat=)` → accessor;
-  `xp.unregisterDataAccessor(a)` at `XPluginStop`.
+  `xp.unregisterDataAccessor(a)` at `XPluginStop`. Array datarefs take
+  `readFloatArray=cb` with `cb(refCon, values, offset, count)`.
+
+  **Three conventions here that all fail silently. All three were shipped wrong once**
+  (2026-07-28) and the only symptom was "the lights just sit there, and no dataref shows
+  up in DataRefTool":
+
+  - **The keyword is `readRefCon` / `writeRefCon`, never `refCon`.** There are two, one
+    per direction. Passing `refCon=` raises `TypeError` — so *nothing registers at all*.
+  - **`values` is an EMPTY list you `.extend()`**, not a pre-sized buffer you index.
+    `values[i] = x` raises `IndexError`; a try/except around the callback turns that into
+    a light that draws nothing, forever.
+  - **`count == -1` means "all elements"**, not "none". `for i in range(count)` quietly
+    does nothing.
+
+  Plus `values is None` is X-Plane asking for the array *size* — return the element count.
+  `XPPython3/utils/datarefs.py` in the install is the reference implementation; read it
+  rather than guessing. `tests/test_dev_light_debug.py` pins all of the above against a
+  stub `xp`, which is the only way to catch them outside a running sim.
+- **A custom dataref is not discoverable.** DataRefTool and DataRefEditor list X-Plane's
+  own table plus whatever plugins explicitly announce, so an unannounced accessor works
+  perfectly and appears nowhere — which reads as "it was never created". Announce with
+  `xp.sendMessageToPlugin(pid, 0x01000000, name)` to
+  `com.leecbaker.datareftool` and `xplanesdk.examples.DataRefEditor`.
+- **Register accessors in `XPluginStart`, not `XPluginEnable`.** An OBJ resolves dataref
+  names when the *aircraft* loads; a name registered later is bound to nothing for that
+  aircraft's whole life and reads 0. Same rule the shipping `.xpl` follows, and the same
+  failure (a light that silently never lights).
 - Flight loops: `xp.createFlightLoop(callback, phase, refCon)` → loopID;
   `xp.scheduleFlightLoop(loopID, interval, relativeToNow)` (interval `-1.0` = every frame);
   `xp.destroyFlightLoop(loopID)`. Phase `FlightLoop_Phase_AfterFlightModel` (getattr fallback

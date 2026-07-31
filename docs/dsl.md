@@ -144,6 +144,79 @@ Light-type properties: `class` (required for anything a fixture references),
 condition blocks. The bb/sp palette swatch is picked automatically from the
 `class` suffix (`*_bb` → bb, else sp).
 
+#### `aim:` and `spread:` — angles instead of a vector and a cosine
+
+Two properties are **sugar, resolved at load**, before the Emitter sees anything:
+
+| Write | Instead of | Meaning |
+|---|---|---|
+| `aim: <pitch> <yaw>;` | `dir: <x> <y> <z>;` | degrees |
+| `spread: <degrees>;` | `cone: <cosine>;` | half-angle |
+
+```
+light screen_glow {
+  spread: 26;      // == cone: 0.899
+  aim: 0 180;      // == dir: 0 0 1  (straight aft)
+}
+```
+
+**Convention**, in OBJ axes (+X right, +Y up, +Z aft):
+
+- `pitch` — degrees above horizontal. `0` level, `+90` straight up, `-90` straight down.
+- `yaw` — aircraft heading, clockwise seen from above. `0` **forward** (−Z), `90` right
+  (+X), `180` aft (+Z), `-90` left (−X).
+
+There is deliberately **no roll**. A cone is rotationally symmetric about its own axis,
+so two angles exhaust the degrees of freedom; a roll knob would be a control that
+provably does nothing — the same reasoning that keeps dead rows out of the menus.
+
+Why they exist, beyond readability:
+
+- **`cone` runs backwards.** It is a cosine, so widening a beam *lowers* it. That is how
+  "reduce the cone" became an edit that raises the number. `spread` reads the right way.
+- **An `aim:` cannot express a non-unit vector.** That is not a style preference — see
+  below. Angles make the whole class of bug unrepresentable.
+- The dev light tuner edits **pitch/yaw/spread**, not components, and "Log DSL" prints
+  `aim:`/`spread:` ready to paste (`docs/dev-tools.md`).
+
+Both forms are accepted on a light **type** and on a per-light override, so whichever
+reads better at that spot wins. Declaring both forms of the same property
+(`dir:` *and* `aim:`) is an **error**, not a precedence rule: there is no reading of it
+that is not a mistake, and silently preferring one would be a value the author never
+sees.
+
+#### `dir` should be unit length, and nothing enforces it
+
+`cone` is cos(half-spread), and X-Plane compares it against a **dot product** with
+`dir`. So a `dir` that is not unit length makes cone and aim *interact*: the beam
+narrows or widens as a side effect of its own direction, and past a point the cone
+control stops appearing to do anything at all. Two standing in-sim reports fit that
+shape (`docs/dev-tools.md`).
+
+`build` reports every non-unit `dir:` with its unit form ready to paste:
+
+```
+note: 6 light type(s) have a non-unit `dir:`. ...
+    int_panelflood   dir 0 -0.15 -0.1   |d| 0.180   unit: 0 -0.832 -0.555
+```
+
+**It reports rather than rewrites, deliberately.** Normalising should be a visible,
+reviewable edit to the `.phdsl`, not something a build does behind your back.
+`dir: 0 0 0` is omnidirectional and is never reported.
+
+The **whole interior was normalised on 2026-07-29** (interior deviation #5) after the
+maths turned out to explain two standing bugs — Gus's outer panel floods are 0.180 and
+0.258 long against cones of 0.819 and 0.906, i.e. effective thresholds of 4.5 and 3.5,
+which nothing can satisfy. `GusFidelityTests` compares aims with length canonicalised
+out, so a real change of *direction* still fails loudly.
+
+The **exterior is deliberately left alone**. `landing_mid` (1.031) and `landing_wide`
+(1.099) are within 10% of unit, are ToLiss's own transcribed values, have no in-sim
+complaint against them, and — decisively — the exterior's byte-identical output
+against the frozen `reference/photon/` goldens is the project's only exterior
+correctness net. Changing them to chase a ≤9% cone shift would spend that net for
+nothing. They stay in the build's report as a standing note, not as a to-do.
+
 ### N-way categories
 
 A `categories` entry with **one** value is the two-way form and still means
@@ -250,10 +323,32 @@ airframe a320 {
 }
 ```
 
-- **Fixture properties:** `category` (required unless `raw`), `mirror: true`,
-  `omit: <variant> ...`, `mount` (per-side via `@starboard`; `none` detaches),
-  `pos`, `offset`, `raw`.
+- **Fixture properties:** exactly one of `category` / `profile` (unless `raw`),
+  plus `mirror: true`, `omit: <variant> ...`, `mount` (per-side via `@starboard`;
+  `none` detaches), `pos`, `offset`, `raw`.
 - **Position fallback** per light: light `pos` → group `pos` → fixture `pos`.
+
+### `category:` vs `profile:` — gated or not
+
+A fixture is rendered one of two ways, and must say which:
+
+| | Emits | Switchable at runtime |
+|---|---|---|
+| `category: nav;` | one `ANIM_hide`-gated branch per profile the category declares | yes, via `ToLissPhoton/<target>/nav` |
+| `profile: screen;` | **one un-gated block** in palette `screen` | no — there is nothing to switch |
+
+`profile:` exists for a target with a **single look**, which so far means only the
+screen glow. Writing that as a category would force either a two-branch category
+whose branches render identically — **a dead menu row**, which has shipped twice on
+the interior and both times looked exactly like the mod not being installed — or a
+fake second palette existing only to satisfy the one-value shorthand.
+
+An un-gated fixture is not a static one: the screen lights vary per frame through
+their spill dataref's **alpha**, which is a brightness channel, not a gate. Reach
+for `profile:` when a fixture has one appearance, never to skip writing a category
+that genuinely has two.
+
+Declaring both, or neither, is a parse error.
 
 ### `offset` — moving a whole fixture per wing mod
 
@@ -383,11 +478,17 @@ are neither edited nor generated.
 
 ### Targets
 
-Each airframe builds one OBJ **per target** — `exterior` (`lights_out3xx_XP12.obj`)
-and `interior` (`lights_inn.obj`, the cockpit lights). A fixture declares
-`target: interior;` to route into the latter; the default is `exterior`, so
-every pre-existing fixture is unaffected. `build --target {exterior,interior,both}`
-selects; `both` is the default.
+Each airframe builds one OBJ **per target** — `exterior` (`lights_out3xx_XP12.obj`),
+`interior` (`lights_inn.obj`, the cockpit lights) and `screens`
+(`lights_screens.obj`, the EXPERIMENTAL display glow). A fixture declares
+`target: interior;` or `target: screens;` to route into those; the default is
+`exterior`, so every pre-existing fixture is unaffected.
+`build --target {exterior,interior,screens,both}` selects.
+
+⚠ **`both` means exterior + interior — it never builds `screens`**
+(`DEFAULT_TARGETS` in `build/build_objs.py`). `dist/` is what `make_release.py`
+packages, so an experiment must be asked for by name rather than arriving in a
+release bundle by default. See `docs/screens_plan.md`.
 
 An airframe with no entry for a target in `OBJ_TARGETS` doesn't build it at all —
 that's how the A330-900 is kept out of the interior mod, mirroring how

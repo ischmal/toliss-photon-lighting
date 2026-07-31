@@ -69,6 +69,6 @@ tracks this via the manifest's `interior.added[]` list, separate from `backed_up
 
 `gus-readme.md` Steps 2–4 describe adding `NORMAL_METALNESS` / `GLOBAL_specular 1`
 / `ATTR_shiny_rat` / `BLEND_GLASS` to ~26 cabin mesh OBJs, to unlock roughness,
-reflectance and translucency. That is a separate mod from the light-colour work
+reflectance and translucency. That is a separate mod from the light-color work
 and is **out of scope** for `docs/interior_plan.md` — noted here so it is not
 lost, not because it is planned.

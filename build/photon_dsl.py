@@ -48,6 +48,7 @@ emitting another variant's values.
 from __future__ import annotations
 
 import copy
+import math
 
 
 class DslError(Exception):
@@ -455,9 +456,9 @@ def _load_style(stmts, filename, base=None):
 
     light_types = {}
     for name in light_raw:
-        light_types[name] = _expand_props(
-            [(p, c, v) for p, c, v in type_decls(name)],
-            axes, f"{filename}: light {name}", base)
+        where = f"{filename}: light {name}"
+        light_types[name] = apply_angle_sugar(_expand_props(
+            [(p, c, v) for p, c, v in type_decls(name)], axes, where, base), where)
     return axes, axis_of, palettes, categories, light_types
 
 
@@ -584,6 +585,105 @@ def _vec3(v, where):
     return v
 
 
+# ─── aim: pitch/yaw instead of a direction vector ────────────────────────────
+# A raw `dir:` vector is genuinely hard to author. Its length is not free (X-Plane
+# compares `cone` against a DOT PRODUCT with it, so the effective threshold is
+# cone/|dir|), the sign conventions are unmemorable, and "point it 10 degrees
+# further down" is not an edit you can do to three components in your head.
+#
+# So `aim: <pitch> <yaw>;` and `spread: <degrees>;` are accepted anywhere `dir:`
+# and `cone:` are, and are converted here — at load, before the Emitter sees
+# anything — into exactly those two properties. Downstream nothing changes: the
+# OBJ still carries a vector and a cosine, and `check` still compares vectors.
+#
+# CONVENTION, in OBJ axes (+X right, +Y up, +Z aft):
+#   pitch  degrees above horizontal.  0 level, +90 straight up, -90 straight down.
+#   yaw    degrees clockwise from FORWARD seen from above, i.e. aircraft heading.
+#          0 forward (-Z), 90 right (+X), 180 aft (+Z), -90 left (-X).
+# There is deliberately NO roll: a cone is rotationally symmetric about its own
+# axis, so two angles exhaust the degrees of freedom and a roll knob would be a
+# control that does nothing.
+#
+# The vector this produces is always unit length, which is the other half of the
+# point — an `aim:` cannot express the non-unit vectors that broke the interior's
+# cones (see docs/dsl.md).
+def aim_to_dir(pitch, yaw):
+    """(pitch, yaw) in degrees -> a unit direction vector, rounded to 3 dp."""
+    p, y = math.radians(pitch), math.radians(yaw)
+    horiz = math.cos(p)
+    return [round(horiz * math.sin(y), 3),
+            round(math.sin(p), 3),
+            round(-horiz * math.cos(y), 3)]
+
+
+def dir_to_aim(d):
+    """The inverse, for tooling that has a vector and wants to report angles.
+
+    Degenerate at the poles, as any Euler pair is: straight up or down has no
+    meaningful yaw, so it reports 0 rather than an arbitrary residue."""
+    length = math.sqrt(sum(v * v for v in d))
+    if length < 1e-9:
+        return [0.0, 0.0]                       # omnidirectional: no aim at all
+    x, yv, z = (v / length for v in d)
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, yv))))
+    yaw = 0.0 if abs(yv) > 1.0 - 1e-9 else math.degrees(math.atan2(x, -z))
+    return [round(pitch, 2), round(yaw, 2)]
+
+
+def spread_to_cone(degrees):
+    """Half-spread in degrees -> the cosine an OBJ8 light wants.
+
+    Runs backwards, which is the whole reason this exists: a WIDER beam is a
+    SMALLER cone number, so `spread: 70;` reads correctly where `cone: 0.342;`
+    reads backwards."""
+    return round(math.cos(math.radians(degrees)), 5)
+
+
+def cone_to_spread(cone):
+    return round(math.degrees(math.acos(max(-1.0, min(1.0, cone)))), 2)
+
+
+def _convert_aim(v, where):
+    if isinstance(v, dict):
+        return {k: _convert_aim(x, f"{where}.{k}") for k, x in v.items()}
+    ok = (isinstance(v, list) and len(v) == 2
+          and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v))
+    if not ok:
+        raise DslError(f"{where}: aim expects 2 numbers (pitch yaw in degrees), "
+                       f"got {v!r}")
+    return aim_to_dir(v[0], v[1])
+
+
+def _convert_spread(v, where):
+    if isinstance(v, dict):
+        return {k: _convert_spread(x, f"{where}.{k}") for k, x in v.items()}
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        raise DslError(f"{where}: spread expects one number (half-spread in "
+                       f"degrees), got {v!r}")
+    return spread_to_cone(v)
+
+
+def apply_angle_sugar(props, where):
+    """Rewrite `aim`/`spread` into `dir`/`cone`, in place, and return props.
+
+    Runs on light TYPES and on per-light overrides alike, so a type may declare
+    `aim:` and a fixture override it with `dir:` or the other way round — whichever
+    reads better at that spot. Declaring BOTH forms of the same property is an
+    error rather than a precedence rule: there is no reading of
+    `dir: 0 0 1; aim: -30 0;` that is not a mistake, and silently preferring one
+    would be a value the author never sees."""
+    for angle, vector, conv in (("aim", "dir", _convert_aim),
+                                ("spread", "cone", _convert_spread)):
+        if angle not in props:
+            continue
+        if vector in props:
+            raise DslError(f"{where}: declares both {angle!r} and {vector!r} — "
+                           f"they set the same thing ({angle} is converted to "
+                           f"{vector} at load). Keep one.")
+        props[vector] = conv(props.pop(angle), f"{where}.{angle}")
+    return props
+
+
 _OFFSET_AXIS_KEYS = {"port", "starboard", "fence", "sharklet"}
 
 
@@ -608,7 +708,9 @@ def light_to_old(l, axes, where, base=None):
     # manifest can name a light the way the .phdsl does; the Emitter ignores it.
     if l.get("label"):
         out["label"] = l["label"]
-    out.update(_expand_props(l["props"], axes, f"{where} {l['type']}", base))
+    where = f"{where} {l['type']}"
+    out.update(apply_angle_sugar(
+        _expand_props(l["props"], axes, where, base), where))
     return out
 
 
@@ -637,9 +739,9 @@ def fixture_to_old(fx, axes, where, base=None):
     # everything else.
     if "target" in props:
         tgt = props["target"]
-        if tgt not in ("exterior", "interior"):
-            raise DslError(f"{where}: target must be 'exterior' or 'interior', "
-                           f"got {tgt!r}")
+        if tgt not in ("exterior", "interior", "screens"):
+            raise DslError(f"{where}: target must be 'exterior', 'interior' or "
+                           f"'screens', got {tgt!r}")
         out["target"] = tgt
     if "raw" in props:
         if "offset" in props:
@@ -648,9 +750,24 @@ def fixture_to_old(fx, axes, where, base=None):
                            "the DSL or bake the offset into the raw file")
         out["raw"] = props["raw"]
         return out
-    if "category" not in props:
-        raise DslError(f"{where}: fixture needs 'category' (or 'raw')")
-    gating = {"category": props["category"]}
+    # A fixture is rendered EITHER as N gated branches (`category:`) or as one
+    # un-gated block in a fixed palette (`profile:`).
+    #
+    # `category: X` is the normal form: one ANIM_hide-gated branch per profile the
+    # category declares, switched at runtime by ToLissPhoton/<target>/X.
+    #
+    # `profile: X` is for a target with ONE look and so nothing to switch — the
+    # screen glow. Writing it as a category would mean either a two-branch
+    # category whose branches render identically (the "dead menu row" failure that
+    # has already shipped twice) or a fake second palette existing only to satisfy
+    # the shorthand. Neither is honest, so single-look fixtures say so directly.
+    # Their brightness still varies: it rides the spill dataref's alpha, not a gate.
+    if ("category" in props) == ("profile" in props):
+        raise DslError(f"{where}: fixture needs exactly one of 'category' "
+                       f"(gated, switchable) or 'profile' (one un-gated look), "
+                       f"or 'raw'")
+    gating = ({"profile": props["profile"]} if "profile" in props
+              else {"category": props["category"]})
     if props.get("mirror") is True:
         gating["mirror"] = True
     if "omit" in props:

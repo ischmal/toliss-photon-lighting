@@ -26,6 +26,11 @@ axis wingtip: fence sharklet;
 // cross product and exterior resolution is untouched. Branch order IS the
 // dataref encoding: int_old=0, int_new=1, int_led=2.
 axis intprofile: int_old int_new int_led;
+// DISPLAY-GLOW profile axis (EXPERIMENTAL). One value, because the screens have
+// one look — there is no era to switch and so no category. It is declared as an
+// axis anyway so `@screen { ... }` is legal and so `screen` resolves through
+// resolve_field like any other profile; see `palette screen` below.
+axis screenprofile: screen;
 
 // -- PALETTES: rgb per color; @bb/@sp override when swatches differ --
 palette led {
@@ -64,6 +69,22 @@ palette xenon {
 palette int_old { white: 1 0.37 0.16;   warm: 1 0.89 0.81;  fluoro: 0.95 0.95 0.88; }
 palette int_new { white: 0.8 0.55 0.3;  warm: 1 0.89 0.81;  fluoro: 0.95 0.95 0.88; }
 palette int_led { white: 0.82 0.82 1;   warm: 1 0.89 0.81;  fluoro: 0.82 0.82 1; }
+
+// -- DISPLAY GLOW palette (EXPERIMENTAL, docs/screens_plan.md) --
+// The wash an A320 DU throws into a dark cockpit. NOT a lamp color: it is the
+// average of a lit screen — mostly the dark blue-grey background, tinted by the
+// green/white symbology on top — so it is desaturated and quite dark. A saturated
+// blue reads as decorative; the real thing is nearly grey.
+//
+// The screens have ONE look and nothing to switch, so this palette is reached by
+// a fixture's `profile: screen;` rather than through a category. There is
+// deliberately no second entry: see the note on the screen_glow light type.
+//
+// Tuned in-sim 2026-07-29 (0.55 0.66 0.82 -> 0.55 0.66 1): bluer than the seed.
+// The ECAM pair used to carry a separate slightly-warmer `ecam` entry on the
+// theory that their white/amber text would desaturate the spill; in-sim all six
+// were settled on ONE colour, so that entry is gone rather than left dead.
+palette screen { glow: 0.55 0.66 1; }
 
 // -- CATEGORIES: which palette the dataref=0 (original) branch uses --
 // ONE value is the two-way exterior form and still means "<palette> led".
@@ -393,7 +414,7 @@ light int_table {
   color: white;
   size: 1;
   cone: 0.701;
-  dir: 0 -1 0.42;
+  dir: 0 -0.922 0.387;   // normalised 2026-07-29 (was 0 -1 0.42, |d| 1.085)
   index: 3;
 }
 // P3 — CA/FO tablet lamps.
@@ -437,7 +458,10 @@ light int_console {
   @int_led { color: warm; }
   size: 0.4;
   cone: 0.4;
-  dir: 0 -0.3 0;
+  // Normalised 2026-07-29 (was 0 -0.3 0, |d| 0.300 — straight down either way).
+  // At 0.3 long, cone 0.4 meant an effective threshold of 1.33: past 1, so no
+  // direction satisfied it and the strip could not act as a cone at all.
+  dir: 0 -1 0;
 }
 // P3 — the four panel flood lamps (category `mainpnl`, NOT `map` — see the
 // fixture comment in lights.layout.phdsl). Position is always 0 0 0: their real
@@ -507,4 +531,53 @@ light int_spot3 {          // was _spot*/2 — ckpt/lights/map, the map light kn
   cone: 0.97;              // cos(14°) — stock/Gus, still a seed and still narrow;
                            // find the real number with the debug light tuner.
   spill_dref: ToLissPhoton/interior/spill/map;
+}
+
+// -- DISPLAY GLOW (EXPERIMENTAL, docs/screens_plan.md) ------------------------
+// Six lights, one per main display unit, washing each screen's own light back
+// into the cockpit. Target `screens` -> objects/lights_screens.obj, an OBJ ToLiss
+// does not ship: nothing draws it until build/patch_acf_screens.py attaches it.
+//
+// LIGHT_SPILL_CUSTOM for the same reason int_spot3 is: brightness comes from
+// AirbusFBW/DUBrightness[<du>], a per-screen dataref, which no rheostat INDEX can
+// express. Each fixture overrides `spill_dref` with its own slot; the plugin
+// writes ONLY the alpha of each and passes the other eight params through, so
+// color, aim, cone and size all stay here in the DSL.
+//
+// ⚠ ONE LOOK, so the fixtures use `profile: screen;` and are NOT gated. Do not
+// "fix" this by inventing a category: a category with two branches that render
+// identically is a dead menu row, which has already shipped twice on the interior.
+// The switchability that matters here is per-frame brightness, and alpha carries it.
+//
+// >>> alpha is the BAKED value X-Plane draws when the dataref is NOT found — the
+//     plugin-absent state. Kept low deliberately so that failure mode is "a faint
+//     glow that ignores the DU knobs", never a glare in a dark cockpit. It is NOT
+//     the in-sim brightness: the plugin overwrites it every frame.
+light screen_glow {
+  color: glow;
+  // >>> NOT the in-sim brightness, and NOT the tuner's Alpha row. The dev tool's
+  //     Alpha is its own multiplier standing in for the rheostat, so a tuning
+  //     session ending at A=1 means "full DU", not "bake 1 here". This value is
+  //     only what X-Plane draws with the plugin ABSENT — kept low so that failure
+  //     is a faint glow rather than a glare. In-sim brightness comes from
+  //     AirbusFBW/DUBrightness via kScreenGain in plugin.cpp.
+  //     Zero is NOT the safe default it looks like: it makes the plugin-absent
+  //     case an invisible light, which reads as "the OBJ never attached" and
+  //     sends the next person after the wrong bug. Faint beats nothing.
+  alpha: 0.15;
+  // Tuned in-sim 2026-07-29. A screen is a broad, soft, close-range source, not a
+  // lamp: it lights the glareshield and the pilot's face from ~0.5 m.
+  size: 0.9;
+  // `spread:` is the half-angle in DEGREES — the same thing as `cone: 0.9`, but the
+  // right way round. cone is a cosine and so runs backwards, which is how "reduce
+  // the cone" became an edit that raises the number. Widening this beam raises
+  // `spread` and lowers `cone`; only one of those is worth having to remember.
+  spread: 80;
+  // `aim: <pitch> <yaw>` in degrees. pitch 0 is level, yaw 180 is aft — so this is
+  // straight aft out of the panel face, toward the pilots. Equivalent to
+  // `dir: 0 0 1`, and preferable: an aim cannot express a non-unit vector, which is
+  // the class of bug that made the interior's cones inert (docs/dsl.md).
+  //
+  // >>> If the glow looks like it comes from behind the seats, set yaw to 0.
+  aim: 13 180;
 }

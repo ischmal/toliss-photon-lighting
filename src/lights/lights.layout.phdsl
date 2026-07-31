@@ -313,8 +313,10 @@ airframe a320 {
   fixture int_map_lamps "Map Lights" {
     target: interior;
     category: map;
-    int_tablet#ca     { pos: -0.8    0.7    -4.0;  dir: -0.35 -0.75 -0.4; }
-    int_tablet#fo     { pos:  0.8    0.7    -4.0;  dir:  0.35 -0.75 -0.4; }
+    // dir normalised 2026-07-29 (was -/+0.35 -0.75 -0.4, |d| 0.919). Same aim;
+    // `cone` is compared against a dot product with it, so length is not free.
+    int_tablet#ca     { pos: -0.8    0.7    -4.0;  dir: -0.381 -0.816 -0.435; }
+    int_tablet#fo     { pos:  0.8    0.7    -4.0;  dir:  0.381 -0.816 -0.435; }
   }
 
   fixture int_console "Console Lights" {
@@ -359,22 +361,42 @@ airframe a320 {
   // Cone values are Gus's measured ones, rounded to the project-wide 3 dp by the
   // emitter. That also settles the §1.2 note about lamp 4's 0.9063077 vs lamp
   // 1's 0.906307: both round to 0.906. Decided, not drifted.
+  //
+  // >>> DIRECTIONS NORMALISED 2026-07-29, and this is a lead on the open thread
+  //     above. X-Plane compares `cone` against a DOT PRODUCT with `dir`, so an
+  //     effective threshold of cone/|dir| applies. Gus's vectors here were:
+  //
+  //       lamps 1 & 4 (the OUTER pair)   |d| 0.180 and 0.258
+  //       lamps 2 & 3 (the MIDDLE pair)  |d| 1.552
+  //
+  //     At |d| 0.18 with cone 0.819 the effective threshold is 4.55 — far past
+  //     1, i.e. no direction can satisfy it, so the lamp cannot behave as a cone
+  //     at all and `cone` has nothing left to change. That is precisely the pair
+  //     reported in-sim as "the OUTER floods are wrong under every one of the 48
+  //     permutations", and precisely the lamp reported as "cone edits have no
+  //     visible effect". The middle pair at |d| 1.55 were merely too WIDE
+  //     (threshold 0.584 ≈ 54° where 0.906 ≈ 25° was authored) — and those are
+  //     the two the cycler said looked right.
+  //
+  //     Aim is unchanged by this; only length is. If the outer floods now behave,
+  //     the axis-permutation hunt was chasing the wrong cause and can be closed.
+  //     The old values are on each line.
   fixture int_panelflood1 "Panel Flood Lamp 1" {
     target: interior;
     category: mainpnl;
     mount: panelflood1;
     pos: 0 0 0;   // real placement comes from the mount's ckpt/lights/1 animation
-    int_panelflood#a { index: 1;  dir: 0 -0.15 -0.1;   cone: 0.819152; }
-    int_panelflood#b { index: 1;  dir: 0 -0.21 -0.15;  cone: 0.906307; }
+    int_panelflood#a { index: 1;  dir: 0 -0.832 -0.555;  cone: 0.819152; }   // was 0 -0.15 -0.1 (|d| 0.180)
+    int_panelflood#b { index: 1;  dir: 0 -0.814 -0.581;  cone: 0.906307; }   // was 0 -0.21 -0.15 (|d| 0.258)
   }
   fixture int_panelflood2 "Panel Flood Lamp 2" {
     target: interior;
     category: mainpnl;
     mount: panelflood2;
     pos: 0 0 0;
-    int_panelflood#a { index: 1;  dir: 0 -1.5 0.4;  cone: 0.906307; }
-    int_panelflood#b { index: 1;  dir: 0 -1.5 0.4;  cone: 0.866025; }
-    int_panelflood#c { index: 1;  dir: 0 -1.5 0.4;  cone: 0.642787; }
+    int_panelflood#a { index: 1;  dir: 0 -0.966 0.258;  cone: 0.906307; }
+    int_panelflood#b { index: 1;  dir: 0 -0.966 0.258;  cone: 0.866025; }
+    int_panelflood#c { index: 1;  dir: 0 -0.966 0.258;  cone: 0.642787; }
   }
   fixture int_panelflood3 "Panel Flood Lamp 3" {
     target: interior;
@@ -382,17 +404,17 @@ airframe a320 {
     mount: panelflood3;
     pos: 0 0 0;
     // index 2, NOT Gus's 1 — see the §1.3e note above the fixture block.
-    int_panelflood#a { index: 2;  dir: 0 -1.5 0.4;  cone: 0.906307; }
-    int_panelflood#b { index: 2;  dir: 0 -1.5 0.4;  cone: 0.866025; }
-    int_panelflood#c { index: 2;  dir: 0 -1.5 0.4;  cone: 0.642787; }
+    int_panelflood#a { index: 2;  dir: 0 -0.966 0.258;  cone: 0.906307; }
+    int_panelflood#b { index: 2;  dir: 0 -0.966 0.258;  cone: 0.866025; }
+    int_panelflood#c { index: 2;  dir: 0 -0.966 0.258;  cone: 0.642787; }
   }
   fixture int_panelflood4 "Panel Flood Lamp 4" {
     target: interior;
     category: mainpnl;
     mount: panelflood4;
     pos: 0 0 0;
-    int_panelflood#a { index: 2;  dir: 0 -0.15 -0.1;   cone: 0.819152; }
-    int_panelflood#b { index: 2;  dir: 0 -0.21 -0.15;  cone: 0.9063077; }
+    int_panelflood#a { index: 2;  dir: 0 -0.832 -0.555;  cone: 0.819152; }   // was 0 -0.15 -0.1 (|d| 0.180)
+    int_panelflood#b { index: 2;  dir: 0 -0.814 -0.581;  cone: 0.9063077; }  // was 0 -0.21 -0.15 (|d| 0.258)
   }
 
   // -- The three re-added .acf cockpit spots (docs/interior_plan.md §3.4) ----
@@ -455,6 +477,93 @@ airframe a320 {
     category: map;
     // stock _spot_the/2 = -53, _spot_psi/2 = 14 -> down, forward, slightly right
     int_spot3 { pos: 0.244 1.097 -3.463;  dir: 0.146 -0.799 -0.584; }
+  }
+
+  // ==========================================================================
+  // SCREENS (display glow) — target: screens -> objects/lights_screens.obj
+  // ==========================================================================
+  // EXPERIMENTAL (docs/screens_plan.md). Six spill lights, one per main display
+  // unit, throwing each screen's own wash back into the cockpit.
+  //
+  // Like the interior these sit in the a320 block so a319/a321 inherit them, and
+  // a339 (which does not `extends a320`) gets nothing — its cockpit is a
+  // different model and these coordinates would be wrong for it.
+  //
+  // SAME COORDINATE FRAME AS lights_inn.obj. patch_acf_screens.py copies the
+  // attachment point from the aircraft's OWN lights_inn.obj row rather than
+  // hardcoding one, so these coordinates mean the same thing on all three
+  // airframes — exactly as the interior's do, and for the same reason.
+  //
+  // POSITIONS were seeded from the panel geometry around the screens (ToLiss
+  // draws the DUs from its own plugin rather than as ATTR_cockpit faces, so there
+  // is no screen geometry in the OBJs to measure) and then TUNED IN-SIM
+  // 2026-07-29 with the live light debug tool. The measured seed basis, kept
+  // because it is the only independent check on these numbers:
+  //
+  //     glareshield front bar   y  0.379   z -4.408   (1.20 m wide)
+  //     main instrument panel   y  0.139   z -4.591   (2.19 m wide)
+  //     flat panel strip        y  0.093   z -4.604   (1.44 m wide)
+  //
+  // Five of the six landed on one plane — y 0.08, z -4.67 — with x mirrored about
+  // the centreline, which is what a row of panel-mounted DUs should look like.
+  // Re-tune with:
+  //
+  //     python build/build_objs.py build --target screens --debug --write
+  //
+  // and use the position MARKERS (Marker: This/All in the dev window) rather than
+  // judging by the pool of light — the glow's centre is not its origin.
+  //
+  // ⚠ TWO NUMBERS PER FIXTURE MUST AGREE WITH THE PLUGIN, and they are different
+  // numbers:
+  //   `spill_dref: .../spill/<n>` — the light's own slot, n = fixture order.
+  //   `index: <du>`               — which AirbusFBW/DUBrightness element drives
+  //                                 it, and it is NOT the same as n.
+  // `index` must equal kScreenDU[n] in src/native/src/plugin.cpp; a test compares
+  // them. The DU order was settled in-sim 2026-07-29 by dimming one display at a
+  // time, and it is NOT left-to-right — it is the Airbus DU numbering:
+  //
+  //     DUBrightness[0] CA PFD   [1] CA ND   [2] FO PFD
+  //     DUBrightness[3] FO ND    [4] E/WD    [5] SD
+  //
+  // `profile: screen;` not `category:` — one look, no gate. See lights.style.phdsl.
+
+  fixture screen_capt_pfd "Captain PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.59 0.12 -4.67;  index: 0;  spill_dref: ToLissPhoton/screens/spill/0; }
+  }
+  fixture screen_capt_nd "Captain ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.37 0.12 -4.67;  index: 1;  spill_dref: ToLissPhoton/screens/spill/1; }
+  }
+  // The ECAM pair are stacked on the centreline, upper (E/WD) above lower (SD).
+  // Their x is 0.012 rather than 0 because that is where they tuned to — the
+  // stack is very slightly off the aircraft centreline.
+  fixture screen_ecam_upper "Upper ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.012 0.12 -4.67;  index: 4;  spill_dref: ToLissPhoton/screens/spill/2; }
+  }
+  // ⚠ The odd one out: every other light tuned onto the y 0.08 / z -4.67 plane,
+  // and this one sits 2 cm ABOVE and 8 cm AFT of them — i.e. above the upper
+  // ECAM's glow, which is not where an SD is. Taken from the tool's absolute
+  // readout as reported (2026-07-29) and confirmed as intended. If the lower
+  // ECAM ever looks like it is lighting from the wrong place, this is the line.
+  fixture screen_ecam_lower "Lower ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.012 -0.07 -4.62;  index: 5;  spill_dref: ToLissPhoton/screens/spill/3; }
+  }
+  fixture screen_fo_nd "First Officer ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.37 0.12 -4.67;  index: 3;  spill_dref: ToLissPhoton/screens/spill/4; }
+  }
+  fixture screen_fo_pfd "First Officer PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.59 0.12 -4.67;  index: 2;  spill_dref: ToLissPhoton/screens/spill/5; }
   }
 }
 

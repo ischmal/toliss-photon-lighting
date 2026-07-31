@@ -201,7 +201,16 @@ TunerCoarseStep = {"pos": 0.10, "dir": 0.10, "size": 0.25, "cone": 0.020}
 #
 # ⚠ A debug OBJ has NO category gating, so the Cockpit profile menu does nothing while it
 # is installed. Put the real one back with `build --target interior --write`.
-DebugManifestRelPath = os.path.join("objects", "lights_inn.debug.json")
+# One manifest per debug-capable build target, newest-first at load time. Both
+# number their slots from 0, so only ONE debug OBJ can be driven at a time; we take
+# the most recently WRITTEN manifest, which is the one you just built, and name it
+# in the window so there is never a question which is live. Keep in step with
+# DEBUG_MANIFESTS in build/build_objs.py.
+DebugManifests = (
+    ("cockpit", os.path.join("objects", "lights_inn.debug.json")),
+    ("screens", os.path.join("objects", "lights_screens.debug.json")),
+)
+DebugManifestRelPath = DebugManifests[0][1]   # back-compat alias
 DebugDataRefPrefix   = "ToLissPhoton/debug/light/"
 # Position comes by a different route: the debug build wraps each light in three
 # dataref-driven ANIM_trans blocks reading DebugPosDataRef[3n+axis] as an offset in
@@ -221,15 +230,145 @@ DebugCompareDataRef = "ToLissPhoton/debug/compare"
 # yet reads 0 forever, leaving every debug light black.
 DebugMaxLights  = 64
 DebugParamCount = 9                       # r g b a size dx dy dz cone
+# ⚠ THE DATAREF ORDER IS NOT THE OBJ ORDER. Measured in-sim 2026-07-30 with the slot
+# probe below, on the screen glow:
+#
+#   the OBJ8 LINE is   ... <size> <dx> <dy> <dz> <semi> <dataref>
+#   the DATAREF wants  r g b a size   SEMI dx dy dz
+#
+# i.e. the cone comes FIRST in the trailing group of four, not last. Proof both ways:
+# every real `LIGHT_SPILL_CUSTOM` line in the sim's own OBJs has a UNIT-length vector
+# when read as `dx dy dz semi` and a 1.26-length one when read as `semi dx dy dz`, so
+# the literal order is settled; and probing our slots 5/6/7/8 one at a time gave
+# omni / right / up / aft, which is exactly SEMI/DX/DY/DZ.
+#
+# Consequences worth keeping straight:
+#   * ALPHA IS STILL INDEX 3 in both orderings, so plugin.cpp's kSpillAlphaSlot is
+#     correct and the SHIPPING lights were never affected — they bake their aim into the
+#     OBJ line (right order) and the plugin only ever writes alpha.
+#   * This was ONLY ever wrong for lights whose aim comes from a dataref, i.e. the
+#     `--debug` copies. That is precisely the "Original right, Debug wrong" verdict from
+#     2026-07-28 and the whole 48-permutation axis hunt: a rotation of four slots is not
+#     an axis permutation, so that search could never have found it.
+# dbgVals stays in the readable order (5..7 = dir, 8 = cone) because the UI, the aim
+# maths, the markers and the tests all index it that way; the translation happens once,
+# at the wire, in DbgReadArray.
+DebugDataRefOrder = (0, 1, 2, 3, 4, 8, 5, 6, 7)
+DebugWireNames = ("r", "g", "b", "a", "size", "semi", "dx", "dy", "dz")
 DebugPosCount   = 3                       # x y z OFFSET, slots 9..11 of a working value
 DebugPosSlot    = DebugParamCount         # where the offset starts in dbgVals
-DebugValCount   = DebugParamCount + DebugPosCount
-DebugFineStep   = {"rgb": 0.02, "alpha": 0.05, "size": 0.05, "dir": 0.02,
-                   "cone": 0.005, "pos": 0.01}
-DebugCoarseStep = {"rgb": 0.10, "alpha": 0.20, "size": 0.25, "dir": 0.10,
-                   "cone": 0.020, "pos": 0.10}
+# AIM slots. Pitch/yaw in DEGREES are the authoritative aim and slots 5..7 (dx/dy/dz)
+# are DERIVED from them — never the other way round. Two reasons it is stored rather
+# than converted on the fly:
+#   * a vector -> angles -> vector round trip loses yaw at the poles (straight up has
+#     no heading), so editing pitch through 90 would silently reset yaw;
+#   * an angle pair cannot express a non-unit vector, which is what broke the
+#     interior's cones. Deriving the vector means the tuner can only emit legal aims.
+DebugAimSlot    = DebugPosSlot + DebugPosCount    # 12: pitch, 13: yaw
+DebugAimCount   = 2
+DebugValCount   = DebugParamCount + DebugPosCount + DebugAimCount
+# Nudge size, in the value's own units, one button per decade. This replaced a
+# Fine/Coarse pair whose step also varied per KIND: two hidden variables meant the
+# amount a click moved something was never on screen, and "did that do anything?"
+# is the question this window exists to answer. Here the button label IS the amount
+# added. One ladder serves every row because each is either a 0..1 fraction (rgb,
+# alpha, cone) or metres (pos, size, dir), and 1 -> 0.001 spans both.
+# 10 is here for the ANGLE rows: aim is in degrees now, and swinging a light through a
+# quadrant at 1 deg a click is 90 clicks. It is a legitimate position step too (10 cm at
+# the 0.1 end, 10 m at this one — the latter only useful inside the +-12 m span).
+DebugSteps      = (10.0, 1.0, 0.1, 0.01, 0.001)
+DebugDefaultStep = 1.0                    # a degree, or a metre — the useful middle
 DebugMarkColor = (1.0, 0.0, 1.0)         # magenta — nothing in a cockpit is this color
 DebugBlinkHz    = 2.0
+
+# ---- position markers ----------------------------------------------------------------
+# A spill light is invisible in mid-air: you only ever see the POOL it casts, and on a
+# close-range light the bright spot of that pool is nowhere near the origin. So placing
+# one by eye has been guesswork on this project — the standing complaint against both the
+# cockpit spots and the screen glow.
+#
+# The debug OBJ therefore emits, per light, a string of LIGHT_CUSTOM billboards: dot 0 on
+# the origin, the rest marching along the aim vector. Billboards draw as sprites in empty
+# air, so it reads as a little arrow. Every dot has its own dataref-driven ANIM_trans
+# (same rig as DebugPosDataRef) and this plugin recomputes each offset from the light's
+# CURRENT direction every frame — no ANIM_rotate in the OBJ, so all the trigonometry is
+# here where it can be tested. Keep in step with the DEBUG_MARK_* constants in
+# build/build_objs.py.
+DebugMarkerDataRef      = "ToLissPhoton/debug/marker"      # per-dot xyz offset array
+DebugMarkerShowDataRef  = "ToLissPhoton/debug/markers"     # 0 off, -1 all, n+1 = light n
+DebugMarkerParamDataRef = "ToLissPhoton/debug/markparam"   # /0 origin dot, /1 aim tail
+# The marker is three parts: the origin, an axis arrow, and a ring of dots on the CONE
+# RIM at the arrow's tip. The rim is what was missing from the first version — an axis
+# line alone was reported in-sim as "reflects position well but does not seem fully
+# oriented with the spill light", which is what a 20 cm line looks like next to a pool
+# of light a metre wide. Drawing the actual cone makes aim and spread both judgeable.
+DebugMarkerAxisDots = 5
+DebugMarkerRimDots  = 4
+DebugMarkerDots     = 1 + DebugMarkerAxisDots + DebugMarkerRimDots
+DebugMarkerReach    = 0.6         # metres from the light to the arrow tip, nudgeable
+DebugMarkerSize     = 0.05        # LIGHT_CUSTOM size, nudgeable in the window
+# One colour per part. The whole point is to see WHICH END is the light and where the
+# beam edge falls, so these must stay clearly distinct from each other.
+DebugMarkerOriginColor = (0.2, 1.0, 0.3, 1.0)   # green  — the light itself
+DebugMarkerAxisColor   = (1.0, 0.6, 0.1, 1.0)   # amber  — which way it points
+DebugMarkerRimColor    = (0.3, 0.6, 1.0, 1.0)   # blue   — the cone edge
+DebugMarkerST      = (0.0, 0.0, 0.5, 0.5)   # light-texture region, as the OBJ bakes it
+DebugMarkerRoles   = 3                      # origin / axis / rim -> markparam/0../2
+DebugMarkerOff, DebugMarkerAll = 0, -1
+
+# Cardinal aim presets: (label, pitch, yaw). One click puts a light on an UNAMBIGUOUS
+# axis, which is the only clean way to answer "which way does the sim think this points".
+# Sweeping pitch or yaw and watching the pool move is not clean — an interpolated arc
+# through a cockpit full of surfaces can be read several ways, and was (2026-07-30:
+# "pitching up causes the light to start pointing to the right ... difficult for me to
+# understand"). Click `Up`, see whether the light goes up. That is the whole test.
+DebugAimPresets = (("Fwd", 0.0, 0.0), ("Aft", 0.0, 180.0),
+                   ("Left", 0.0, -90.0), ("Right", 0.0, 90.0),
+                   ("Up", 90.0, 0.0), ("Down", -90.0, 0.0))
+
+# ---- slot probe -----------------------------------------------------------------------
+# WHAT WE THINK the nine dataref floats mean, in order. Everything in this tool, in
+# plugin.cpp and in the DSL rests on it, and it has never been measured — only read off
+# the OBJ8 spec and lights.txt's `airplane_panel_sp` row.
+#
+# In-sim it does not hold. 2026-07-30, on the screen glow: `aim Fwd` (our dir 0 0 -1)
+# points the light STRAIGHT DOWN, editing pitch swings it horizontally, and the cone and
+# one of the direction components affect each other. Every one of those is what you get
+# if the array is read ONE SLOT LATE — our dy landing on the sim's DX, our dz on its DY,
+# our cone on its DZ. Two earlier explanations (an axis permutation, then non-unit `dir`
+# lengths) each fitted part of the evidence and were wrong.
+#
+# So this stops guessing and MEASURES it. Probing slot k sends the baseline below with
+# slot k alone set to 1, so whatever the sim does is caused by that slot and nothing
+# else. Nine clicks map our array onto the sim's parameters with no inference.
+#
+# Baseline choices, each load-bearing:
+#   * dir 0 0 0 — omnidirectional, so a probe of 5/6/7 introduces the ONLY direction
+#     present and there is nothing to disentangle it from.
+#   * cone 0 — cos(90 deg). If slot 8 turns out to be a direction component after all,
+#     a baseline of 0 contributes nothing to it, keeping probes 5..7 clean.
+#   * size 4 m — big enough that the pool lands on real geometry rather than the panel
+#     two centimetres away, which is what made cone changes look inert.
+#   * white, alpha 1 — no rheostat, no palette, nothing to misread as a colour bug.
+DebugProbeBaseline = (1.0, 1.0, 1.0, 1.0, 4.0, 0.0, 0.0, 0.0, 0.0)
+DebugProbeValue = 1.0
+# What we EXPECT each slot to do, printed beside the probe so the answer is a
+# comparison rather than a memory test.
+DebugProbeExpect = ("red only", "green only", "blue only", "alpha (already 1)",
+                    "bigger", "aim RIGHT (+x)", "aim UP (+y)", "aim AFT (+z)",
+                    "NOTHING — baseline dir is 0 0 0, so there is no cone to narrow")
+# The probe doubles as the regression test for the wire order: with DebugDataRefOrder
+# right, every one of the nine matches its expectation above. It was 5/6/7/8 giving
+# omni/right/up/aft — SEMI/DX/DY/DZ, one slot rotated — that measured the order in the
+# first place (2026-07-30).
+
+
+def _debug_marker_role(dot):
+    """0 origin, 1 axis, 2 cone rim. ⚠ Must match debug_mark_role in build_objs.py:
+    it decides which markparam dataref the OBJ baked into that dot's light line."""
+    if dot == 0:
+        return 0
+    return 1 if dot <= DebugMarkerAxisDots else 2
 
 # ---------------------------------------------------------------- orientation cycler
 #
@@ -268,6 +407,11 @@ def _orient(idx, vec):
 DebugPanelRheostat = "sim/cockpit2/electrical/panel_brightness_ratio"
 DebugInstRheostat  = "sim/cockpit2/electrical/instrument_brightness_ratio"
 DebugMapRheostat   = "ckpt/lights/map"
+# The screen-glow lights ride a per-DISPLAY brightness, not a rheostat: manifest
+# `source: "du"`, `index` = the AirbusFBW/DUBrightness slot. Dimming one display
+# should move exactly one glow — which is how the kScreenDU seed in plugin.cpp
+# gets verified.
+DebugDUBrightness  = "AirbusFBW/DUBrightness"
 
 # Command + menu identity
 CommandName = "ToLissPhoton/dev/quick_reload"
@@ -362,6 +506,98 @@ def _draw_text(color, x, y, text):
         pass
 
 
+def _step_label(step):
+    """A step button's label. %g drops trailing zeros, so the ladder reads
+    1 / 0.1 / 0.01 / 0.001 — the exact number a click adds."""
+    return "%g" % step
+
+
+# ---- aim angles ----------------------------------------------------------------------
+# Mirrors aim_to_dir / dir_to_aim / spread_to_cone in build/photon_dsl.py, which is where
+# the convention is documented and where the DSL's `aim:` and `spread:` are converted.
+# The two must agree or a number tuned here means something else when pasted there — a
+# test compares them.
+#
+#   pitch  degrees above horizontal.  0 level, +90 up, -90 down.
+#   yaw    aircraft heading: 0 forward (-Z), 90 right (+X), 180 aft (+Z).
+# No roll: a cone is rotationally symmetric about its axis, so two angles are all there
+# are. A roll knob would be a control that provably does nothing.
+def _aim_to_dir(pitch, yaw):
+    p, y = math.radians(pitch), math.radians(yaw)
+    horiz = math.cos(p)
+    return [horiz * math.sin(y), math.sin(p), -horiz * math.cos(y)]
+
+
+def _dir_to_aim(d):
+    length = math.sqrt(sum(v * v for v in d))
+    if length < 1e-9:
+        return [0.0, 0.0]                      # omnidirectional
+    x, yv, z = (v / length for v in d)
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, yv))))
+    # At the poles yaw is degenerate; report 0 rather than an arbitrary residue.
+    yaw = 0.0 if abs(yv) > 1.0 - 1e-9 else math.degrees(math.atan2(x, -z))
+    return [pitch, yaw]
+
+
+def _cone_to_spread(cone):
+    return math.degrees(math.acos(max(-1.0, min(1.0, cone))))
+
+
+def _spread_to_cone(deg):
+    return math.cos(math.radians(max(0.0, min(180.0, deg))))
+
+
+def _pitch_word(pitch):
+    """Plain English for a pitch angle. The sign convention is the one thing about an
+    aim you cannot check by eye without already knowing the answer, so the window says
+    it rather than making you remember it."""
+    if pitch <= -60:
+        return "straight down"
+    if pitch < -10:
+        return "down"
+    if pitch <= 10:
+        return "level"
+    if pitch < 60:
+        return "up"
+    return "straight up"
+
+
+def _yaw_word(yaw):
+    """Likewise for heading. 0 is FORWARD (-Z), which is the half of the convention
+    most easily got backwards."""
+    y = (yaw + 180.0) % 360.0 - 180.0
+    for limit, word in ((-157.5, "aft"), (-112.5, "aft-left"), (-67.5, "left"),
+                        (-22.5, "fwd-left"), (22.5, "forward"), (67.5, "fwd-right"),
+                        (112.5, "right"), (157.5, "aft-right")):
+        if y < limit:
+            return word
+    return "aft"
+
+
+def _perp_basis(d):
+    """Two unit vectors perpendicular to `d` and to each other.
+
+    Used to place the cone-rim dots. The seed axis is the world axis `d` leans on
+    LEAST, so the cross product can never collapse: its magnitude is at least
+    sqrt(2/3). A fixed seed would degenerate for any light aimed along it, and the
+    commonest cockpit aims are straight down and straight aft — exactly the axes a
+    guess would pick."""
+    length = math.sqrt(sum(v * v for v in d)) or 1.0
+    n = [v / length for v in d]
+    least = min(range(3), key=lambda k: abs(n[k]))
+    seed = [0.0, 0.0, 0.0]
+    seed[least] = 1.0
+    u = [seed[1] * n[2] - seed[2] * n[1],
+         seed[2] * n[0] - seed[0] * n[2],
+         seed[0] * n[1] - seed[1] * n[0]]
+    ulen = math.sqrt(sum(v * v for v in u)) or 1.0
+    u = [v / ulen for v in u]
+    w = [n[1] * u[2] - n[2] * u[1],
+         n[2] * u[0] - n[0] * u[2],
+         n[0] * u[1] - n[1] * u[0]]
+    return n, u, w
+
+
 class UiButton:
     """One drawn button plus the action to run when it is clicked."""
     __slots__ = ("l", "b", "r", "t", "action")
@@ -450,6 +686,19 @@ class PythonInterface:
         self.dbgAccessors = []          # registered dataref refs, index == light n
         self.dbgPosAccessor = None      # the one shared position-offset array
         self.dbgCompareAccessor = None  # the A/B toggle
+        self.dbgMarkerAccessors = []    # marker offset array + show flag + 2 param sets
+        # Which position markers are drawn: "off" | "this" | "all". Kept as a MODE and
+        # resolved to the dataref's value per read, so "this" tracks the selection —
+        # storing sel+1 would leave the arrow behind on the previous light after Next.
+        # Off by default: 26 cockpit lights' worth of arrows at once is unreadable, and
+        # a debug build should look like the cockpit until you ask it not to.
+        # Slot probe: None = normal tuning, 0..8 = send DebugProbeBaseline with that one
+        # slot set. See the DebugProbeBaseline comment for why this exists.
+        self.dbgProbe = None
+        self.dbgMarkerMode = "off"
+        self.dbgMarkerSize = DebugMarkerSize
+        self.dbgMarkerReach = DebugMarkerReach   # metres to the arrow tip / cone ring
+        self.dbgMarkerDots = DebugMarkerDots   # re-read from the manifest
         self.dbgCompare = 1             # 1 = tunable debug copies, 0 = original lines
         self.dbgLights = []             # manifest rows
         # working values, 12 per light: r,g,b,a,size,dx,dy,dz,cone + x,y,z OFFSET
@@ -461,7 +710,7 @@ class PythonInterface:
         # reads as the light refusing to move, not as the feature being off.
         self.dbgPosTunable = False
         self.dbgSel = 0
-        self.dbgCoarse = False
+        self.dbgStep = DebugDefaultStep   # metres / units per -/+ click
         self.dbgIsolate = False
         self.dbgBlink = False
         self.dbgMark = False
@@ -475,6 +724,7 @@ class PythonInterface:
         # the 48x48 case if it finds nothing.
         self.dbgOrientLink = True
         self.dbgNote = "not loaded"
+        self.dbgTarget = ""             # which debug OBJ is live: cockpit | screens
         self.dbgRheostatRefs = {}       # name -> dataref handle (or None if missing)
         self.dbgFrameTime = -1.0        # rheostat cache stamp
         self.dbgFrameVals = {}
@@ -555,7 +805,7 @@ class PythonInterface:
             # This is the belt; the lazy load in _dbg_values is the braces.
             self.dbgLoadTried = True
             self._dbg_load()
-            # A reload is how a --debug-pos build usually replaces a plain one, so the
+            # A reload is how a --no-debug-pos build usually replaces a normal one, so the
             # row count may have changed. Message context, so rebuilding is safe here.
             self._dbg_resize_window()
             if self.state == ST_PLAIN:
@@ -1869,10 +2119,154 @@ class PythonInterface:
         except Exception:
             _log("could not register %s:\n%s"
                  % (DebugCompareDataRef, traceback.format_exc()))
+        self._dbg_register_marker_accessors()
         _log("live light debug: %d dataref slots registered%s"
              % (len(self.dbgAccessors),
                 " + position array" if self.dbgPosAccessor else " (NO position array)"))
         self._dbg_publish_to_dataref_tools()
+
+    def _dbg_register_marker_accessors(self):
+        """The position-marker pool: one offset array, one show flag, two param sets.
+
+        Four registrations for every light there will ever be, because the marker for
+        light n is picked out by the VALUE of the show flag rather than by having its
+        own dataref — the OBJ gates each light's block on `-0.5..n+0.5` plus
+        `n+1.5..big`, the same paired-ANIM_hide encoding the DSL uses for a ternary
+        category. -1 escapes both ranges and so shows every light at once."""
+        try:
+            self.dbgMarkerAccessors.append(xp.registerDataAccessor(
+                DebugMarkerDataRef, readFloatArray=self.DbgReadMarker, readRefCon=0))
+        except Exception:
+            _log("could not register %s:\n%s"
+                 % (DebugMarkerDataRef, traceback.format_exc()))
+        try:
+            # int AND float, for the same reason the compare flag needs both: the OBJ
+            # gates on this with ANIM_hide, which reads its dataref as a float.
+            self.dbgMarkerAccessors.append(xp.registerDataAccessor(
+                DebugMarkerShowDataRef,
+                readInt=lambda _r: int(self._dbg_marker_value()),
+                readFloat=lambda _r: float(self._dbg_marker_value()),
+                readDouble=lambda _r: float(self._dbg_marker_value())))
+        except Exception:
+            _log("could not register %s:\n%s"
+                 % (DebugMarkerShowDataRef, traceback.format_exc()))
+        for kind in range(DebugMarkerRoles):
+            try:
+                self.dbgMarkerAccessors.append(xp.registerDataAccessor(
+                    "%s/%d" % (DebugMarkerParamDataRef, kind),
+                    readFloatArray=self.DbgReadMarkerParam, readRefCon=kind))
+            except Exception:
+                _log("could not register %s/%d:\n%s"
+                     % (DebugMarkerParamDataRef, kind, traceback.format_exc()))
+
+    def DbgReadMarker(self, refCon, values, offset, count):
+        """Per-dot XYZ offsets, `DebugMaxLights * DebugMarkerDots * 3` floats.
+
+        Sized from the CONSTANT, not the manifest, for the same reason the light pool
+        is: registration happens at XPluginStart when no aircraft exists."""
+        try:
+            total = DebugMaxLights * DebugMarkerDots * DebugPosCount
+            if values is None:
+                return total
+            if offset < 0:
+                offset = 0
+            if count < 0:
+                count = total
+            # Stride comes from the MANIFEST, not the constant: the installed OBJ baked
+            # its own dot count into the indices, so an older one must still address its
+            # own dots rather than a neighbouring light's.
+            stride = self.dbgMarkerDots or DebugMarkerDots
+            out = []
+            for i in range(offset, min(total, offset + count)):
+                dot, axis = divmod(i, DebugPosCount)
+                n, dot = divmod(dot, stride)
+                out.append(self._dbg_marker_offset(n, dot)[axis])
+            values.extend(out)
+            return len(out)
+        except Exception:
+            _log("DbgReadMarker error:\n" + traceback.format_exc())
+            return 0
+
+    def DbgReadMarkerParam(self, refCon, values, offset, count):
+        """The nine LIGHT_CUSTOM params for a marker dot: r g b a s s1 t1 s2 t2.
+
+        Writes ALL NINE rather than modifying in place. Whether X-Plane pre-fills a
+        custom light's buffer with the OBJ's baked values is still an open question on
+        this project (interior_plan.md), and a marker that draws black because of it
+        would be read as the marker feature not working."""
+        try:
+            if values is None:
+                return DebugParamCount
+            if offset < 0:
+                offset = 0
+            if count < 0:                       # the "give me all of it" convention
+                count = DebugParamCount
+            colour = (DebugMarkerOriginColor, DebugMarkerAxisColor,
+                      DebugMarkerRimColor)[max(0, min(2, int(refCon)))]
+            params = list(colour) + [self.dbgMarkerSize] + list(DebugMarkerST)
+            out = params[offset:min(DebugParamCount, offset + count)]
+            values.extend(out)
+            return len(out)
+        except Exception:
+            _log("DbgReadMarkerParam error:\n" + traceback.format_exc())
+            return 0
+
+    def _dbg_marker_offset(self, n, dot):
+        """Where marker dot `dot` of light `n` sits, as an offset from the baked position.
+
+        Three parts, and the split must match `_debug_marker_role`:
+
+        * dot 0 — the light's own origin.
+        * dots 1..AxisDots — evenly along the aim out to `dbgMarkerReach`.
+        * the rest — a ring on the CONE RIM at that same distance, radius
+          `tan(half-spread) * reach`. This is the part that makes aim judgeable: a
+          bare axis line was reported in-sim as not obviously following the light,
+          which is what a short line looks like beside a pool of light a metre wide.
+          The ring draws the beam the `spread` row claims you asked for, so "is the
+          lit patch inside the ring" is a question with a yes/no answer.
+
+        ⚠ AIM COMES FROM THE AUTHORED VECTOR (slots 5..7), NOT from `_dbg_params`, so
+        it does NOT carry the orientation hypothesis. This is the opposite of what the
+        first version did, and the reversal is the point:
+
+        `_dbg_params` is where the orientation cycler is applied, so a marker that read
+        through it moved the arrow and the light TOGETHER — which made the one
+        instrument that could expose an axis mismatch structurally incapable of showing
+        one. Reported in-sim 2026-07-30: with yaw 180, editing PITCH moved the light
+        horizontally while the markers moved vertically as asked. Splitting them is
+        what turns `Dir < / >` into a usable search: the marker is the reference (what
+        the angles say), the light is the sim's answer, and you cycle until they agree.
+
+        Normalised here whatever the vector's length, because the marker shows
+        direction — length is the sim's problem, and `build` warns about it."""
+        base = self._dbg_pos_offset(n)
+        if dot == 0 or n >= len(self.dbgLights):
+            return base
+        # While probing, the marker draws the PROBE's own direction slots — so the arrow
+        # shows what slot 5/6/7 was set to and the light shows what X-Plane did with it.
+        # That side-by-side IS the measurement.
+        vals = self._dbg_probe_params(n) or self._dbg_values(n) or []
+        if len(vals) < DebugParamCount:
+            return base
+        d = vals[5:8]
+        if math.sqrt(sum(v * v for v in d)) < 1e-9:
+            return base          # omnidirectional: no aim to draw, stack them on the dot
+        axis, u, w = _perp_basis(d)
+        reach = self.dbgMarkerReach
+        if dot <= DebugMarkerAxisDots:
+            out = [axis[i] * reach * dot / DebugMarkerAxisDots
+                   for i in range(DebugPosCount)]
+        else:
+            # Half-spread from the cone cosine, clamped just under 90 deg: at 90 the
+            # tangent runs away and the ring would fly off to the horizon.
+            half = min(_cone_to_spread(vals[8]), 89.0)
+            radius = math.tan(math.radians(half)) * reach
+            ang = 2.0 * math.pi * (dot - DebugMarkerAxisDots - 1) / DebugMarkerRimDots
+            out = [axis[i] * reach
+                   + (u[i] * math.cos(ang) + w[i] * math.sin(ang)) * radius
+                   for i in range(DebugPosCount)]
+        return [max(-DebugPosRange, min(DebugPosRange, base[i] + out[i]))
+                for i in range(DebugPosCount)]
 
     def _dbg_publish_to_dataref_tools(self):
         """Tell DataRefTool / DataRefEditor these datarefs exist.
@@ -1885,6 +2279,10 @@ class PythonInterface:
             names.append(DebugPosDataRef)
         if self.dbgCompareAccessor is not None:
             names.append(DebugCompareDataRef)
+        if self.dbgMarkerAccessors:
+            names += [DebugMarkerDataRef, DebugMarkerShowDataRef]
+            names += ["%s/%d" % (DebugMarkerParamDataRef, k)
+                      for k in range(DebugMarkerRoles)]
         found = []
         for sig in ("com.leecbaker.datareftool", "xplanesdk.examples.DataRefEditor"):
             try:
@@ -1902,12 +2300,13 @@ class PythonInterface:
              % (", ".join(found) if found else "no dataref browser (none loaded)"))
 
     def _dbg_unregister_accessors(self):
-        for ref in self.dbgAccessors:
+        for ref in self.dbgAccessors + self.dbgMarkerAccessors:
             try:
                 xp.unregisterDataAccessor(ref)
             except Exception:
                 pass
         self.dbgAccessors = []
+        self.dbgMarkerAccessors = []
         for attr in ("dbgPosAccessor", "dbgCompareAccessor"):
             ref = getattr(self, attr, None)
             if ref is not None:
@@ -1924,13 +2323,18 @@ class PythonInterface:
         X-Plane pre-fills one is an open question, and here the plugin owns every param
         anyway.
 
+        ⚠ REORDERS into the dataref's own layout on the way out — `r g b a size SEMI dx
+        dy dz`, cone FIRST in the trailing four. See DebugDataRefOrder for the
+        measurement. This is the ONE place the translation happens; everything upstream
+        works in the readable order.
+
         Two XPPython3 conventions, both of which fail silently: `values` is an EMPTY
         list to `.extend()`, not a buffer to index; and `count == -1` means "all of
         them", not "none"."""
         try:
             if values is None:
                 return DebugParamCount             # size query
-            params = self._dbg_params(refCon)
+            params = self._dbg_wire_params(refCon)
             if offset < 0:
                 offset = 0
             if count < 0:
@@ -2020,7 +2424,8 @@ class PythonInterface:
         if key in self.dbgFrameVals:
             return self.dbgFrameVals[key]
         name = {"panel": DebugPanelRheostat,
-                "inst": DebugInstRheostat}.get(source, DebugMapRheostat)
+                "inst": DebugInstRheostat,
+                "du": DebugDUBrightness}.get(source, DebugMapRheostat)
         if name not in self.dbgRheostatRefs:
             self.dbgRheostatRefs[name] = xp.findDataRef(name)
             if self.dbgRheostatRefs[name] is None:
@@ -2030,7 +2435,7 @@ class PythonInterface:
         value = 1.0
         if ref is not None:
             try:
-                if source in ("panel", "inst"):
+                if source in ("panel", "inst", "du"):
                     out = []
                     xp.getDatavf(ref, out, index, 1)
                     value = out[0] if out else 0.0
@@ -2048,8 +2453,36 @@ class PythonInterface:
         self.dbgFrameVals[key] = value
         return value
 
+    def _dbg_wire_params(self, n):
+        """`_dbg_params` permuted into the order the dataref actually wants.
+
+        Offsets in DbgReadArray index THIS array, not the readable one, so the reorder
+        has to happen before the slice — X-Plane asking for [5:9] must get semi/dx/dy/dz,
+        not dx/dy/dz/cone."""
+        params = self._dbg_params(n)
+        return [params[i] for i in DebugDataRefOrder]
+
+    def _dbg_probe_params(self, n):
+        """The nine floats a slot probe sends, or None when not probing.
+
+        Deliberately bypasses EVERYTHING else — orientation, rheostat, Isolate, Blink,
+        Mark. A probe is only worth anything if the values reaching X-Plane are exactly
+        the ones on screen, and each of those would otherwise be a second variable in an
+        experiment designed to have one. Every other light is blacked out for the same
+        reason: two lit lights and you cannot say which one moved."""
+        if self.dbgProbe is None:
+            return None
+        if n != self.dbgSel:
+            return [0.0] * DebugParamCount
+        v = list(DebugProbeBaseline)
+        v[self.dbgProbe] = DebugProbeValue
+        return v
+
     def _dbg_params(self, n):
         """The nine spill floats slot `n` currently reads."""
+        probe = self._dbg_probe_params(n)
+        if probe is not None:
+            return probe
         vals = self._dbg_values(n)
         if vals is None:
             return [0.0] * DebugParamCount          # past the manifest: draws nothing
@@ -2073,19 +2506,42 @@ class PythonInterface:
         return v
 
     def _dbg_load(self):
-        """(Re)read lights_inn.debug.json from the installed aircraft."""
+        """(Re)read the newest debug manifest from the installed aircraft.
+
+        There is one manifest per debug-capable target (cockpit, screens) and both
+        number their dataref slots from 0, so driving two at once would have every
+        screen light fighting a cockpit light for the same slot. The most recently
+        WRITTEN manifest wins — that is the build you just ran — and its name goes in
+        the window so "why is the list full of the wrong lights" is never a puzzle."""
         self.dbgLights, self.dbgVals, self.dbgBase = [], [], []
         self.dbgPosTunable = False      # re-asserted from the manifest below
+        self.dbgMarkerDots = 0          # 0 = this OBJ has no markers in it
+        self.dbgTarget = ""
         acf = self._aircraft_dir_raw()
         if not acf:
             self.dbgNote = "no aircraft loaded"
             return
-        path = os.path.join(acf, DebugManifestRelPath)
-        if not os.path.exists(path):
+        found = []
+        for label, rel in DebugManifests:
+            p = os.path.join(acf, rel)
+            if os.path.exists(p):
+                try:
+                    found.append((os.path.getmtime(p), label, p))
+                except OSError:
+                    pass
+        if not found:
             self.dbgNote = "no debug OBJ installed"
-            _log("live light debug: %s not found — build with "
-                 "`build_objs.py build --target interior --debug --write`" % path)
+            _log("live light debug: none of %s found under %s — build with "
+                 "`build_objs.py build --target interior|screens --debug --write`"
+                 % (", ".join(r for _, r in DebugManifests), acf))
             return
+        found.sort(reverse=True)        # newest mtime first
+        _, self.dbgTarget, path = found[0]
+        if len(found) > 1:
+            _log("live light debug: %d debug OBJs are installed (%s); driving the "
+                 "newest, %s. They share the same dataref slots, so rebuild the "
+                 "other WITHOUT --debug to avoid two lights per slot."
+                 % (len(found), ", ".join(f[1] for f in found), self.dbgTarget))
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -2093,6 +2549,10 @@ class PythonInterface:
             # Default False: a manifest is always written with its OBJ, so a missing key
             # means an old or hand-made one, and hiding the controls is the safe read.
             self.dbgPosTunable = bool(data.get("pos_tunable", False))
+            # How many marker dots the OBJ baked per light. It strides the offset
+            # array, so reading it from the manifest rather than assuming the constant
+            # means a stale OBJ drives ITS OWN dots instead of a neighbour's.
+            self.dbgMarkerDots = int(data.get("marker_dots", 0))
         except Exception:
             self.dbgNote = "manifest read failed"
             _log("live light debug read failed:\n" + traceback.format_exc())
@@ -2103,11 +2563,19 @@ class PythonInterface:
             # Seeded from the manifest — the OBJ's own authored values — so the window
             # opens on the real light. The x/y/z tail is an OFFSET and starts at zero;
             # the baked position it applies to is light["pos"].
+            d = [float(x) for x in (list(d) + [0.0, 0.0, 0.0])[:3]]
+            # Aim seeded FROM the authored vector, then the vector rewritten from the
+            # aim, so the window opens on the light as authored and every later edit
+            # flows angles -> vector. The rewrite also normalises: a light authored
+            # with a non-unit dir is shown, and emitted, as the unit form of itself.
+            aim = _dir_to_aim(d)
             vals = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0,
-                    float(light.get("size", 1)), float(d[0]), float(d[1]), float(d[2]),
-                    float(light.get("cone", 1)), 0.0, 0.0, 0.0]
+                    float(light.get("size", 1)), d[0], d[1], d[2],
+                    float(light.get("cone", 1)), 0.0, 0.0, 0.0,
+                    round(aim[0], 3), round(aim[1], 3)]
             self.dbgVals.append(vals)
-            self.dbgBase.append(list(vals))
+            self._dbg_apply_aim(len(self.dbgVals) - 1)
+            self.dbgBase.append(list(self.dbgVals[-1]))
         if len(self.dbgLights) > len(self.dbgAccessors):
             self.dbgNote = "TOO MANY LIGHTS (%d > %d slots)" % (
                 len(self.dbgLights), len(self.dbgAccessors))
@@ -2116,27 +2584,32 @@ class PythonInterface:
                  "build/build_objs.py" % (len(self.dbgLights), len(self.dbgAccessors)))
             return
         self.dbgSel = min(self.dbgSel, max(0, len(self.dbgLights) - 1))
-        self.dbgNote = "%d lights" % len(self.dbgLights)
+        self.dbgNote = "%s: %d lights" % (self.dbgTarget, len(self.dbgLights))
         _log("live light debug loaded %s (%d lights)" % (path, len(self.dbgLights)))
 
     # The X/Y/Z rows are OFFSETS from the baked position — the ANIM_trans wrappers
     # translate the light, they do not place it. The window shows the resulting
     # absolute position beside them.
+    # Aim is edited as PITCH/YAW in degrees and spread as a HALF-ANGLE in degrees,
+    # not as dx/dy/dz and a cosine. Three components whose length is not free, and a
+    # cone number that runs backwards, are not quantities anyone can steer by hand —
+    # reported in-sim as "very difficult to get things pointed correctly". Slots 5..7
+    # and 8 still hold the vector and the cosine, because that is what the light
+    # reads; these rows write them through _dbg_set_aim / the `spread` nudge.
     DEBUG_SLOTS = (
-        ("Red",   0, "rgb"),
-        ("Green", 1, "rgb"),
-        ("Blue",  2, "rgb"),
-        ("Alpha", 3, "alpha"),
-        ("Size",  4, "size"),
-        ("Dir X", 5, "dir"),
-        ("Dir Y", 6, "dir"),
-        ("Dir Z", 7, "dir"),
-        ("Cone",  8, "cone"),
+        ("Red",    0, "rgb"),
+        ("Green",  1, "rgb"),
+        ("Blue",   2, "rgb"),
+        ("Alpha",  3, "alpha"),
+        ("Size",   4, "size"),
+        ("Pitch",  DebugAimSlot,     "pitch"),
+        ("Yaw",    DebugAimSlot + 1, "yaw"),
+        ("Spread", 8, "spread"),
     )
 
-    # Shown only when the installed OBJ has the ANIM_trans wrappers (--debug-pos). Split
-    # out rather than filtered inline so the window height can be computed from the rows
-    # that will really be drawn.
+    # Shown only when the installed OBJ has the ANIM_trans wrappers, i.e. anything but a
+    # --no-debug-pos build. Split out rather than filtered inline so the window height
+    # can be computed from the rows that will really be drawn.
     DEBUG_POS_SLOTS = (
         ("X",     9,  "pos"),
         ("Y",     10, "pos"),
@@ -2159,8 +2632,8 @@ class PythonInterface:
     def _dbg_resize_window(self):
         """Rebuild the window if the visible row count changed under it.
 
-        The X/Y/Z rows come and go with `--debug-pos` and the window has fixed resizing
-        limits, so a stale height clips the action buttons off the bottom."""
+        The X/Y/Z rows come and go with `--no-debug-pos` and the window has fixed
+        resizing limits, so a stale height clips the action buttons off the bottom."""
         if self.dbgWin is None or self.dbgWinSlots == len(self._dbg_slots()):
             return
         self._destroy_window("dbgWin")
@@ -2189,14 +2662,29 @@ class PythonInterface:
     def _dbg_nudge(self, slot, kind, sign):
         if not self.dbgVals:
             return
-        step = (DebugCoarseStep if self.dbgCoarse else DebugFineStep)[kind]
         v = self.dbgVals[self.dbgSel]
-        v[slot] += sign * step
-        if kind in ("rgb", "alpha"):
+        if kind == "spread":
+            # Edited in DEGREES, stored as the cosine the light reads. Clamped to
+            # 0.1..89.9: at 0 the beam is a line and at 90 it is a hemisphere whose
+            # rim tangent runs to infinity, and neither is a usable tuning state.
+            deg = max(0.1, min(89.9, _cone_to_spread(v[8]) + sign * self.dbgStep))
+            v[8] = _spread_to_cone(round(deg, 6))
+            return
+        # Rounded to the step ladder's own resolution: 0.1 added ten times is
+        # 0.9999999999999999 in binary floating point, and a window full of values
+        # like that is unreadable and gets pasted into the .phdsl as-is.
+        v[slot] = round(v[slot] + sign * self.dbgStep, 6)
+        if kind == "pitch":
+            # Pitch is clamped, yaw wraps. Past +-90 pitch would start coming back
+            # down while yaw silently flipped 180 — an aim that is impossible to
+            # steer. Yaw has no such seam: 359 and -1 are the same heading.
+            v[slot] = max(-90.0, min(90.0, v[slot]))
+            self._dbg_apply_aim(self.dbgSel)
+        elif kind == "yaw":
+            v[slot] = (v[slot] + 180.0) % 360.0 - 180.0
+            self._dbg_apply_aim(self.dbgSel)
+        elif kind in ("rgb", "alpha"):
             v[slot] = max(0.0, min(1.0, v[slot]))
-        elif kind == "cone":
-            # cone is cos(half-spread): outside [-1, 1] it is not an angle at all.
-            v[slot] = max(-1.0, min(1.0, v[slot]))
         elif kind == "size":
             v[slot] = max(0.0, v[slot])
         elif kind == "pos":
@@ -2204,24 +2692,85 @@ class PythonInterface:
             # would move nothing while the window claimed it had.
             v[slot] = max(-DebugPosRange, min(DebugPosRange, v[slot]))
 
-    def _dbg_normalise_dir(self):
-        """Scale the selected light's dir vector to unit length, leaving its aim alone.
+    def _dbg_marker_value(self):
+        """The number the OBJ's ANIM_hide gate reads: 0 off, -1 all, n+1 = light n."""
+        if self.dbgMarkerMode == "all":
+            return DebugMarkerAll
+        if self.dbgMarkerMode == "this":
+            return self.dbgSel + 1
+        return DebugMarkerOff
 
-        Several of the transcribed vectors are far off unit (`0 -0.15 -0.1` has length
-        0.18, `0 -1.5 0.4` has 1.55) and `cone` is compared against a DOT PRODUCT with
-        that vector. If X-Plane does not normalise internally, a short vector shrinks
-        every dot product below the threshold and the cone control appears dead — a
-        symptom already reported on the main panel floods. One click tests it."""
+    def _dbg_set_marker(self, mode):
+        self.dbgMarkerMode = mode
+        if mode != "off" and not self.dbgMarkerDots:
+            # The controls stay live so the state is not mysteriously unclickable, but
+            # an OBJ built before markers existed has no dots to show.
+            self.dbgNote = "this debug OBJ has no markers — rebuild it"
+
+    def _dbg_nudge_marker(self, what, sign):
+        delta = sign * self.dbgStep
+        if what == "reach":
+            self.dbgMarkerReach = max(0.05, min(DebugPosRange / 2.0,
+                                                round(self.dbgMarkerReach + delta, 6)))
+        else:
+            self.dbgMarkerSize = max(0.005, round(self.dbgMarkerSize + delta, 6))
+
+    def _dbg_set_probe(self, slot):
+        """Enter/leave the slot probe. Logged, because the value of this control is being
+        able to report what each slot did and that moment is not one for reading a
+        window. Turns the markers on with it: the arrow is the reference the light is
+        being compared against."""
+        self.dbgProbe = slot
+        if slot is None:
+            self.dbgNote = "probe off — back to normal tuning"
+        else:
+            v = list(DebugProbeBaseline)
+            v[slot] = DebugProbeValue
+            self.dbgNote = ("probe slot %d = %s (expect: %s)"
+                            % (slot, self._fmt_num(DebugProbeValue),
+                               DebugProbeExpect[slot]))
+            if self.dbgMarkerMode == "off":
+                self.dbgMarkerMode = "this"
+            _log("live light debug: %s" % self.dbgNote)
+            _log("  working order: r=%s g=%s b=%s a=%s size=%s dx=%s dy=%s dz=%s cone=%s"
+                 % tuple(self._fmt_num(x) for x in v))
+            _log("  wire order:    %s"
+                 % "  ".join("%s=%s" % (name, self._fmt_num(v[i])) for name, i in
+                              zip(DebugWireNames, DebugDataRefOrder)))
+
+    def _dbg_aim_preset(self, pitch, yaw, label):
+        """Put the selected light on a cardinal axis, from a KNOWN state.
+
+        Clears the dir orientation hypothesis as part of the click. That is deliberate,
+        not a side effect: the point of a preset is that "I clicked Up" fully determines
+        what was asked for, and a leftover permutation from the cycler would silently
+        make it mean something else — which is indistinguishable in the cockpit from the
+        sim mis-reading the axes, i.e. exactly the confusion this is meant to resolve."""
         if not self.dbgVals:
             return
         v = self.dbgVals[self.dbgSel]
-        length = math.sqrt(v[5] * v[5] + v[6] * v[6] + v[7] * v[7])
-        if length < 1e-9:
-            self.dbgNote = "dir is zero (omni) — nothing to normalise"
+        v[DebugAimSlot], v[DebugAimSlot + 1] = pitch, yaw
+        self._dbg_apply_aim(self.dbgSel)
+        cleared = " (dir orientation reset to identity)" if self.dbgOrientDir else ""
+        self.dbgOrientDir = 0
+        self.dbgNote = "aim %s: pitch %g yaw %g -> dir %s%s" % (
+            label, pitch, yaw,
+            " ".join(self._fmt_num(x) for x in v[5:8]), cleared)
+        _log("live light debug: %s" % self.dbgNote)
+
+    def _dbg_apply_aim(self, n):
+        """Rewrite slots 5..7 (dx/dy/dz) from slots 12..13 (pitch/yaw).
+
+        One direction of flow, always. The angles are what the window edits and what
+        "Log DSL" prints; the vector is a derived value the light happens to read. That
+        also means the tuner can only ever emit a UNIT vector, which is the class of
+        bug that made the interior's cones inert (docs/dsl.md)."""
+        if n >= len(self.dbgVals):
             return
-        for i in (5, 6, 7):
-            v[i] /= length
-        self.dbgNote = "normalised dir (was length %.3f)" % length
+        v = self.dbgVals[n]
+        if v[5] == 0.0 and v[6] == 0.0 and v[7] == 0.0:
+            return          # omnidirectional light: it has no aim to steer
+        v[5], v[6], v[7] = _aim_to_dir(v[DebugAimSlot], v[DebugAimSlot + 1])
 
     def _dbg_cycle_orient(self, which, delta):
         """Step the orientation hypothesis. `which` is "pos", "dir" or "both".
@@ -2283,15 +2832,24 @@ class PythonInterface:
                 ", mount %s" % light["mount"] if light.get("mount") else ""))
         pos = self._dbg_abs_pos(self.dbgSel)
         _log("  # lights.layout.phdsl — position is ABSOLUTE here (baked + your offset):")
-        _log("  %s { pos: %s %s %s;  dir: %s %s %s; }"
+        # `aim:` is what the DSL should carry — it is what was actually steered, it
+        # cannot express a non-unit vector, and "10 degrees further down" is an edit
+        # someone can make to it later. The vector is logged beside it as a comment
+        # so a diff against a pre-`aim` .phdsl is still readable.
+        _log("  %s { pos: %s %s %s;  aim: %s %s;  spread: %s; }"
              % (light.get("name"), fmt(pos[0]), fmt(pos[1]), fmt(pos[2]),
-                fmt(v[5]), fmt(v[6]), fmt(v[7])))
+                fmt(v[DebugAimSlot]), fmt(v[DebugAimSlot + 1]),
+                fmt(round(_cone_to_spread(v[8]), 3))))
+        _log("    # same thing as vectors: dir: %s %s %s;  cone: %s;"
+             % (fmt(v[5]), fmt(v[6]), fmt(v[7]), fmt(v[8])))
         if light.get("mount"):
             _log("    ^ MOUNT-LOCAL: this light rides the %s transform stack, so that "
                  "pos is relative to it, exactly as the .phdsl fixture writes it."
                  % light["mount"])
         _log("  # lights.style.phdsl — the light TYPE carries these:")
-        _log("  size: %s;  cone: %s;" % (fmt(v[4]), fmt(v[8])))
+        _log("  size: %s;  spread: %s;   // spread is the half-angle; cone: %s is "
+             "the same thing as a cosine"
+             % (fmt(v[4]), fmt(round(_cone_to_spread(v[8]), 3)), fmt(v[8])))
         _log("  # lights.style.phdsl — color belongs to a PALETTE entry, not the light:")
         _log("  <color-name>: %s %s %s;   (alpha %s is the tuner's own multiplier and "
              "has no .phdsl equivalent — it is the rheostat in the sim)"
@@ -2299,6 +2857,21 @@ class PythonInterface:
         _log("  offset applied was %s %s %s from baked %s"
              % (fmt(v[9]), fmt(v[10]), fmt(v[11]),
                 " ".join(fmt(x) for x in light.get("pos", []))))
+        # The EXACT nine floats X-Plane reads for this light, in order, labelled. This
+        # is the line that separates "our maths is wrong" from "the sim disagrees about
+        # what slot 5 means" — the two are indistinguishable from inside the cockpit,
+        # and that ambiguity is what the aim-axis report came down to.
+        # In WIRE order, which is what X-Plane actually receives — cone first in the
+        # trailing four. Logging the readable order here would have hidden the very bug
+        # that made this line necessary.
+        _log("  dataref %s/%d reads (wire order): %s"
+             % (DebugDataRefPrefix.rstrip("/"), self.dbgSel,
+                "  ".join("%s=%s" % (name, fmt(val)) for name, val in
+                          zip(DebugWireNames, self._dbg_wire_params(self.dbgSel)))))
+        if self.dbgOrientDir:
+            _log("    ^ dx/dy/dz above are PERMUTED by orient dir %s; the authored aim "
+                 "is %s %s %s (which is what the markers draw)"
+                 % (self._dbg_orient_text("dir"), fmt(v[5]), fmt(v[6]), fmt(v[7])))
         # Always logged, even at the identity: a number copied out of a session with an
         # orientation applied means something different, and the numbers do not say so.
         _log("  orientation  pos %s   dir %s"
@@ -2358,9 +2931,85 @@ class PythonInterface:
                  self.dbgBlink),
                 ("Mark", lambda: setattr(self, "dbgMark", not self.dbgMark),
                  self.dbgMark),
-                ("Fine", lambda: setattr(self, "dbgCoarse", False), not self.dbgCoarse),
-                ("Coarse", lambda: setattr(self, "dbgCoarse", True), self.dbgCoarse),
             ])
+            y -= btnH + UI_GAP
+
+            # Step size, one button per decade. The lit button is literally what a
+            # "+" click adds, so the amount is never something to remember.
+            _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, "Step")
+            self._ui_button_row(
+                l + UI_PAD + 52, y - btnH, y, mx, my, self.dbgHits,
+                [(_step_label(s), (lambda v=s: setattr(self, "dbgStep", v)),
+                  abs(self.dbgStep - s) < 1e-9) for s in DebugSteps],
+                minWidth=52)
+            y -= btnH + UI_GAP
+
+            # SLOT PROBE. Sends the baseline with ONE slot set, so whatever the sim does
+            # is caused by that slot alone. This measures the array layout instead of
+            # trusting it — see the DebugProbeBaseline comment.
+            _draw_text(COL_ACTIVE if self.dbgProbe is not None else COL_DIM,
+                       l + UI_PAD, y - btnH + 4, "Probe")
+            self._ui_button_row(
+                l + UI_PAD + 52, y - btnH, y, mx, my, self.dbgHits,
+                [("Off", lambda: self._dbg_set_probe(None), self.dbgProbe is None)]
+                + [(str(k), (lambda s=k: self._dbg_set_probe(s)), self.dbgProbe == k)
+                   for k in range(DebugParamCount)],
+                minWidth=30)
+            y -= btnH + 4
+            if self.dbgProbe is not None:
+                # What is being sent and what it SHOULD do, on screen together: the
+                # answer is then a comparison, not something to remember.
+                _draw_text(COL_ACTIVE, l + UI_PAD, y - btnH + 4,
+                           "slot %d = %s -> expect: %s"
+                           % (self.dbgProbe, self._fmt_num(DebugProbeValue),
+                              DebugProbeExpect[self.dbgProbe]))
+            else:
+                _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4,
+                           "(probe sends one slot at a time to measure the layout)")
+            y -= btnH + UI_GAP
+
+            # AIM PRESETS. One click per cardinal direction, from a known state — the
+            # only unambiguous way to ask "which way does the sim think this points".
+            _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, "Aim")
+            self._ui_button_row(
+                l + UI_PAD + 52, y - btnH, y, mx, my, self.dbgHits,
+                [(lbl, (lambda p=pitch, ya=yaw, s=lbl:
+                        self._dbg_aim_preset(p, ya, s)))
+                 for lbl, pitch, yaw in DebugAimPresets],
+                minWidth=48)
+            y -= btnH + UI_GAP
+
+            # POSITION MARKERS: billboard dots on the light's origin and along its aim.
+            # A spill light is invisible in air and the bright part of its pool is not
+            # where it sits, so this is the only direct read on placement.
+            _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, "Marker")
+            x = self._ui_button_row(
+                l + UI_PAD + 52, y - btnH, y, mx, my, self.dbgHits, [
+                    ("Off", lambda: self._dbg_set_marker("off"),
+                     self.dbgMarkerMode == "off"),
+                    ("This", lambda: self._dbg_set_marker("this"),
+                     self.dbgMarkerMode == "this"),
+                    ("All", lambda: self._dbg_set_marker("all"),
+                     self.dbgMarkerMode == "all"),
+                ], minWidth=52)
+            # Size lives here rather than in a row of its own: a marker too small to
+            # see and a marker that is not drawn look exactly alike, so the fix has to
+            # be next to the switch that turned it on.
+            _draw_text(COL_DIM, x + UI_GAP, y - btnH + 4,
+                       "size %s" % self._fmt_num(self.dbgMarkerSize))
+            x2 = self._ui_button_row(
+                x + UI_GAP + 66, y - btnH, y, mx, my, self.dbgHits,
+                [("-", lambda: self._dbg_nudge_marker("size", -1)),
+                 ("+", lambda: self._dbg_nudge_marker("size", +1))], minWidth=30)
+            # Reach is how far the arrow and the cone ring are drawn. Adjustable
+            # because the right length depends entirely on the light: a 20 cm arrow
+            # was unreadable next to a pool of light a metre across.
+            _draw_text(COL_DIM, x2 + UI_GAP, y - btnH + 4,
+                       "reach %s" % self._fmt_num(self.dbgMarkerReach))
+            self._ui_button_row(
+                x2 + UI_GAP + 76, y - btnH, y, mx, my, self.dbgHits,
+                [("-", lambda: self._dbg_nudge_marker("reach", -1)),
+                 ("+", lambda: self._dbg_nudge_marker("reach", +1))], minWidth=30)
             y -= btnH + UI_GAP * 2
 
             if light:
@@ -2369,18 +3018,30 @@ class PythonInterface:
                 for label, slot, kind in self._dbg_slots():
                     _draw_text(COL_DIM, l + UI_PAD, y - btnH + 4, label)
                     changed = abs(vals[slot] - base[slot]) > 1e-9
+                    # Spread is STORED as a cosine and SHOWN as an angle. Showing the
+                    # stored number would put the backwards-running value straight back
+                    # on screen, which is the thing these rows exist to get rid of.
+                    shown = (_cone_to_spread(vals[slot]) if kind == "spread"
+                             else vals[slot])
                     _draw_text(COL_ACTIVE if changed else COL_BRIGHT,
-                               l + UI_PAD + 52, y - btnH + 4, self._fmt_num(vals[slot]))
+                               l + UI_PAD + 52, y - btnH + 4, self._fmt_num(shown))
                     self._ui_button_row(
                         l + UI_PAD + 120, y - btnH, y, mx, my, self.dbgHits,
                         [("-", (lambda s=slot, k=kind: self._dbg_nudge(s, k, -1))),
                          ("+", (lambda s=slot, k=kind: self._dbg_nudge(s, k, +1)))],
                         minWidth=34)
-                    if kind == "cone":
-                        # cone runs BACKWARDS (bigger = narrower), so show the angle.
-                        c = max(-1.0, min(1.0, vals[slot]))
+                    if kind == "spread":
                         _draw_text(COL_DIM, l + UI_PAD + 210, y - btnH + 4,
-                                   "= %.0f deg half-spread" % math.degrees(math.acos(c)))
+                                   "deg half-angle   (cone: %s)"
+                                   % self._fmt_num(vals[slot]))
+                    elif kind in ("pitch", "yaw"):
+                        # Named so the sign convention never has to be recalled: it is
+                        # the one thing about an aim that cannot be checked by eye
+                        # without already knowing which way you asked it to point.
+                        _draw_text(COL_DIM, l + UI_PAD + 210, y - btnH + 4,
+                                   "deg  %s" % (_pitch_word(vals[slot])
+                                                if kind == "pitch"
+                                                else _yaw_word(vals[slot])))
                     elif kind == "pos":
                         # Offsets; show the absolute coordinate they produce, which is
                         # the number that goes into the .phdsl.
@@ -2396,8 +3057,10 @@ class PythonInterface:
             self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
                 ("Debug lights", self._dbg_toggle_compare, bool(self.dbgCompare)),
                 ("Original lines", self._dbg_toggle_compare, not self.dbgCompare),
-                ("Norm dir", self._dbg_normalise_dir),
             ])
+            # `Norm dir` used to live here. It is gone because it cannot apply any
+            # more: aim is edited as angles and the vector is derived from them, so
+            # every value this window emits is already unit length.
             y -= btnH + UI_GAP
 
             # ORIENTATION SEARCH, applied to every light at once; the readout below the
@@ -2424,12 +3087,14 @@ class PythonInterface:
             y -= btnH + 4
             if self.dbgPosTunable:
                 moved = self.dbgOrientPos or self.dbgOrientDir
-                text = "pos %s     dir %s" % (self._dbg_orient_text("pos"),
-                                              self._dbg_orient_text("dir"))
+                # Says whose side the markers are on, because that is the whole method:
+                # cycle `Dir` until the light agrees with the arrow.
+                text = "pos %s     dir %s     (markers show the ASKED aim)" % (
+                    self._dbg_orient_text("pos"), self._dbg_orient_text("dir"))
             else:
                 moved = self.dbgOrientDir
-                text = "dir %s        (position tuning off — build with --debug-pos)" \
-                    % self._dbg_orient_text("dir")
+                text = "dir %s        (position tuning off — this OBJ was built " \
+                    "--no-debug-pos)" % self._dbg_orient_text("dir")
             _draw_text(COL_ACTIVE if moved else COL_DIM, l + UI_PAD, y - btnH + 4, text)
             y -= btnH + UI_GAP
 
@@ -2455,15 +3120,19 @@ class PythonInterface:
             return
         fh = _font_height()
         height = (UI_TOP_INSET + 2 * (fh + 8) + UI_GAP
-                  + 2 * (fh + 10) + UI_GAP * 3
+                  # nav, identify, step, probe (+ its readout), aim-preset, marker
+                  + 7 * (fh + 10) + UI_GAP * 7 + 4
                   + len(self._dbg_slots()) * (fh + 14)
                   # A/B row, orientation buttons, orientation readout, actions row
                   + 4 * (fh + 10) + UI_GAP * 3 + UI_PAD * 3)
         # Remember what the height was sized for: swapping between a --debug-pos build
         # and a plain one changes the row count.
         self.dbgWinSlots = len(self._dbg_slots())
+        # 560 wide, not 460: the marker row carries Off/This/All plus a size and a
+        # reach nudge, and at 460 the reach buttons fell off the right edge — where
+        # they are unclickable but still drawn by the hit list, i.e. invisibly broken.
         self.dbgWin = self._create_window("Photon Dev - Live Light Debug",
-                                          460, height, self.DbgDraw, self.DbgClick)
+                                          560, height, self.DbgDraw, self.DbgClick)
 
     # ---------------------------------------------------------------- menu
     def CreateMenu(self):

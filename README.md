@@ -89,8 +89,10 @@ files into one that can be switched in-sim, the same way the exterior lights wor
 * **New Halogen**: a lighter amber, as fitted to later builds.
 * **LED**: cool white domes and flood, warm white on the smaller lamps.
 * **Auto**: follows whatever era the exterior profile resolved to.
-* **Custom**: set each group independently — Dome Lights, Map Lights, Pedestal &
-  Tables, and Console Lights.
+* **Custom**: set each group independently — Dome Lights, Map Lights, Main Panel Flood,
+  Pedestal & Tables, and Console Lights. The dome offers Fluorescent or LED rather than
+  the three looks: a real A320 dome light is a fluorescent fitting, so it doesn't follow
+  the halogen era of the panels below it.
 
 Installing it also replaces a set of cockpit textures and adjusts the aircraft's `.acf`
 files so the sim's three built-in cockpit spotlights follow the same switch. Uninstalling
@@ -148,7 +150,7 @@ The strobe and beacon flashing is controlled by the ToLiss Photon plugin. It run
   * _These mods also optionally provide improved **exterior** lighting. That part has a different artistic direction compared to ToLiss Photon and is a good alternative if you decide you don't like this mod. Note the two can't coexist: installing Gus's zip by hand after Photon will overwrite Photon's exterior lights._
 
 ## Credits
-The **interior (cockpit) lighting is entirely the work of [GusRodrigues](https://forums.x-plane.org/profile/6767-gusrodrigues/)** and is included here with his permission. The light design, placement, intensities, colour looks, and the cockpit textures that ship with it are all his; ToLiss Photon only makes them switchable in-sim. If you like how the cockpit looks, that's Gus. Go say thanks on [his profile](https://forums.x-plane.org/profile/6767-gusrodrigues/).
+The **interior (cockpit) lighting is entirely the work of [GusRodrigues](https://forums.x-plane.org/profile/6767-gusrodrigues/)** and is included here with his permission. The light design, placement, intensities, color looks, and the cockpit textures that ship with it are all his; ToLiss Photon only makes them switchable in-sim. If you like how the cockpit looks, that's Gus. Go say thanks on [his profile](https://forums.x-plane.org/profile/6767-gusrodrigues/).
 
 The original .obj lighting files were authored by ToLiss Simulations. Scripting was crafted with the assistance of Claude Code (Sonnet 5 and Opus 4.8). 
 

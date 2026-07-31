@@ -6,6 +6,7 @@ here so a future refactor trips a red test instead of shipping a subtle bug.
 """
 from __future__ import annotations
 
+import math
 import shutil
 import sys
 import tempfile
@@ -282,11 +283,43 @@ def expected_deviations(variant):
 # The deviation machinery above compares on (position, color) and this changes
 # neither, so the pair is cancelled out here and pinned properly by
 # test_panel_flood_3_sits_wholly_on_one_rheostat.
-FLOOD3_DIR, FLOOD3_CONE = (0.0, -1.5, 0.4), 0.906
+# Written in UNIT form because every comparison against Gus goes through
+# `_canon` first — his is 0 -1.5 0.4 and ours 0 -0.966 0.258, the same aim.
+FLOOD3_DIR, FLOOD3_CONE = (0.0, -0.966, 0.258), 0.906
+
+
+def _unit(d):
+    """A direction reduced to aim alone, at the project's 3 dp.
+
+    DEVIATION #5 (2026-07-29) normalised every interior `dir:` — X-Plane compares
+    `cone` against a DOT PRODUCT with it, so a vector 0.18 long (Gus's outer panel
+    floods) makes the effective cone threshold cone/|d|, which above 1 no direction
+    can satisfy. That is length, never aim: `0 -1.5 0.4` and `0 -0.966 0.258` point
+    the same way. So the colour-fidelity comparison canonicalises dir out, and the
+    normalisation itself is pinned by its own test — otherwise a change of aim, the
+    thing that would actually be a regression, would hide inside the same diff."""
+    length = math.sqrt(sum(v * v for v in d))
+    if length < 1e-9:
+        return (0.0, 0.0, 0.0)                 # omnidirectional
+    return tuple(round(v / length, 3) for v in d)
+
+
+def _canon(rec):
+    """One record with its dir reduced to aim. Records are
+    (cls, pos, rgb, index, size, dir, cone)."""
+    return rec[:5] + (_unit(rec[5]),) + rec[6:]
+
+
+def _canon_all(counter):
+    out = Counter()
+    for rec, n in counter.items():
+        out[_canon(rec)] += n
+    return out
 
 
 def _is_flood3_line(rec, index):
-    """The single record the §1.3e rheostat correction moves, at `index`."""
+    """The single record the §1.3e rheostat correction moves, at `index`.
+    Expects an already-canonicalised record."""
     cls, pos, _rgb, idx, _size, d, cone = rec
     return (cls == "airplane_panel_sp" and pos == (0.0, 0.0, 0.0)
             and idx == index and d == FLOOD3_DIR and cone == FLOOD3_CONE)
@@ -317,11 +350,17 @@ class GusFidelityTests(unittest.TestCase):
         recs = interior_records()
         for value, name in ((0, "current"), (1, "new"), (2, "led")):
             with self.subTest(variant=name):
-                mine = branch_records(recs, value)
+                # Both sides canonicalised: this test is about COLOUR, and
+                # deviation #5 changed only the LENGTH of every dir. Comparing raw
+                # would drop 20 records into the diff that say nothing about colour
+                # and would swamp the ones that do. _unit keeps the aim, so a real
+                # change of direction still shows up here.
+                mine = _canon_all(branch_records(recs, value))
                 gus_text = (GUS / f"lights_inn_{name}.obj").read_text(
                     encoding="utf-8", errors="replace")
-                theirs = Counter({tuple(r[1:]): n
-                                  for r, n in B.parse_records(gus_text).items()})
+                theirs = _canon_all(Counter({tuple(r[1:]): n
+                                             for r, n in
+                                             B.parse_records(gus_text).items()}))
                 # Photon ADDS three lights Gus never had — the re-added .acf
                 # cockpit spots (§3.4). Compare only what he authored.
                 mine_gus_only = Counter({k: v for k, v in mine.items()
@@ -345,6 +384,44 @@ class GusFidelityTests(unittest.TestCase):
                 self.assertEqual(len(only_mine), len(want_mine), only_mine)
                 self.assertEqual(len(only_theirs), len(want_theirs), only_theirs)
 
+    def test_every_direction_is_unit_length_but_still_gus_s_aim(self):
+        """DEVIATION #5 (2026-07-29): every interior `dir:` normalised.
+
+        Why it is not mere tidiness — X-Plane compares `cone` against a DOT PRODUCT
+        with `dir`, so the effective threshold is cone/|d|. Gus's outer panel floods
+        run 0.180 and 0.258 long against cones of 0.819 and 0.906, i.e. thresholds
+        of 4.5 and 3.5. Nothing can satisfy those, so those lamps could not act as
+        cones at all and `cone` had nothing left to change — which is exactly the
+        pair reported in-sim as "the outer floods are wrong under all 48
+        permutations" and "cone edits have no visible effect".
+
+        Two halves, and the second is the one that matters: normalising must change
+        LENGTH ONLY. If it ever changes aim it is no longer a fix, it is a silent
+        re-aiming of Gus's measured geometry."""
+        recs = interior_records()
+        for value, name in ((0, "current"), (1, "new"), (2, "led")):
+            with self.subTest(variant=name):
+                dirs = [rec[5] for rec in branch_records(recs, value)]
+                self.assertTrue(dirs)
+                for d in dirs:
+                    length = math.sqrt(sum(v * v for v in d))
+                    if length < 1e-9:
+                        continue                       # the dome is omnidirectional
+                    self.assertAlmostEqual(
+                        length, 1.0, delta=B.UNIT_DIR_TOLERANCE,
+                        msg="dir %s has length %.3f — normalise it in the .phdsl "
+                            "(`build` prints the unit form)" % (d, length))
+                # ...and the set of AIMS is unchanged from Gus's. Compared as a set
+                # of unit vectors, so length is out of the picture on both sides.
+                gus_text = (GUS / f"lights_inn_{name}.obj").read_text(
+                    encoding="utf-8", errors="replace")
+                theirs = {_unit(r[6]) for r in B.parse_records(gus_text)}
+                mine = {_unit(d) for d in dirs}
+                # Photon adds three spot lights Gus never had (§3.4), so ours is a
+                # superset; nothing of his may go missing.
+                self.assertTrue(theirs <= mine,
+                                "aims lost vs Gus: %s" % sorted(theirs - mine))
+
     def test_panel_flood_3_sits_wholly_on_one_rheostat(self):
         """§1.3e. Gus's panel flood 3 carries INDEX 1 on the first of its three
         lines and INDEX 2 on the other two, so a third of that lamp dims on the
@@ -360,7 +437,9 @@ class GusFidelityTests(unittest.TestCase):
             collapse to one key and the bug is invisible unless counts are honoured."""
             out = []
             for rec, n in counter.items():
-                if rec[pos_at] == (0.0, 0.0, 0.0) and rec[dir_at] == FLOOD3_DIR:
+                # Aim, not the raw vector: Gus's file carries 0 -1.5 0.4 and ours
+                # the unit form of it (deviation #5), and this test predates that.
+                if rec[pos_at] == (0.0, 0.0, 0.0) and _unit(rec[dir_at]) == FLOOD3_DIR:
                     out.extend([int(rec[idx_at])] * n)
             return sorted(out)
 
@@ -745,7 +824,7 @@ class DebugLightBuildTests(unittest.TestCase):
     """`build --target interior --debug` — the dev light-tuner OBJ. Never shipped,
     so the bar is "does the dev plugin get what it needs", not fidelity."""
 
-    def _debug(self, airframe="a320", pos=False):
+    def _debug(self, airframe="a320", pos=True):
         cfg = B.load_config(wing="stock")
         em = B.Emitter(cfg, airframe, "stock", target="interior", debug=True,
                        debug_pos=pos)
@@ -879,9 +958,8 @@ class DebugLightBuildTests(unittest.TestCase):
         nine params through its dataref, but ANIM_trans takes a dataref of its own.
 
         The keyframes must span ∓DEBUG_POS_RANGE keyed on the SAME values, so the
-        dataref reads directly as metres; any other keying rescales every edit.
-        Opt-in via --debug-pos, so this asks for it explicitly."""
-        em, text = self._debug(pos=True)
+        dataref reads directly as metres; any other keying rescales every edit."""
+        em, text = self._debug()
         lines = [l.strip() for l in text.splitlines() if l.strip().startswith("ANIM_trans")]
         moves = [l for l in lines if B.DEBUG_POS_DREF in l]
         self.assertEqual(len(moves), 3 * len(em.debug_lights))
@@ -899,7 +977,7 @@ class DebugLightBuildTests(unittest.TestCase):
         """A mounted lamp's offset must apply INSIDE ToLiss's ckpt/lights/<n> stack, so
         it nudges the light relative to where the animation puts it. Emitting it outside
         would offset in aircraft space and fight the mount."""
-        em, text = self._debug(pos=True)
+        em, text = self._debug()
         lines = [l.strip() for l in text.splitlines()]
         mount_at = lines.index(next(l for l in lines if "ckpt/lights/1/z/dir" in l))
         move_after = next(i for i, l in enumerate(lines)
@@ -909,16 +987,20 @@ class DebugLightBuildTests(unittest.TestCase):
         self.assertLess(mount_at, move_after)
         self.assertLess(move_after, light_after)
 
-    def test_position_wrappers_are_off_unless_asked_for(self):
-        """--debug-pos is OPT-IN: the ANIM_trans wrappers are the one part of a debug
-        build that changes how lights RENDER rather than where their params come from,
-        and in-sim they mis-place them — which made the tool unusable for the
-        color/aim/cone work that does not need them."""
-        em, text = self._debug()
+    def test_position_wrappers_are_on_by_default(self):
+        """A debug build moves again. They were briefly opt-in (2026-07-28) after the
+        debug lights turned up mis-placed in-sim; that was traced to a separate cause,
+        so the default is back and X/Y/Z is a knob without a flag."""
+        em, _ = self._debug()
+        self.assertTrue(em.debug_pos)
+
+    def test_no_debug_pos_drops_the_wrappers_and_nothing_else(self):
+        """The escape hatch. The wrappers are the one part of a debug build that changes
+        how lights RENDER rather than where their params come from, so ruling them out
+        must stay one flag away — and must not take the lights with them."""
+        em, text = self._debug(pos=False)
         self.assertFalse(em.debug_pos)
         self.assertNotIn(B.DEBUG_POS_DREF, text)
-        # ...and the tunable copies are still all there. Dropping the wrappers must not
-        # drop the lights they wrapped.
         copies = [l for l in text.splitlines()
                   if B.DEBUG_LIGHT_DREF in l and not l.lstrip().startswith("#")]
         self.assertEqual(len(copies), len(em.debug_lights))
@@ -936,7 +1018,8 @@ class DebugLightBuildTests(unittest.TestCase):
     def test_debug_pos_without_debug_is_not_a_half_build(self):
         """`debug_pos` alone would describe an OBJ with position wrappers around
         ordinary light lines that no dataref drives — a build that looks like it works
-        and cannot. The CLI implies --debug; the Emitter refuses to pretend."""
+        and cannot. Since it is now the DEFAULT, every non-debug build asks for exactly
+        this combination, and the Emitter has to refuse it rather than pretend."""
         cfg = B.load_config(wing="stock")
         em = B.Emitter(cfg, "a320", "stock", target="interior", debug=False,
                        debug_pos=True)

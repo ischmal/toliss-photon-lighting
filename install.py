@@ -182,7 +182,10 @@ def _aircraft_cells(ac: dict) -> tuple[str, str, tuple[str, str]]:
     c1 = ac["folder"]
     c2 = f"{ac['name']} (v{ac['ac_ver']})"
     if ac.get("stale"):
-        c3 = (f"Needs reinstall (v{ac['photon']})", C.BR_YELLOW)
+        # A reinstall always lays down this installer's version, so name the
+        # move whenever it differs — matching the "Update available" row below.
+        bump = f" → v{VERSION}" if ac["photon"] != VERSION else ""
+        c3 = (f"Needs reinstall (v{ac['photon']}{bump})", C.BR_YELLOW)
     elif ac["photon"]:
         wing_note = (f" ({WING_LABEL.get(ac['wing'], ac['wing'])})"
                     if ac["wing"] else "")

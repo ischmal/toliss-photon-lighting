@@ -9,6 +9,9 @@
     -XPlaneRoot <path>   X-Plane 12 folder (default: the Steam install)
     -NoBuild             skip the build; just copy the already-built .xpl
     -Config <cfg>        build config (default: Release)
+    -Probe               build the EXPERIMENTAL panel-FBO draw-order probe
+                         (paints magenta over the displays - never ship it).
+                         Re-run without -Probe to get a clean plugin back.
 
   Notes: X-Plane must be CLOSED (a loaded .xpl is locked and can't be overwritten).
   Windows/win_x64 only.
@@ -17,7 +20,8 @@
 param(
     [string] $XPlaneRoot = "C:\Program Files (x86)\Steam\steamapps\common\X-Plane 12",
     [switch] $NoBuild,
-    [string] $Config = "Release"
+    [string] $Config = "Release",
+    [switch] $Probe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,11 +42,16 @@ function Find-CMake {
 
 if (-not $NoBuild) {
     $cmake = Find-CMake
-    if (-not (Test-Path (Join-Path $build 'CMakeCache.txt'))) {
-        Write-Host "Configuring (first build)..." -ForegroundColor Cyan
-        & $cmake -S $here -B $build -A x64
-        if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
+    # Always configure, and always state PHOTON_PANEL_PROBE explicitly. A cached ON
+    # would otherwise be sticky: every later plain deploy would keep shipping a
+    # plugin that paints magenta over the captain's PFD.
+    $probeArg = if ($Probe) { "-DPHOTON_PANEL_PROBE=ON" } else { "-DPHOTON_PANEL_PROBE=OFF" }
+    if ($Probe) {
+        Write-Host "PANEL PROBE BUILD - experimental, do not ship." -ForegroundColor Yellow
     }
+    Write-Host "Configuring..." -ForegroundColor Cyan
+    & $cmake -S $here -B $build -A x64 $probeArg
+    if ($LASTEXITCODE -ne 0) { throw "cmake configure failed (exit $LASTEXITCODE)" }
     Write-Host "Building $Config..." -ForegroundColor Cyan
     & $cmake --build $build --config $Config
     if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }

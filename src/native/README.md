@@ -71,6 +71,76 @@ OS. Unlike the Python plugin there is **no** XPPython3 prerequisite and no `__py
 to clear. The plugin also deletes any leftover retired `PI_ToLissPhoton.py` /
 `ToLissPhoton.lua` on startup so the old versions can't run alongside it.
 
+## Dear ImGui
+
+`third_party/imgui/` is vendored upstream ImGui (v1.92.9, committed — see its README for
+the version table and update steps), and `src/imgui_xplm.{h,cpp}` is **our** X-Plane
+backend. The stock backends assume they own the window, the GL context and the event
+loop; a plugin owns none of those.
+
+- **Compiled into every build**, not gated behind `PHOTON_PANEL_PROBE`: it is the UI
+  framework for tooling and for whatever windows get converted later, so its availability
+  shouldn't depend on which experiment is switched on. Release `/OPT:REF` drops what ends
+  up unreferenced — the shipping `.xpl` is 192 KB with ImGui compiled in.
+- **`opengl32` is therefore linked unconditionally**, where it used to be probe-only.
+- **`src/photon_imconfig.h`** holds our ImGui settings (reached via `IMGUI_USER_CONFIG`)
+  so `third_party/imgui/` stays byte-identical to upstream. Chief among them: `IM_ASSERT`
+  logs and continues instead of calling `abort()`, which inside X-Plane would take the
+  simulator down with no message.
+- **Nothing user-facing uses it yet.** The Custom, About and Panel Probe windows still
+  draw with `XPLMDrawTranslucentDarkBox` + `XPLMDrawString`; converting them is a separate
+  change. The only ImGui windows are under Debug, and that submenu only exists in a probe
+  build.
+- ⚠ **Iterate `draw_data->CmdLists`, never `draw_data->CmdListsCount`.** That counter was
+  obsoleted in **1.92.9** (2026-07-20, four days before the version vendored here) and is no
+  longer maintained by the renderer: ImGui's own path pushes lists through
+  `AddDrawListToDrawDataEx`, and only the public `AddDrawList()` helper — which a backend
+  does not call — updates the count. It therefore reads **0 on every frame ImGui renders**,
+  while `CmdLists.Size` is 2 and `TotalVtxCount` is in the hundreds. A loop written against
+  it compiles, matches every pre-1.92 example and most of the internet, and **silently draws
+  nothing**. It blanked the first working version of this backend. If a version bump makes
+  the UI vanish again, look here first.
+  Defining `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` would turn this into a compile error, which is
+  worth doing — but it also removes `GetTexDataAsRGBA32`/`SetTexID`, so it has to wait until
+  the font path moves to 1.92's texture protocol (`ImGuiBackendFlags_RendererHasTextures` +
+  servicing `ImTextureData` requests). Worth doing then; it also buys smooth font scaling.
+- ⚠ **The boxel → pixel transform comes from DATAREFS, not from `glGet`.**
+  `sim/graphics/view/{modelview_matrix,projection_matrix,viewport}` are what X-Plane
+  publishes for exactly this; under Vulkan the GL our drawing rides is a bridge and the
+  fixed-function matrix state `glGetFloatv` reports is not the transform in force during a
+  window draw callback. Only `glScissor` needs it — vertices go out in boxels and ride
+  X-Plane's own projection — which is precisely what makes it hard to spot: **the geometry
+  is correct, every clip rect is nonsense, and a nonsense scissor box discards the whole UI
+  with no GL error.** That blanked the first cut of this backend. Note the viewport dataref
+  is `left, bottom, RIGHT, TOP` (corners) where GL's is `x, y, width, height`.
+  Two further nets, both because the failure mode is invisibility: the transform is
+  validated against the window's own corners each frame and clipping is **skipped** rather
+  than trusted if it fails (an overflowing child pane is a far better failure than a blank
+  window), and scissor rects are normalised with min/max instead of assuming an ordering.
+- **A failed font-atlas upload also blanks the window**, not just the text: every ImGui
+  vertex is textured — solid rectangles sample the atlas's white pixel — so an upload
+  failure makes the whole UI transparent. `BuildFontTexture` checks `glGetError` and says
+  so in `Log.txt`.
+- **Smoke test:** Plugins ▸ ToLiss Photon ▸ Debug ▸ *Dear ImGui demo*. If the stock demo
+  draws, scrolls, responds to the mouse and accepts typing, the backend is correct.
+  Either ImGui window also logs a one-shot diagnostic on its first frame — window
+  geometry, display size, font texture and atlas size, draw-command and vertex counts,
+  the viewport and where it came from, and whether clipping was usable. Read that line
+  before forming a theory about a window that looks wrong.
+- **A blank window paints two GL sanity markers** in the bottom-left of the client area
+  (probe builds, `PhotonImgui::SetDiagnostics`). They draw only when there is no UI
+  geometry, so a working window never shows them, and they share as little as possible
+  with the UI path: an untextured magenta square (did our immediate-mode GL reach the
+  screen at all?) and a square showing the font atlas (did the upload and texturing
+  work?). **Neither / magenta only / both** are three disjoint diagnoses, which is the
+  difference between one sim start and a restart per hypothesis — that is how the
+  `CmdListsCount` bug above was cornered.
+- **ImGui bugs are reproducible offline.** The frame is pure computation: a console
+  `main()` that links the four ImGui `.cpp` files with the same `IMGUI_USER_CONFIG` and
+  makes the same `NewFrame`/`Begin`/`End`/`Render` calls reproduces anything that is not
+  GL or X-Plane, with assertions printing to stdout instead of being swallowed. That is
+  what found `CmdListsCount`, in about a minute, after two sim restarts had found nothing.
+
 ## Implementation notes
 
 - **SDK feature level** is `XPLM300/301` (X-Plane 11.10+) in `CMakeLists.txt`; bump to
