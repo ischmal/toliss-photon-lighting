@@ -132,6 +132,35 @@ class AccessorRegistrationTests(unittest.TestCase):
                                 + [mod.DebugPosDataRef, mod.DebugCompareDataRef]
                                 + MARKER_DATAREFS(mod)))
 
+    def test_it_stands_down_when_the_native_plugin_already_owns_the_pool(self):
+        """A PHOTON_DEV .xpl carries the same editor and registers the same names.
+
+        Two owners cannot share them: an accessor here is a read-only COMPUTED
+        value, so the other side cannot write through it — whichever registers
+        second drives nothing while appearing to work, and a light that ignores
+        the window looks exactly like a bad OBJ. Whoever is first wins; the
+        native side makes the same check."""
+        mod, xp = load_plugin_module()
+        xp.datarefs[mod.DebugDataRefPrefix + "0"] = StubDataRef(
+            mod.DebugDataRefPrefix + "0", [0.0] * mod.DebugParamCount)
+        p = mod.PythonInterface()
+        p.XPluginStart()
+        self.assertFalse(p.dbgOwnsRefs)
+        self.assertEqual(p.dbgAccessors, [])
+        # Not one slot, not the position array, not the markers: registering any
+        # of them would be a second owner of that particular name.
+        for name in ([mod.DebugPosDataRef, mod.DebugCompareDataRef]
+                     + MARKER_DATAREFS(mod)):
+            self.assertNotIn(name, xp.accessors)
+
+    def test_it_owns_the_pool_when_nothing_else_has_it(self):
+        # The other half of the branch — without this the test above passes just
+        # as well against a script that never registers anything.
+        mod, xp = load_plugin_module()
+        p = mod.PythonInterface()
+        p.XPluginStart()
+        self.assertTrue(p.dbgOwnsRefs)
+
     def test_the_ab_toggle_registers_int_and_float_readers(self):
         """An OBJ's ANIM_hide reads its dataref as a FLOAT. With only readInt registered
         X-Plane advertises the type wrong, the gate reads 0, and the A/B toggle sticks

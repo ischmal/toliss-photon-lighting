@@ -684,6 +684,10 @@ class PythonInterface:
         self.dbgWinSlots = 0            # row count the window's height was sized for
         self.dbgHits = []
         self.dbgAccessors = []          # registered dataref refs, index == light n
+        # False once _dbg_register_accessors finds the pool already taken by the
+        # native dev plugin. Every knob in this window is then inert, so the
+        # window has to SAY so rather than look like it is working.
+        self.dbgOwnsRefs = True
         self.dbgPosAccessor = None      # the one shared position-offset array
         self.dbgCompareAccessor = None  # the A/B toggle
         self.dbgMarkerAccessors = []    # marker offset array + show flag + 2 param sets
@@ -2088,7 +2092,26 @@ class PythonInterface:
 
         Fixed size rather than sized from the manifest: at XPluginStart there is no
         aircraft, so there is no manifest. Slots past the end of the current one read
-        as a zeroed light, which draws nothing."""
+        as a zeroed light, which draws nothing.
+
+        ⚠ UNLESS SOMEONE ELSE ALREADY HAS THEM. A PHOTON_DEV build of the native
+        .xpl carries the same editor (Dev window > Lights) and registers the same
+        names. Two owners cannot share them: an accessor here is a read-only
+        COMPUTED value, so the other side cannot write through it — whichever
+        registers second is driving nothing while appearing to work, and the light
+        that ignores the window is indistinguishable from a bad OBJ.
+
+        So whoever is first wins and the other stands down; the native side makes
+        the same check. Both log which way it went, because plugin start order is
+        not defined by the SDK and "which tool is live" must never be a guess."""
+        if xp.findDataRef(DebugDataRefPrefix + "0") is not None:
+            self.dbgOwnsRefs = False
+            _log("live light debug: %s0 is ALREADY registered — the native dev "
+                 "plugin's Lights tab owns the debug lights this session, so this "
+                 "window stands down. Deploy a non-dev .xpl (or delete this script) "
+                 "to pick a side permanently." % DebugDataRefPrefix)
+            return
+        self.dbgOwnsRefs = True
         for n in range(DebugMaxLights):
             try:
                 # readRefCon, NOT refCon — XPPython3 has a separate refCon per
@@ -2898,6 +2921,19 @@ class PythonInterface:
             light = self.dbgLights[self.dbgSel] if self.dbgLights else None
 
             y = t - UI_TOP_INSET
+            # The stand-down banner comes FIRST and replaces the title. Every
+            # control below it still draws and still moves this window's own
+            # state — it just reaches no light, because the datarefs belong to
+            # the native plugin. A window that looks live and is not is exactly
+            # the failure this whole ownership check exists to prevent.
+            if not self.dbgOwnsRefs:
+                _draw_text(COL_ACTIVE, l + UI_PAD, y,
+                           "STANDING DOWN — the native Dev window owns these lights")
+                y -= lineH
+                _draw_text(COL_DIM, l + UI_PAD, y,
+                           "Use Plugins > ToLiss Photon > Dev > Lights, or deploy a "
+                           "non-dev .xpl to use this window.")
+                y -= lineH + UI_GAP
             if light:
                 title = "%s   (%d of %d)" % (light.get("name"), self.dbgSel + 1,
                                              len(self.dbgLights))

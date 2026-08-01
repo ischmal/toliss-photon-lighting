@@ -35,7 +35,8 @@ import sys
 from pathlib import Path
 
 from installer.constants import (
-    AIRFRAMES, INTERIOR_OBJ, INTERIOR_TEXTURES, PLUGIN_FOLDER, WINGS_FOR, XPL_NAME,
+    AIRFRAMES, INTERIOR_OBJ, INTERIOR_TEXTURES, PLUGIN_FOLDER, PLUGIN_USER_DIRS,
+    WINGS_FOR, XPL_NAME,
 )
 
 # installer/payload.py -> installer/ -> the dir holding install.py. In a release
@@ -232,13 +233,28 @@ def plugin_src_root() -> Path:
 def plugin_files() -> list[tuple[str, Path]]:
     """Every file in the fat-plugin folder as (folder-relative POSIX path, absolute
     source) — normally `<arch>/ToLissPhoton.xpl` for each built platform. Copied
-    verbatim into <X-Plane>/Resources/plugins/ToLissPhoton/ at install time."""
+    verbatim into <X-Plane>/Resources/plugins/ToLissPhoton/ at install time.
+
+    Deliberately a whole-tree walk rather than a hard-coded `<arch>/<XPL_NAME>`
+    list, so a future runtime data file ships without touching this — except for
+    PLUGIN_USER_DIRS, which is user territory (`overlays/`). A source folder that
+    happens to be a *deployed* plugin folder would otherwise carry a dev machine's
+    overlay images into every install."""
     root = plugin_src_root()
-    files = [(p.relative_to(root).as_posix(), p)
-             for p in sorted(root.rglob("*")) if p.is_file()]
+    files = [(rel, p) for rel, p in
+             ((p.relative_to(root).as_posix(), p) for p in sorted(root.rglob("*")))
+             if p.is_file() and not _is_user_owned(rel)]
     if not files:
         raise PayloadError(f"native plugin folder is empty (no .xpl built?): {root}")
     return files
+
+
+def _is_user_owned(rel: str) -> bool:
+    """Whether a plugin-folder-relative POSIX path lies under a PLUGIN_USER_DIRS
+    folder — matched on the first path SEGMENT, so a `.xpl` named `overlays.xpl`
+    is not caught by a prefix test."""
+    head = rel.split("/", 1)[0]
+    return head in PLUGIN_USER_DIRS
 
 
 def plugin_arches() -> list[str]:

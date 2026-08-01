@@ -135,6 +135,29 @@ PLUGIN_FOLDER = "ToLissPhoton"
 XPL_NAME = "ToLissPhoton.xpl"
 PLUGIN_DIR_REL = Path("Resources") / "plugins" / PLUGIN_FOLDER
 
+# Subfolders of the plugin folder that belong to the USER, not to the installer.
+# The installer neither writes nor removes anything under these, and they are
+# never staged into a release bundle.
+#
+# `overlays/` is the Panel FX compositor's image folder
+# (Resources/plugins/ToLissPhoton/overlays/, see src/native/README.md). The
+# compositor is entirely inside `#if PHOTON_DEV`, so a shipped `.xpl` never reads
+# it and nothing here installs one — `docs/fcu_tint_plan.md` §4 is explicit that
+# the feature stays out of install.py and the release bundle until the look is
+# accepted in-sim. Two things still have to be true meanwhile:
+#
+#  * uninstall must not `rmtree` the plugin folder out from under images the user
+#    (or `deploy.ps1`) put there. They are hand-made and unrecoverable, exactly
+#    like the interior's `added[]` files are unrestorable — same shape of rule,
+#    opposite direction.
+#  * `--plugin-dir` pointed at a DEPLOYED plugin folder (a plausible way to build
+#    a bundle, and how CI merges per-OS arches) must not sweep a dev machine's
+#    overlays into a release, where they would ship as inert dead weight.
+#
+# When the compositor does ship, this stays: the starter images become an
+# installed artifact, but a user's own images are still theirs.
+PLUGIN_USER_DIRS = ("overlays",)
+
 XPLANE_ORG_URL = ("https://forums.x-plane.org/files/file/"
                   "100717-toliss-photon-exterior-lighting-mod-for-toliss-a319a320a321")
 GITHUB_URL = "https://github.com/ischmal/toliss-photon-lighting"

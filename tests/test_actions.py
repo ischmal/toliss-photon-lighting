@@ -374,5 +374,110 @@ class PluginRewriteSkipTests(unittest.TestCase):
         self.assertEqual(self.xpl.read_bytes(), FAKE_XPL["win_x64"])  # corrected
 
 
+class OverlayFolderTests(unittest.TestCase):
+    """`Resources/plugins/ToLissPhoton/overlays/` (PLUGIN_USER_DIRS) is the Panel
+    FX compositor's image drop folder — the user's files, not an installed
+    artifact. The installer never writes one (the compositor is PHOTON_DEV-only;
+    docs/fcu_tint_plan.md §4), so the whole contract here is: don't touch it, and
+    above all don't take it out with the plugin folder on uninstall. Those PNGs
+    are hand-made with no backup and no stock counterpart to restore."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_overlay_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fa = FakeAircraft(self.tmp)
+        self.log = _NullLog()
+        self.plugin_root = (self.fa.xplane_root / "Resources" / "plugins" / "ToLissPhoton")
+        self.overlay = self.plugin_root / "overlays" / "my_own_sheen.png"
+
+    def _seed_overlay(self):
+        """What deploy.ps1 (or the user's paint program) leaves behind."""
+        self.overlay.parent.mkdir(parents=True, exist_ok=True)
+        self.overlay.write_bytes(b"\x89PNG\r\n\x1a\n fake user overlay\n")
+
+    def test_install_does_not_create_an_overlays_folder(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertFalse((self.plugin_root / "overlays").exists())
+
+    def test_install_leaves_an_existing_overlay_untouched(self):
+        self._seed_overlay()
+        before = self.overlay.read_bytes()
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertEqual(self.overlay.read_bytes(), before)
+
+    def test_uninstall_removing_plugin_keeps_the_overlays_folder(self):
+        self._seed_overlay()
+        before = self.overlay.read_bytes()
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        steps = actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log,
+                                  remove_plugin=True)
+        # Photon's own files are gone...
+        for arch in FAKE_XPL:
+            self.assertFalse((self.plugin_root / arch).exists(), f"{arch} not removed")
+        # ...the user's images are not, and the step list says so.
+        self.assertEqual(self.overlay.read_bytes(), before)
+        self.assertTrue(any("overlays" in s for s in steps),
+                        f"uninstall did not report the kept folder: {steps}")
+
+    def test_uninstall_removes_the_whole_folder_when_no_overlays(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log, remove_plugin=True)
+        self.assertFalse(self.plugin_root.exists())
+
+    def test_uninstall_removes_the_folder_when_overlays_is_empty(self):
+        # An empty leftover directory is not user content worth stranding.
+        (self.plugin_root / "overlays").mkdir(parents=True)
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log, remove_plugin=True)
+        self.assertFalse(self.plugin_root.exists())
+
+    def test_dry_run_uninstall_removes_nothing(self):
+        self._seed_overlay()
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log, dry_run=True,
+                          remove_plugin=True)
+        self.assertTrue(self.overlay.is_file())
+        self.assertTrue((self.plugin_root / "win_x64" / "ToLissPhoton.xpl").is_file())
+
+
+class PluginPayloadExclusionTests(unittest.TestCase):
+    """The other direction: a source plugin folder that HOLDS overlays must not
+    push them into an install or a release bundle. `--plugin-dir` pointed at a
+    deployed plugin folder is a legitimate way to assemble a bundle, and on a dev
+    machine that folder has deploy.ps1's starter images in it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_plugexcl_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # A plugin source folder as deploy.ps1 leaves it: arches + overlays/.
+        self.src = self.tmp / "ToLissPhoton"
+        _make_fake_plugin(self.src)
+        (self.src / "overlays").mkdir()
+        (self.src / "overlays" / "scanlines.png").write_bytes(b"\x89PNG fake\n")
+
+    def test_plugin_files_skips_user_dirs(self):
+        saved = payload.PAYLOAD_DIR
+        payload.PAYLOAD_DIR = self.tmp / "payload"
+        (payload.PAYLOAD_DIR / "plugin").mkdir(parents=True)
+        shutil.copytree(self.src, payload.PAYLOAD_DIR / "plugin" / "ToLissPhoton")
+        self.addCleanup(setattr, payload, "PAYLOAD_DIR", saved)
+
+        rels = [rel for rel, _ in payload.plugin_files()]
+        self.assertIn("win_x64/ToLissPhoton.xpl", rels)
+        self.assertNotIn("overlays/scanlines.png", rels)
+        self.assertFalse(any(r.startswith("overlays/") for r in rels), rels)
+
+    def test_stage_plugin_skips_user_dirs(self):
+        sys.path.insert(0, str(REPO / "build"))
+        import make_release
+
+        out = self.tmp / "bundle"
+        (out / "plugin").mkdir(parents=True)
+        make_release.stage_plugin(out, self.src)
+        staged = out / "plugin" / "ToLissPhoton"
+        self.assertTrue((staged / "win_x64" / "ToLissPhoton.xpl").is_file())
+        self.assertFalse((staged / "overlays").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

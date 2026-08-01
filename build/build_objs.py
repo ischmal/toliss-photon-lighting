@@ -1,46 +1,31 @@
 #!/usr/bin/env python3
 """
-ToLiss Photon Lighting — OBJ generator (Phase II).
+ToLiss Photon Lighting — OBJ generator.
 
-Reads the declarative light config — the CSS-like DSL pair src/lights/lights.style.phdsl
-(appearance) + src/lights/lights.layout.phdsl (placement), parsed by photon_dsl.py; the
-legacy reference/legacy/lights.poc.jsonc is used only if the DSL files are absent
-— and emits the X-Plane lights_out3xx_XP12.obj files into dist/. dist/ is OBJs
-only; the plugin is now the native .xpl (src/native/), built and installed
-separately (see src/native/README.md), not staged here.
+Reads the CSS-like DSL pair src/lights/lights.style.phdsl (appearance) +
+lights.layout.phdsl (placement) via photon_dsl.py, and emits the aircraft OBJs
+into dist/. dist/ is OBJs only — the plugin is the native .xpl (src/native/),
+built and installed separately.
 
-Also verifies a generated airframe against the frozen hand-authored golden in
-reference/photon/ with a NORMALIZED (not byte-exact) compare: both sides are
-parsed into a multiset of (gate-path, light params) records with all floats
-rounded to 3 decimals, so hand-authored formatting quirks and the intentional
-mirror-symmetry cleanup don't register as differences.
-
-Usage:
-    python build/build_objs.py build [--airframe a320] [--wing stock] [--out DIR] [--write]
+    python build/build_objs.py build [--airframe a320] [--wing stock] [--target T] [--write]
     python build/build_objs.py check [--airframe a320] [--category nav]
     python build/build_objs.py patch-realwings [--airframe a320] [--dry-run] [--reverse]
 
-`build` writes to dist/ by default; `--out DIR` redirects elsewhere. `--write`
-additionally installs each built OBJ straight into the live X-Plane install, at
-<X-Plane 12>/Aircraft/ToLissA3XX*/objects/, which is auto-located. This replaces
-the old Link-Objects.ps1 symlink workflow (removed): `build --write`, or
-`watch.py --write` to do it on every save. Any leftover symlink from that
-workflow is replaced with a real file. This installs OBJs only — the native
-plugin (src/native/) is built and installed on its own (src/native/README.md).
+`--write` also installs each built OBJ into the live X-Plane install, at an
+auto-located <X-Plane 12>/Aircraft/ToLissA3XX*/objects/. With
+`--wing realwings` it additionally patches the installed mod's baked wingtip
+lights in place (patch_realwings.py), so it is one command rather than two; the
+`patch-realwings` subcommand runs that same patch alone for in-sim tuning
+without a rebuild. Override the X-Plane root with $XPLANE_ROOT or --root.
 
-`--wing realwings` with `--write` also patches the installed RealWings mod's
-baked wingtip lights in place (patch_realwings.py) — one command, no separate
-step. The `patch-realwings` subcommand runs that same patch on its own (with
---dry-run / --reverse) for in-sim tuning without a rebuild. Each airframe's
-RealWings folder is auto-located too (…/objects/RealWings3XX/); override the
-X-Plane root with the XPLANE_ROOT env var if it isn't auto-detected, or pass
---root.
+`check` compares against reference/photon/<obj>, the frozen hand-authored
+goldens — deliberately NOT the build output, since comparing dist/ against
+itself passes trivially and destroys the safety net. The compare is NORMALIZED,
+not byte-exact: both sides become a multiset of (gate-path, light params)
+records with floats rounded to 3 decimals, so formatting quirks and the
+intentional mirror-symmetry cleanup do not register as differences.
 
-`check` reference source: reference/photon/<obj> — the frozen hand-authored OBJs.
-These are deliberately NOT the build output: comparing dist/ against itself would
-pass trivially and silently destroy the safety net.
-
-See docs/design.md for the data model and docs/dsl.md for the config syntax.
+Syntax: docs/dsl.md.
 """
 from __future__ import annotations
 

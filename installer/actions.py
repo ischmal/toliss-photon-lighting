@@ -19,7 +19,7 @@ from installer.constants import (
     AIRFRAMES, BACKUP_DIRNAME, GLOW_AIRFRAMES, INTERIOR_AIRFRAMES,
     INTERIOR_LIVERY_EXTS, INTERIOR_OBJ, INTERIOR_TEXTURES,
     INTERIOR_TEXTURES_ADDED, MANIFEST_NAME,
-    PLUGIN_DIR_REL, PLUGIN_FOLDER, REALWINGS_DIR, VERSION,
+    PLUGIN_DIR_REL, PLUGIN_FOLDER, PLUGIN_USER_DIRS, REALWINGS_DIR, VERSION,
 )
 
 
@@ -601,10 +601,53 @@ def uninstall(ac: dict, xplane_root: Path, log, dry_run: bool = False,
     steps.append(f"Removed {BACKUP_DIRNAME} and manifest")
 
     if remove_plugin:
-        plugin_root = Path(xplane_root) / PLUGIN_DIR_REL
-        log.write(f"removing shared plugin {plugin_root} (dry_run={dry_run})")
-        if plugin_root.is_dir() and not dry_run:
-            shutil.rmtree(plugin_root, ignore_errors=True)
-        steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
+        steps += _remove_plugin_dir(Path(xplane_root) / PLUGIN_DIR_REL, log, dry_run)
 
+    return steps
+
+
+def _remove_plugin_dir(plugin_root: Path, log, dry_run: bool) -> list[str]:
+    """Remove the shared plugin folder, KEEPING anything under PLUGIN_USER_DIRS.
+
+    ⚠ Not `rmtree(plugin_root)`. `overlays/` sits inside the plugin folder and is
+    the user's own drop folder for Panel FX images — hand-made PNGs with no
+    backup and no stock counterpart, which a blanket recursive delete would take
+    with it. `deploy.ps1` seeds that folder file-by-file for exactly this reason
+    ("one typo away from deleting them"); the installer's teardown is the other
+    half of the same rule.
+
+    Everything Photon itself installed still goes: the per-arch `.xpl` files and
+    their folders, then the plugin root — but only once it is empty, so a kept
+    folder leaves a plugin dir holding nothing but the user's images."""
+    steps: list[str] = []
+    if not plugin_root.is_dir():
+        log.write(f"shared plugin already absent: {plugin_root}")
+        steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
+        return steps
+
+    # Only a user dir with something IN it is kept. An empty overlays/ holds
+    # nothing to lose, and stranding it would leave a plugin folder behind for
+    # every dev who ever ran deploy.ps1 against a since-emptied folder.
+    kept = [d for d in sorted(plugin_root.iterdir())
+            if d.is_dir() and d.name in PLUGIN_USER_DIRS and any(d.iterdir())]
+    log.write(f"removing shared plugin {plugin_root} "
+              f"(keeping: {', '.join(d.name for d in kept) or 'nothing'}; "
+              f"dry_run={dry_run})")
+    if not dry_run:
+        for entry in plugin_root.iterdir():
+            if entry in kept:
+                continue
+            with contextlib.suppress(OSError):
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+        with contextlib.suppress(OSError):
+            plugin_root.rmdir()  # only succeeds if nothing was kept
+
+    steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
+    for d in kept:
+        steps.append(f"Kept your own {d.name}\\ folder in "
+                     f"Resources\\plugins\\{PLUGIN_FOLDER} — delete it by hand "
+                     f"if you don't want it")
     return steps

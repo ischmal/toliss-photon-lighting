@@ -48,7 +48,9 @@ sys.path.insert(0, str(REPO / "build"))
 sys.path.insert(0, str(REPO))
 import build_objs as B  # noqa: E402
 import readme as _readme  # noqa: E402  (build/readme.py)
-from installer.constants import PLUGIN_FOLDER, VERSION, WINGS, XPL_NAME  # noqa: E402
+from installer.constants import (  # noqa: E402
+    PLUGIN_FOLDER, PLUGIN_USER_DIRS, VERSION, WINGS, XPL_NAME,
+)
 
 INSTALLER_ENTRY = REPO / "install.py"
 INSTALLER_PKG = REPO / "installer"
@@ -147,8 +149,20 @@ def stage_plugin(payload: Path, plugin_dir: Path):
     dest_root = payload / "plugin" / PLUGIN_FOLDER
     if dest_root.exists():
         shutil.rmtree(dest_root)
-    shutil.copytree(plugin_dir, dest_root)
+    # PLUGIN_USER_DIRS (`overlays/`) is skipped, not copied. --plugin-dir may
+    # legitimately point at a DEPLOYED plugin folder — that is how a merged
+    # multi-arch bundle gets assembled — and such a folder on a dev machine holds
+    # the Panel FX overlay images deploy.ps1 seeded there. The compositor is
+    # PHOTON_DEV-only, so a release .xpl cannot even read them; bundling them
+    # would ship inert files and hand every user a folder the plugin ignores.
+    # docs/fcu_tint_plan.md §4: nothing in the release bundle until it ships.
+    shutil.copytree(plugin_dir, dest_root,
+                    ignore=shutil.ignore_patterns(*PLUGIN_USER_DIRS))
+    skipped = [d.name for d in sorted(plugin_dir.iterdir())
+               if d.is_dir() and d.name in PLUGIN_USER_DIRS]
     print(f"  staged payload/plugin/{PLUGIN_FOLDER}/ (arches: {', '.join(arches)})")
+    for name in skipped:
+        print(f"    skipped {name}/ — user/dev content, not a shipped artifact")
 
 
 def stage_dsl_toolchain(payload: Path):

@@ -96,17 +96,44 @@ def islands(verts, idx, tris):
         ny = sum(v[4] for v in vs) / len(vs)
         nz = sum(v[5] for v in vs) / len(vs)
         nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+        n = (nx / nl, ny / nl, nz / nl)
 
+        w, h = in_plane_size(vs, n)
         out.append(dict(
             ntri=len(tl), lines=sorted({t[3] + 1 for t in tl}),
-            w=max(xs) - min(xs), h=max(ys) - min(ys),
+            w=w, h=h,
             cx=(max(xs) + min(xs)) / 2, cy=(max(ys) + min(ys)) / 2,
             cz=(max(zs) + min(zs)) / 2,
-            n=(nx / nl, ny / nl, nz / nl),
+            n=n,
             u0=min(us) * ATLAS, u1=max(us) * ATLAS,
             v0=min(vv) * ATLAS, v1=max(vv) * ATLAS,
         ))
     return out
+
+
+def in_plane_size(vs, n):
+    """(width, height) measured IN THE FACE'S OWN PLANE, metres.
+
+    ⚠ This used to be the axis-aligned x and y extents, and that is wrong for
+    any face that is not vertical. It cost the MCDUs a whole pass: they lie
+    almost flat on the pedestal (normal 0.00 0.99 0.14, i.e. 8 degrees off
+    horizontal), so a 9.4 x 11.4 cm screen measured 11.4 cm wide by **1.4 cm
+    tall** and read as a label strip. Anything on the pedestal, the glareshield
+    top or a console lands in the same trap.
+    """
+    ex = (0.0, 1.0, 0.0) if abs(n[1]) < 0.9 else (1.0, 0.0, 0.0)
+    ax = (ex[1] * n[2] - ex[2] * n[1],
+          ex[2] * n[0] - ex[0] * n[2],
+          ex[0] * n[1] - ex[1] * n[0])
+    al = math.sqrt(sum(c * c for c in ax)) or 1.0
+    ax = tuple(c / al for c in ax)
+    ay = (n[1] * ax[2] - n[2] * ax[1],
+          n[2] * ax[0] - n[0] * ax[2],
+          n[0] * ax[1] - n[1] * ax[0])
+
+    pu = [v[0] * ax[0] + v[1] * ax[1] + v[2] * ax[2] for v in vs]
+    pv = [v[0] * ay[0] + v[1] * ay[1] + v[2] * ay[2] for v in vs]
+    return max(pu) - min(pu), max(pv) - min(pv)
 
 
 def is_display(f):
@@ -128,13 +155,18 @@ def is_display(f):
 
 
 def is_readout(f):
-    """Any aft-facing panel face big enough in the atlas to be worth tinting.
+    """Any face the pilot looks at, big enough in the atlas to be worth tinting.
 
-    The survey filter for --all: same "faces the pilot looks at" premise as
-    is_display, with the display-unit size floor dropped. Catches the FCU row and
-    is the starting point for mapping the rest of the cockpit's readouts.
+    The survey filter for --all: same premise as is_display with the display-unit
+    size floor dropped. Catches the FCU row and is the starting point for mapping
+    the rest of the cockpit's readouts.
+
+    ⚠ "Aft-facing" is NOT enough, and assuming it was is what hid the MCDUs.
+    They lie on the pedestal with a normal of 0.00 0.99 0.14 — n[2] is 0.14, so
+    an `n[2] > 0.2` test drops them, and with them every other console and
+    glareshield-top face. UPWARD counts as facing the pilot too.
     """
-    return (f["n"][2] > 0.2
+    return ((f["n"][2] > 0.2 or f["n"][1] > 0.5)
             and f["cz"] < -4.0
             and 0.01 < f["w"] < 0.60 and 0.005 < f["h"] < 0.60
             and (f["u1"] - f["u0"]) > 24 and (f["v1"] - f["v0"]) > 12

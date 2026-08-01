@@ -1,159 +1,208 @@
 # ToLiss Photon — native `.xpl` plugin
 
-The **native C++ plugin** — the shipping runtime for ToLiss Photon Lighting. A compiled
-`.xpl` that needs **no XPPython3 and no Python** at runtime (CLAUDE.md TODO #4, now done).
-It **replaces** the former Python plugin `PI_ToLissPhoton.py` (retired and removed from the
-repo): on startup it deletes any leftover copy of that script — and of the even older
-FlyWithLua scripts — so a stale copy can't load under XPPython3 and fight this plugin for
-the same per-frame beacon/strobe writes (`RemoveSupersededFiles` in `src/plugin.cpp`).
+The shipping runtime: a compiled `.xpl` needing **no XPPython3 and no Python**. It replaces
+the retired Python plugin `PI_ToLissPhoton.py` and, on startup, deletes any leftover copy of
+that script and of the older FlyWithLua scripts, so a stale copy can't load under XPPython3
+and fight this plugin for the same per-frame beacon/strobe writes
+(`RemoveSupersededFiles` in `src/plugin.cpp`).
 
-**Status: full port, compiles clean, confirmed working in-sim.** `src/plugin.cpp` is the
-complete implementation: the 9 category datarefs (+ `is_led` + the two `debug/*_always_on`
-flags), the waveform engine (after-flight-model per-frame loop), the Plugins menu with radio
-profiles, the Custom window (modern `XPLMCreateWindowEx` UI — not the legacy XPWidgets
-library, so it scales/pops out/works in VR), per-livery persistence (small self-contained
-JSON — no deps), Auto resolution (1 Hz loop), ToLiss detection, and the superseded-file
-sweep. Builds clean with MSVC (VS 18), no warnings, and the built `.xpl` exports all five
-`XPlugin*` entry points.
-
-The port's original open items are now closed (CLAUDE.md "Open items / TODO"): the strobe
-index mapping and Auto gates were confirmed in-sim, and the end-user installer / release
-tooling have been repointed at this `.xpl` (they stage the fat-plugin folder) with the
-multi-OS build wired into `.github/workflows/release.yml` — see the CI note under
-"Implementation notes" below.
+**Status: complete, compiles clean, confirmed working in-sim.** `src/plugin.cpp` holds the
+9 exterior + 5 interior category datarefs, the waveform engine (after-flight-model loop),
+the Plugins menu, every window (Dear ImGui), per-livery persistence (self-contained JSON),
+Auto resolution (1 Hz), ToLiss detection, and the superseded-file sweep.
 
 ## Get the SDK (one-time)
 
-Download the X-Plane SDK from <https://developer.x-plane.com/sdk/> and unzip it so that
-`src/native/SDK/CHeaders/XPLM/XPLMDefs.h` exists. `SDK/` is gitignored (it's a
-third-party download). Alternatively pass `-DXPLANE_SDK=/path/to/SDK` when configuring.
+Download from <https://developer.x-plane.com/sdk/> and unzip so that
+`src/native/SDK/CHeaders/XPLM/XPLMDefs.h` exists. `SDK/` is gitignored. Or pass
+`-DXPLANE_SDK=/path/to/SDK`.
 
-```
-# from src/native/, with curl (matches what CI will do):
+```bash
+# from src/native/, matching what CI does:
 curl -sL -o sdk.zip https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK411.zip
 unzip -q sdk.zip && rm sdk.zip     # extracts ./SDK/
 ```
 
-## Build
+## Build and install
 
-Needs CMake + a C++17 compiler. On this machine both ship inside **VS 18 Community**
-(VS 2022 lacks the C++ workload), so they aren't on `PATH` — use full paths or a
-Developer prompt.
+Needs CMake + a C++17 compiler. On this machine both ship inside **VS 18 Community** (VS
+2022 lacks the C++ workload), so they aren't on `PATH`.
+
+```powershell
+.\deploy.ps1           # release build, then copy into X-Plane
+.\deploy.ps1 -Dev      # DEV build (see below)
+.\deploy.ps1 -NoBuild  # just copy what's already built
+```
+
+Options: `-XPlaneRoot <path>` (default: the Steam install), `-Config <cfg>`. It refuses to
+copy while X-Plane is running — a loaded `.xpl` is locked.
+
+By hand:
 
 ```powershell
 $cmake = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-& $cmake -S . -B build -A x64
+& $cmake -S . -B build -A x64 -DPHOTON_DEV=OFF
 & $cmake --build build --config Release
 ```
 
-macOS / Linux: `cmake -B build && cmake --build build` (a Developer prompt / native
-toolchain). Output lands in the fat-plugin layout X-Plane expects:
+macOS / Linux: `cmake -B build && cmake --build build`. Output lands in the fat-plugin
+layout X-Plane expects — `build/ToLissPhoton/<arch>/ToLissPhoton.xpl`, arch =
+`win_x64 | mac_x64 | lin_x64` — and all three can sit side by side.
 
-```
-build/ToLissPhoton/<arch>/ToLissPhoton.xpl      # arch = win_x64 | mac_x64 | lin_x64
-```
+## `PHOTON_DEV` — the one dev flag
 
-## Install (dev)
+`-DPHOTON_DEV=ON` (or `deploy.ps1 -Dev`) compiles in **everything that must not ship**: the
+Dev menu and its window, the panel-FBO probe, the FX layer compositor, and the in-sim build
+commands. OFF by default, so a plain build is always a release build and `make_release.py`
+cannot bundle something that paints over the captain's PFD.
 
-**Quickest (Windows):** run `deploy.ps1` (or double-click `deploy.bat`) — it builds
-Release and copies the `.xpl` into the X-Plane install, refusing if the sim is running
-(a loaded `.xpl` is locked). Options: `-NoBuild` (just copy), `-XPlaneRoot <path>`
-(default is the Steam install), `-Config <cfg>`.
+**The two flavours use separate build trees** — `build/` and `build-dev/` — so flipping the
+flag is a copy, not a full recompile. `deploy.ps1` always passes `-DPHOTON_DEV` explicitly,
+because a cached `ON` would otherwise be sticky.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy.ps1
-```
+**The Dev window** (Plugins ▸ ToLiss Photon ▸ Dev ▸ Dev window…) is one tabbed window
+holding every knob: Exterior / Cockpit category grids · Panel FX · History · Probe · Build ·
+Log · ImGui demo.
 
-**Manual:** copy the whole `build/ToLissPhoton/` folder into
-`<X-Plane>/Resources/plugins/`. A fat plugin can carry all three
-`<arch>/ToLissPhoton.xpl` files side by side; X-Plane loads the one matching the host
-OS. Unlike the Python plugin there is **no** XPPython3 prerequisite and no `__pycache__`
-to clear. The plugin also deletes any leftover retired `PI_ToLissPhoton.py` /
-`ToLissPhoton.lua` on startup so the old versions can't run alongside it.
+- **Build** runs the repo's Python tooling without leaving the sim. It needs a repo path,
+  persisted in `Output/preferences/ToLissPhoton_dev.txt` and seeded from `$PHOTON_REPO`.
+- ⚠ Commands run **detached on a worker thread**. A synchronous `std::system()` in a draw
+  callback freezes the simulator for as long as the generator takes. The thread touches only
+  its own mutex-guarded output buffer and never an XPLM call — XPLM is not thread-safe.
+- ⚠ **There is no reload-aircraft button, deliberately.** `sim/operation/reload_aircraft`
+  runs synchronously and unloads the aircraft's plugins, so from a draw callback it tears
+  the aircraft down mid-frame. It is a **menu item**, which is handler context. A `--write`
+  build already triggers a reload through `watch.py`'s channel.
+- **History** is the FX compositor's undo/redo plus an append-only journal
+  (`ToLissPhoton_panelfx_history.txt`). Undo covers the edit you just made; the journal
+  covers the session you already closed, which the single-state save file cannot. It is
+  append-only on purpose — trimming it would discard exactly the old snapshot you want when
+  you realise three days later that the look was better before.
+- **Panel FX layers can be images**, not only colours — see "Overlay images" below.
+
+## Overlay images
+
+An FX layer can carry a PNG/JPG/BMP/TGA that **modulates** its colour, so a gradient,
+vignette, scanline pattern or painted sheen works with every control the solid layer had.
+
+Images live in `Resources/plugins/ToLissPhoton/overlays/` — the folder beside the `.xpl`,
+created on first use with a `README.txt` — and are picked by **name** from a combo on each
+layer's row. `deploy.ps1` seeds four starters, generated by `build/make_overlays.py` and
+copied **by name**, never as a folder mirror, since that folder is also where you drop your
+own. `Rescan images` in the Panel FX tab re-reads it without a restart.
+
+The end-user installer treats that folder the same way, from the other side: it never writes
+one (nothing here ships yet), it skips one found in a source `--plugin-dir`, and an uninstall
+that removes the plugin **keeps** a non-empty one instead of `rmtree`-ing the plugin folder.
+`installer/constants.py`'s `PLUGIN_USER_DIRS` is the one list; see `docs/installer.md`
+§Shared-plugin removal policy.
+
+`third_party/stb/` is vendored [stb_image](https://github.com/nothings/stb) (v2.30, public
+domain). The X-Plane SDK has no image loader — XPLM4 dropped `XPLMLoadTexture` and left only
+`XPLMGenerateTextureNumbers` / `XPLMBindTexture2d`, which hand out a texture *number* and
+expect decoded pixels. Its implementation sits inside the `#if PHOTON_DEV` block in
+`plugin.cpp`, so the release `.xpl` is unchanged in size.
+
+- ⚠ **Uploaded PREMULTIPLIED, and an overlay's shape lives in its ALPHA channel** — RGB is
+  usually just white, because the layer colour does the tinting. Alpha is coverage in every
+  blend mode, and a straight-alpha PNG stores bright RGB under alpha 0, which would be added
+  or multiplied in at full strength. Premultiplying on upload fixes that once for all modes,
+  and is why `Normal`'s source factor is `ONE` and not `SRC_ALPHA`.
+- ⚠ **Burn and Darken cannot carry one.** Burn emits `1 − colour` and Darken is `GL_MIN`
+  whose opacity has to fade the emitted colour toward white; `GL_MODULATE` expresses neither
+  per pixel, and both would need `ARB_texture_env_combine` or a shader. Such a layer is
+  **skipped** and the editor says so on the row.
+- **One texture unit for the whole pass**: a solid layer binds a 1×1 white texture instead of
+  switching the unit off, which keeps it arithmetically identical to a textured one.
+  Toggling per layer would mean `XPLMSetGraphicsState` *inside* the loop, re-entering
+  X-Plane's blend tracker under a func we set ourselves.
+- **Uploads happen lazily from a draw callback**, because that is where a GL context is
+  current. Both call sites — the panel pass and the ImGui window — qualify.
 
 ## Dear ImGui
 
-`third_party/imgui/` is vendored upstream ImGui (v1.92.9, committed — see its README for
-the version table and update steps), and `src/imgui_xplm.{h,cpp}` is **our** X-Plane
-backend. The stock backends assume they own the window, the GL context and the event
-loop; a plugin owns none of those.
+`third_party/imgui/` is vendored upstream ImGui (v1.92.9 — see its README for the version
+table and update steps); `src/imgui_xplm.{h,cpp}` is **our** X-Plane backend. The stock
+backends assume they own the window, the GL context and the event loop; a plugin owns none
+of those.
 
-- **Compiled into every build**, not gated behind `PHOTON_PANEL_PROBE`: it is the UI
-  framework for tooling and for whatever windows get converted later, so its availability
-  shouldn't depend on which experiment is switched on. Release `/OPT:REF` drops what ends
-  up unreferenced — the shipping `.xpl` is 192 KB with ImGui compiled in.
-- **`opengl32` is therefore linked unconditionally**, where it used to be probe-only.
-- **`src/photon_imconfig.h`** holds our ImGui settings (reached via `IMGUI_USER_CONFIG`)
-  so `third_party/imgui/` stays byte-identical to upstream. Chief among them: `IM_ASSERT`
-  logs and continues instead of calling `abort()`, which inside X-Plane would take the
-  simulator down with no message.
-- **Nothing user-facing uses it yet.** The Custom, About and Panel Probe windows still
-  draw with `XPLMDrawTranslucentDarkBox` + `XPLMDrawString`; converting them is a separate
-  change. The only ImGui windows are under Debug, and that submenu only exists in a probe
-  build.
+**Every window in the plugin is ImGui**, shipping ones included. That replaced ~900 lines of
+hand-rolled column measuring, hit-testing and press-state tracking that ImGui does for free.
+
+- **`src/photon_imconfig.h`** holds our settings (via `IMGUI_USER_CONFIG`) so
+  `third_party/imgui/` stays byte-identical to upstream. Chief among them: `IM_ASSERT` logs
+  and continues instead of calling `abort()`, which inside X-Plane would take the simulator
+  down with no message.
 - ⚠ **Iterate `draw_data->CmdLists`, never `draw_data->CmdListsCount`.** That counter was
-  obsoleted in **1.92.9** (2026-07-20, four days before the version vendored here) and is no
-  longer maintained by the renderer: ImGui's own path pushes lists through
-  `AddDrawListToDrawDataEx`, and only the public `AddDrawList()` helper — which a backend
-  does not call — updates the count. It therefore reads **0 on every frame ImGui renders**,
-  while `CmdLists.Size` is 2 and `TotalVtxCount` is in the hundreds. A loop written against
-  it compiles, matches every pre-1.92 example and most of the internet, and **silently draws
-  nothing**. It blanked the first working version of this backend. If a version bump makes
-  the UI vanish again, look here first.
-  Defining `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` would turn this into a compile error, which is
-  worth doing — but it also removes `GetTexDataAsRGBA32`/`SetTexID`, so it has to wait until
-  the font path moves to 1.92's texture protocol (`ImGuiBackendFlags_RendererHasTextures` +
-  servicing `ImTextureData` requests). Worth doing then; it also buys smooth font scaling.
+  obsoleted in **1.92.9** (four days before the version vendored here) and is no longer
+  maintained: ImGui's own path pushes lists through `AddDrawListToDrawDataEx`, and only the
+  public `AddDrawList()` helper — which a backend does not call — updates the count. It
+  reads **0 on every frame ImGui renders** while `CmdLists.Size` is 2 and `TotalVtxCount` is
+  in the hundreds. A loop written against it compiles, matches every pre-1.92 example, and
+  **silently draws nothing**. It blanked the first working version of this backend. If a
+  version bump makes the UI vanish again, look here first.
+- **Defining `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` would make that a compile error**, and is
+  worth doing — but it also removes `GetTexDataAsRGBA32`/`SetTexID`, so it waits until the
+  font path moves to 1.92's texture protocol (`ImGuiBackendFlags_RendererHasTextures` +
+  servicing `ImTextureData`). That also buys smooth font scaling. **Meanwhile, nothing we
+  write may call into that block** — `GetContentRegionMax()` is the one that tempts you;
+  use `GetCursorPosX() + GetContentRegionAvail().x - w` to right-align instead.
+- ⚠ **A row button next to a `SpanAvailWidth` tree node needs
+  `ImGuiTreeNodeFlags_AllowOverlap`** — on the *node*, not on the button. `SpanAvailWidth`
+  extends the node's hit box to the right edge of the pane, i.e. over anything `SameLine()`
+  puts there, and `ItemHoverable` refuses hover to any later item once `g.HoveredId` is
+  taken (`if (g.HoveredId != 0 && g.HoveredId != id && !g.HoveredIdAllowOverlap) return
+  false`). The overlapped buttons still **draw, at full opacity, and are completely dead**:
+  no hover, no tooltip, no click, no assertion, nothing in `Log.txt`. It reads in-sim as
+  "that button does nothing" and sends you looking at what the button *calls*. This cost the
+  Panel FX target tree its `?` and `x` buttons for a release; ImGui's own comment on the
+  flag says exactly this, one line above the flag you actually want.
 - ⚠ **The boxel → pixel transform comes from DATAREFS, not from `glGet`.**
   `sim/graphics/view/{modelview_matrix,projection_matrix,viewport}` are what X-Plane
   publishes for exactly this; under Vulkan the GL our drawing rides is a bridge and the
   fixed-function matrix state `glGetFloatv` reports is not the transform in force during a
   window draw callback. Only `glScissor` needs it — vertices go out in boxels and ride
-  X-Plane's own projection — which is precisely what makes it hard to spot: **the geometry
-  is correct, every clip rect is nonsense, and a nonsense scissor box discards the whole UI
-  with no GL error.** That blanked the first cut of this backend. Note the viewport dataref
-  is `left, bottom, RIGHT, TOP` (corners) where GL's is `x, y, width, height`.
-  Two further nets, both because the failure mode is invisibility: the transform is
-  validated against the window's own corners each frame and clipping is **skipped** rather
-  than trusted if it fails (an overflowing child pane is a far better failure than a blank
+  X-Plane's own projection — which is what makes it hard to spot: **the geometry is correct,
+  every clip rect is nonsense, and a nonsense scissor box discards the whole UI with no GL
+  error.** Note the viewport dataref is `left, bottom, RIGHT, TOP` (corners) where GL's is
+  `x, y, width, height`. Two further nets, both because the failure mode is invisibility:
+  the transform is validated against the window's own corners each frame and clipping is
+  **skipped** rather than trusted if it fails (an overflowing child pane beats a blank
   window), and scissor rects are normalised with min/max instead of assuming an ordering.
 - **A failed font-atlas upload also blanks the window**, not just the text: every ImGui
   vertex is textured — solid rectangles sample the atlas's white pixel — so an upload
-  failure makes the whole UI transparent. `BuildFontTexture` checks `glGetError` and says
-  so in `Log.txt`.
-- **Smoke test:** Plugins ▸ ToLiss Photon ▸ Debug ▸ *Dear ImGui demo*. If the stock demo
-  draws, scrolls, responds to the mouse and accepts typing, the backend is correct.
-  Either ImGui window also logs a one-shot diagnostic on its first frame — window
-  geometry, display size, font texture and atlas size, draw-command and vertex counts,
-  the viewport and where it came from, and whether clipping was usable. Read that line
+  failure makes the whole UI transparent. `BuildFontTexture` checks `glGetError` and says so
+  in `Log.txt`.
+- **Smoke test:** Dev window ▸ ImGui tab. If the stock demo draws, scrolls, responds to the
+  mouse and accepts typing, the backend is correct. Every ImGui window also logs a one-shot
+  first-frame diagnostic — geometry, display size, font texture, draw-command and vertex
+  counts, the viewport and where it came from, whether clipping was usable. Read that line
   before forming a theory about a window that looks wrong.
-- **A blank window paints two GL sanity markers** in the bottom-left of the client area
-  (probe builds, `PhotonImgui::SetDiagnostics`). They draw only when there is no UI
-  geometry, so a working window never shows them, and they share as little as possible
-  with the UI path: an untextured magenta square (did our immediate-mode GL reach the
-  screen at all?) and a square showing the font atlas (did the upload and texturing
-  work?). **Neither / magenta only / both** are three disjoint diagnoses, which is the
-  difference between one sim start and a restart per hypothesis — that is how the
-  `CmdListsCount` bug above was cornered.
-- **ImGui bugs are reproducible offline.** The frame is pure computation: a console
-  `main()` that links the four ImGui `.cpp` files with the same `IMGUI_USER_CONFIG` and
-  makes the same `NewFrame`/`Begin`/`End`/`Render` calls reproduces anything that is not
-  GL or X-Plane, with assertions printing to stdout instead of being swallowed. That is
-  what found `CmdListsCount`, in about a minute, after two sim restarts had found nothing.
+- **A blank window paints two GL sanity markers** in the bottom-left (dev builds,
+  `PhotonImgui::SetDiagnostics`). They draw only when there is no UI geometry, so a working
+  window never shows them, and they share as little as possible with the UI path: an
+  untextured magenta square (did our immediate-mode GL reach the screen at all?) and a
+  square showing the font atlas (did the upload and texturing work?). **Neither / magenta
+  only / both** are three disjoint diagnoses — one sim start instead of a restart per
+  hypothesis. That is how the `CmdListsCount` bug was cornered.
+- **ImGui bugs are reproducible offline.** The frame is pure computation: a console `main()`
+  linking the four ImGui `.cpp` files with the same `IMGUI_USER_CONFIG` and making the same
+  `NewFrame`/`Begin`/`End`/`Render` calls reproduces anything that is not GL or X-Plane,
+  with assertions printing to stdout instead of being swallowed. That found `CmdListsCount`
+  in about a minute, after two sim restarts had found nothing.
 
 ## Implementation notes
 
-- **SDK feature level** is `XPLM300/301` (X-Plane 11.10+) in `CMakeLists.txt`; bump to
-  `XPLM400=1` for XP12-only APIs if needed.
-- **Per-key closures → refcon.** The Python accessors used a lambda per category; the
-  native accessors carry the category index in the read-refcon instead.
-- **int *and* float readers** are both registered per dataref — the OBJ reads them as
-  float (gotcha #4); keep both.
+- **SDK feature level** is `XPLM300/301` (X-Plane 11.10+); bump to `XPLM400=1` for XP12-only
+  APIs if needed.
+- **Per-key closures → refcon.** The Python accessors used a lambda per category; the native
+  accessors carry the category index in the read-refcon instead.
+- **int *and* float readers** are both registered per dataref — the OBJ reads them as float.
+- **`opengl32` is linked unconditionally** (the ImGui backend renders with GL and is always
+  compiled). XPWidgets is not linked at all.
 - **Cross-compilation isn't possible** — one binary per OS. The all-platform build is wired
-  into the CI matrix (Win/Mac/Linux) in `.github/workflows/release.yml`: the `native` job
-  fetches the SDK (via `XPSDK_URL`), builds each OS's `.xpl` with CMake, and uploads it;
-  `bundle`/`exe` merge all three arches (`download-artifact merge-multiple`) into one
-  `ToLissPhoton/` folder passed to `make_release.py --plugin-dir`. macOS is built universal
-  (arm64+x86_64) via `CMAKE_OSX_ARCHITECTURES`; codesign/notarize is still **not** done
-  (unsigned `.xpl` loads fine, but a downloaded one may be Gatekeeper-quarantined until
-  cleared). The workflow has not yet been exercised by a real `v*` tag push.
+  into the CI matrix in `.github/workflows/release.yml`: the `native` job fetches the SDK
+  (via `XPSDK_URL`), builds each OS's `.xpl`, and uploads it; `bundle`/`exe` merge all three
+  arches into one `ToLissPhoton/` folder passed to `make_release.py --plugin-dir`. macOS is
+  built universal (arm64+x86_64); codesign/notarize is still **not** done. The workflow has
+  not yet been exercised by a real `v*` tag push.
