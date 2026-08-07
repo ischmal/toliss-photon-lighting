@@ -17,7 +17,7 @@ BUILD = REPO / "build"
 if str(BUILD) not in sys.path:
     sys.path.insert(0, str(BUILD))
 
-import patch_acf as P  # noqa: E402
+from installer import patch_acf as P  # noqa: E402
 
 
 # Trimmed but faithful spot blocks, copied from the real ToLiss A320 files. The

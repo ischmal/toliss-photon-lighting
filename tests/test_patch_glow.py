@@ -15,7 +15,7 @@ from pathlib import Path
 
 BUILD = Path(__file__).resolve().parent.parent / "build"
 sys.path.insert(0, str(BUILD))
-import patch_glow as G  # noqa: E402  (path insert must precede this)
+from installer import patch_glow as G  # noqa: E402  (path insert must precede this)
 
 OLD = G.OLD_DATAREF
 NEW = G.NEW_DATAREF

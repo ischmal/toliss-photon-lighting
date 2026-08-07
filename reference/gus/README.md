@@ -38,7 +38,7 @@ output. The generated `dist/A3xx/objects/lights_inn.obj` carries all three as
 
 **One deliberate deviation** (decision #1): in `lights_inn_led.obj` the CA/FO
 tablet lights carry old-halogen orange `1.00 0.37 0.16`, while every comparable
-small directed lamp goes warm white. Treated as an oversight and normalised to
+small directed lamp goes warm white. Treated as an oversight and normalized to
 `1.00 0.89 0.81` in the DSL. Everything else is transcribed verbatim.
 
 ### `textures/` — the canonical set (11 files, ~57 MB)
@@ -47,7 +47,7 @@ Resolves the per-package packaging drift (decision #4) into one union set:
 A320's `objects/`, plus `chairs_LIT.png` / `kitchens_LIT.png` (which ship only
 under his `liveries/objects/`), plus `pedals_details_{1,2}.png` from A319/A321
 (absent from the A320 package). A319's differing `knobs.png` is discarded in
-favour of A320's. `extra-needed.png` is documentation, not an asset.
+favor of A320's. `extra-needed.png` is documentation, not an asset.
 
 These are **variant-independent** — one set, correct for all three looks — so
 they are purely an install-time concern and never switch at runtime.

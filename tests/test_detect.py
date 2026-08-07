@@ -185,7 +185,7 @@ class OtherAirframeCheckTests(unittest.TestCase):
 class NestedAndRenamedScanTests(unittest.TestCase):
     """The scan is content-based (skunkcrafts_updater.cfg / OBJ filename), not
     folder-name/location based, so an install works when it's renamed or dropped
-    in a sub-hangar (user feedback: 'installer doesn't recognise the folder if
+    in a sub-hangar (user feedback: 'installer doesn't recognize the folder if
     named anything other than ToLissA3xx_Vypy, and not if it isn't directly under
     X-Plane 12/Aircraft')."""
 

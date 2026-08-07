@@ -32,54 +32,98 @@ def interior_records(airframe="a320"):
     return B.parse_records(B.Emitter(cfg, airframe, "stock", target="interior").emit())
 
 
+#: The five category datarefs, and the ONE other ToLissPhoton/interior/ gate the
+#: OBJ carries. `optimized` is not a category — it selects between Gus's authored
+#: light stack (0) and the reduced one-light-per-position set (1) — so the helpers
+#: below have to tell the two apart rather than treating every interior gate as a
+#: category. They did not, once, and the symptom was a KeyError in a colour test.
+INT_CATEGORY_KEYS = ("dome", "map", "mainpnl", "pedestal", "console")
+OPTIMIZE_DREF = "ToLissPhoton/interior/optimized"
+
+
 def _interior_gates(rec):
-    return [g for g in rec[0] if g[3].startswith("ToLissPhoton/interior/")]
+    """The CATEGORY gates on a record — never the optimize gate."""
+    return [g for g in rec[0]
+            if g[3].startswith("ToLissPhoton/interior/")
+            and g[3].rsplit("/", 1)[-1] in INT_CATEGORY_KEYS]
 
 
 def _category_of(gate):
     return gate[3].rsplit("/", 1)[-1]
 
 
+def _code(text):
+    """The OBJ with its comments dropped. The credit banner NAMES the gate
+    datarefs and explains them, so a test that greps the whole file counts its
+    own documentation as an occurrence."""
+    return "\n".join(ln for ln in text.replace("\r\n", "\n").split("\n")
+                     if not ln.strip().startswith("#"))
+
+
+def _hidden(rec, profile, optimized=0):
+    """X-Plane's own visibility rule over one record, for a given interior
+    profile and light-count mode.
+
+    A block starts VISIBLE and an ANIM_hide whose range covers the dataref's
+    current value turns it off (see Emitter.branch_gate). Modelling it rather
+    than pattern-matching gate lines is the point: the bug that shipped was a
+    gate that matched perfectly and still left every branch visible.
+
+    `optimized` defaults to 0 — Gus's full stack — so every fidelity test below
+    keeps comparing against what he authored without saying so."""
+    for g in rec[0]:
+        if g[3] == OPTIMIZE_DREF:
+            value = optimized
+        elif g in _interior_gates(rec):
+            value = value_for(_category_of(g), profile)
+        else:
+            continue                    # someone else's gate (anim/SHARK, ...)
+        if g[0] == "ANIM_hide" and g[1] <= value <= g[2]:
+            return True
+    return False
+
+
 #: Interior categories that are TWO-valued rather than ternary — 0 and 1 only.
-#: The dome's ramp (P4 `fluoro`) is the same white in both halogen eras, so a
-#: third branch would duplicate the first. The one place the value spaces differ.
-TWO_VALUED = {"dome"}
+#: EMPTY since 2026-08-03: the dome was the one member, on the reading that its
+#: fitting is fluorescent and has no halogen era, and it turned out to be halogen
+#: like the rest. The machinery stays on both sides (here, and IntValueForProfile
+#: / the one-line gate in the plugin) because a category may need it again — this
+#: set is what wires it up, and the exterior exercises the same gate encoding.
+TWO_VALUED = set()
 
 #: How many looks each interior category offers.
-INT_VALUES = {"dome": 2, "map": 3, "mainpnl": 3, "pedestal": 3, "console": 3}
+INT_VALUES = {"dome": 3, "map": 3, "mainpnl": 3, "pedestal": 3, "console": 3}
 
 
 def value_for(category, profile):
     """The dataref value `category` carries under interior `profile`
     (0 old halogen / 1 new halogen / 2 LED).
 
-    Mirrors IntValueForProfile in plugin.cpp and must keep mirroring it: the
-    two-valued dome folds BOTH halogen profiles onto 0 and LED onto 1, while the
-    ternary categories take the profile at face value. At 2 the dome's gate
-    encoding hides neither branch, so both would draw."""
+    Mirrors IntValueForProfile in plugin.cpp and must keep mirroring it: a
+    two-valued category folds BOTH halogen profiles onto 0 and LED onto 1, while
+    a ternary one takes the profile at face value. At 2 a two-valued gate hides
+    neither branch, so both would draw — which is why the fold is here and not a
+    clamp."""
     if category in TWO_VALUED:
         return 1 if profile == 2 else 0
     return profile
 
 
-def colors_by_category(recs, profile):
+def colors_by_category(recs, profile, optimized=0):
     """category -> the set of colors its VISIBLE records carry under `profile`.
 
     Keyed off the gate, so a light is attributed to whatever category actually
     switches it rather than to whatever its name suggests."""
     out = {}
     for rec in recs:
-        gates = _interior_gates(rec)
-        if any(g[0] == "ANIM_hide"
-               and g[1] <= value_for(_category_of(g), profile) <= g[2]
-               for g in gates):
+        if _hidden(rec, profile, optimized):
             continue
-        for g in gates:
+        for g in _interior_gates(rec):
             out.setdefault(_category_of(g), set()).add(rec[3])
     return out
 
 
-def branch_records(recs, profile):
+def branch_records(recs, profile, optimized=0):
     """Records VISIBLE under interior `profile`, with the gate stripped so they
     can be compared against Gus's ungated files.
 
@@ -93,10 +137,7 @@ def branch_records(recs, profile):
     share one value space (see value_for)."""
     out = Counter()
     for rec, n in recs.items():
-        gates = _interior_gates(rec)
-        if any(g[0] == "ANIM_hide"
-               and g[1] <= value_for(_category_of(g), profile) <= g[2]
-               for g in gates):
+        if _hidden(rec, profile, optimized):
             continue
         out[tuple(rec[1:])] += n
     return out
@@ -106,7 +147,7 @@ class ExteriorIsUnchangedTests(unittest.TestCase):
     """The N-way emitter must leave exterior emission BYTE-IDENTICAL. Every
     exterior category stays two-valued and so keeps the original ANIM_hide
     encoding; switching it to ANIM_show would rewrite every gate line in all
-    three frozen reference/photon goldens for no behavioural gain."""
+    three frozen reference/photon goldens for no behavioral gain."""
 
     def test_exterior_categories_are_all_two_way(self):
         cfg = B.load_config(wing="stock")
@@ -138,28 +179,51 @@ class ExteriorIsUnchangedTests(unittest.TestCase):
                          [f"ANIM_hide -0.5 0.5 {d}", f"ANIM_hide 1.5 2.5 {d}"])
         self.assertEqual(em.branch_gate("pedestal", 2), [f"ANIM_hide -0.5 1.5 {d}"])
 
-    def test_two_valued_dome_keeps_the_single_line_gate(self):
-        """The dome is two-valued and takes the SAME encoding every exterior
-        category uses — one line, hiding at the other branch's value. Not the
-        paired open-ended form: with two branches there is nothing beyond to cover.
+    def test_the_dome_is_ternary_like_every_other_interior_category(self):
+        """It was two-valued (fluorescent / LED) from 2026-07-28 to 2026-08-03,
+        on the reading that a dome light is a fluorescent fitting with no
+        incandescent era to follow. The A320's dome lamps are halogen, so it is
+        back on the era ramp and the Dome Lights row offers the same three looks
+        as the other four.
 
-        Corollary: 2 is not a legal dome value. Neither `ANIM_hide 1 1` nor
-        `ANIM_hide 0 0` covers it, so both branches would draw. value_for() is the
-        test-side mirror; IntValueForProfile and ClampIntValue are the shipping."""
+        Pinned because the value space is what `interior_schema` versions and what
+        a prefs file written in either shape carries: a v2 `dome: 1` meant LED and
+        a v3 `dome: 1` means new halogen. If this test ever goes green with two
+        profiles again, kIntPrefsSchema has to move with it."""
         cfg = B.load_config(wing="stock")
         em = B.Emitter(cfg, "a320", "stock", target="interior")
         d = "ToLissPhoton/interior/dome"
-        self.assertEqual(len(em.profiles_of("dome")), 2)
-        self.assertEqual(em.branch_gate("dome", 0), [f"ANIM_hide 1 1 {d}"])
-        self.assertEqual(em.branch_gate("dome", 1), [f"ANIM_hide 0 0 {d}"])
+        self.assertEqual(len(em.profiles_of("dome")), 3)
+        self.assertEqual(em.branch_gate("dome", 0), [f"ANIM_hide 0.5 2.5 {d}"])
+        self.assertEqual(em.branch_gate("dome", 1),
+                         [f"ANIM_hide -0.5 0.5 {d}", f"ANIM_hide 1.5 2.5 {d}"])
+        self.assertEqual(em.branch_gate("dome", 2), [f"ANIM_hide -0.5 1.5 {d}"])
+
+    def test_a_two_valued_category_would_still_get_the_single_line_gate(self):
+        """The encoding TWO_VALUED selects, kept alive on the exterior — one line
+        per branch, hiding at the other branch's value, not the paired open-ended
+        form (with two branches there is nothing beyond to cover).
+
+        Corollary, and the reason this stays named after the dome's old shape: 2
+        is not a legal value on such a category. Neither `ANIM_hide 1 1` nor
+        `ANIM_hide 0 0` covers it, so both branches would draw. value_for() is the
+        test-side mirror; IntValueForProfile and ClampIntValue are the shipping."""
+        cfg = B.load_config(wing="stock")
+        em = B.Emitter(cfg, "a320", "stock", target="exterior")
+        d = "ToLissPhoton/exterior/beacon"
+        self.assertEqual(len(em.profiles_of("beacon")), 2)
+        self.assertEqual(em.branch_gate("beacon", 0), [f"ANIM_hide 1 1 {d}"])
+        self.assertEqual(em.branch_gate("beacon", 1), [f"ANIM_hide 0 0 {d}"])
 
     def test_every_category_row_actually_changes_something(self):
         """A category whose branches all render the SAME colors is a dead menu row:
         the gating works, the switch does nothing, and in-sim it is indistinguishable
         from the mod not being installed. That shipped twice — the DOME, whose third
-        branch duplicated its first (fixed by making it two-valued), and the CONSOLE
-        strips, constant warm white in all three of Gus's files (fixed by deviation
-        #4, moving them to the era-colored P3).
+        branch duplicated its first while it sat on the fluorescent ramp (fixed then
+        by making it two-valued, and since 2026-08-03 by putting it back on the era
+        ramp, where all three branches differ), and the CONSOLE strips, constant warm
+        white in all three of Gus's files (fixed by deviation #4, moving them to the
+        era-colored P3).
 
         So each category must show exactly as many distinct looks as it has values —
         no more (an unreachable branch) and no fewer (a dead one)."""
@@ -185,7 +249,8 @@ class ExteriorIsUnchangedTests(unittest.TestCase):
         """Simulate X-Plane's visibility model over the emitted file: a block is
         visible unless some ANIM_hide range covers the current value. Exactly one
         branch per category must survive at every value in that category's OWN
-        range — 0..1 for the two-valued dome, 0..2 for the rest."""
+        range — 0..2 for a ternary category, 0..1 for a two-valued one (INT_VALUES
+        is the register of which is which)."""
         cfg = B.load_config(wing="stock")
         inn = B.Emitter(cfg, "a320", "stock", target="interior").emit()
         for cat, nvalues in INT_VALUES.items():
@@ -224,13 +289,18 @@ class ExteriorIsUnchangedTests(unittest.TestCase):
         self.assertNotIn("airplane_panel_sp", ext)
 
 
-# The four documented departures from Gus's data. Each is pinned to the exact
-# records it touches rather than merely tolerated, so that a FIFTH one — or any
-# of these silently spreading to more lights — fails the suite.
+# The documented departures from Gus's data. Each is pinned to the exact records
+# it touches rather than merely tolerated, so that a NEW one — or any of these
+# silently spreading to more lights — fails the suite.
 #
 #   #1  the CA/FO tablet lights, LED variant only:  orange -> warm
-#   #2  the dome lights, both halogen variants:     era color -> fluorescent
-#       (the LED variant is untouched: fluoro and white are the same there)
+#   #2  WITHDRAWN 2026-08-03. It moved the dome lights off the era ramp onto a
+#       fluorescent white in both halogen variants, on the reading that the
+#       fitting is fluorescent. It is halogen, so the dome is back on Gus's ramp
+#       and there is nothing left to pin. The NUMBERING IS NOT REUSED: #3 and #4
+#       are named by number in the DSL, in interior_plan.md and in the tests
+#       below, and renumbering them to close a gap would silently re-point every
+#       one of those references.
 #   #3  the CA/FO table lights, ALL THREE variants: constant warm -> era color
 #   #4  the console strips, the two halogen variants: constant warm -> era
 #       color (the LED variant is untouched: ramp P3 is warm there too)
@@ -238,7 +308,6 @@ GUS_OLD_ORANGE = (1.0, 0.37, 0.16)
 GUS_NEW_AMBER = (0.8, 0.55, 0.3)
 GUS_LED_COOL = (0.82, 0.82, 1.0)
 GUS_WARM = (1.0, 0.89, 0.81)
-PHOTON_FLUORO = (0.95, 0.95, 0.88)
 GUS_ERA = {"current": GUS_OLD_ORANGE, "new": GUS_NEW_AMBER, "led": GUS_LED_COOL}
 
 DOME_POSITIONS = {(-0.472, 1.09, -3.35), (0.472, 1.09, -3.35)}
@@ -266,12 +335,7 @@ def expected_deviations(variant):
             ours.add((p, GUS_WARM))
             theirs.add((p, GUS_OLD_ORANGE))
     else:
-        # #2 — the dome leaves the era ramp. Nothing to do under LED, where
-        # fluoro and Gus's cool white are the same color.
-        for p in DOME_POSITIONS:
-            ours.add((p, PHOTON_FLUORO))
-            theirs.add((p, era))
-        # #4 — the console strips join the era ramp. Again nothing under LED:
+        # #4 — the console strips join the era ramp. Nothing under LED:
         # ramp P3 lands on warm white there, which is what Gus had all along.
         for p in CONSOLE_POSITIONS:
             ours.add((p, era))
@@ -281,7 +345,7 @@ def expected_deviations(variant):
 
 # Panel flood 3's first line: Gus has INDEX 1, Photon corrects it to 2 (§1.3e).
 # The deviation machinery above compares on (position, color) and this changes
-# neither, so the pair is cancelled out here and pinned properly by
+# neither, so the pair is canceled out here and pinned properly by
 # test_panel_flood_3_sits_wholly_on_one_rheostat.
 # Written in UNIT form because every comparison against Gus goes through
 # `_canon` first — his is 0 -1.5 0.4 and ours 0 -0.966 0.258, the same aim.
@@ -291,12 +355,12 @@ FLOOD3_DIR, FLOOD3_CONE = (0.0, -0.966, 0.258), 0.906
 def _unit(d):
     """A direction reduced to aim alone, at the project's 3 dp.
 
-    DEVIATION #5 (2026-07-29) normalised every interior `dir:` — X-Plane compares
+    DEVIATION #5 (2026-07-29) normalized every interior `dir:` — X-Plane compares
     `cone` against a DOT PRODUCT with it, so a vector 0.18 long (Gus's outer panel
     floods) makes the effective cone threshold cone/|d|, which above 1 no direction
     can satisfy. That is length, never aim: `0 -1.5 0.4` and `0 -0.966 0.258` point
-    the same way. So the colour-fidelity comparison canonicalises dir out, and the
-    normalisation itself is pinned by its own test — otherwise a change of aim, the
+    the same way. So the color-fidelity comparison canonicalizes dir out, and the
+    normalization itself is pinned by its own test — otherwise a change of aim, the
     thing that would actually be a regression, would hide inside the same diff."""
     length = math.sqrt(sum(v * v for v in d))
     if length < 1e-9:
@@ -319,7 +383,7 @@ def _canon_all(counter):
 
 def _is_flood3_line(rec, index):
     """The single record the §1.3e rheostat correction moves, at `index`.
-    Expects an already-canonicalised record."""
+    Expects an already-canonicalized record."""
     cls, pos, _rgb, idx, _size, d, cone = rec
     return (cls == "airplane_panel_sp" and pos == (0.0, 0.0, 0.0)
             and idx == index and d == FLOOD3_DIR and cone == FLOOD3_CONE)
@@ -346,13 +410,13 @@ class GusFidelityTests(unittest.TestCase):
     Per §0.1 this suite makes a deviation deliberate and visible in the diff; it is
     not a rule that Gus's data may never change."""
 
-    def test_each_branch_matches_gus_except_the_documented_normalisation(self):
+    def test_each_branch_matches_gus_except_the_documented_normalization(self):
         recs = interior_records()
         for value, name in ((0, "current"), (1, "new"), (2, "led")):
             with self.subTest(variant=name):
-                # Both sides canonicalised: this test is about COLOUR, and
+                # Both sides canonicalized: this test is about COLOR, and
                 # deviation #5 changed only the LENGTH of every dir. Comparing raw
-                # would drop 20 records into the diff that say nothing about colour
+                # would drop 20 records into the diff that say nothing about color
                 # and would swamp the ones that do. _unit keeps the aim, so a real
                 # change of direction still shows up here.
                 mine = _canon_all(branch_records(recs, value))
@@ -385,7 +449,7 @@ class GusFidelityTests(unittest.TestCase):
                 self.assertEqual(len(only_theirs), len(want_theirs), only_theirs)
 
     def test_every_direction_is_unit_length_but_still_gus_s_aim(self):
-        """DEVIATION #5 (2026-07-29): every interior `dir:` normalised.
+        """DEVIATION #5 (2026-07-29): every interior `dir:` normalized.
 
         Why it is not mere tidiness — X-Plane compares `cone` against a DOT PRODUCT
         with `dir`, so the effective threshold is cone/|d|. Gus's outer panel floods
@@ -395,7 +459,7 @@ class GusFidelityTests(unittest.TestCase):
         pair reported in-sim as "the outer floods are wrong under all 48
         permutations" and "cone edits have no visible effect".
 
-        Two halves, and the second is the one that matters: normalising must change
+        Two halves, and the second is the one that matters: normalizing must change
         LENGTH ONLY. If it ever changes aim it is no longer a fix, it is a silent
         re-aiming of Gus's measured geometry."""
         recs = interior_records()
@@ -409,7 +473,7 @@ class GusFidelityTests(unittest.TestCase):
                         continue                       # the dome is omnidirectional
                     self.assertAlmostEqual(
                         length, 1.0, delta=B.UNIT_DIR_TOLERANCE,
-                        msg="dir %s has length %.3f — normalise it in the .phdsl "
+                        msg="dir %s has length %.3f — normalize it in the .phdsl "
                             "(`build` prints the unit form)" % (d, length))
                 # ...and the set of AIMS is unchanged from Gus's. Compared as a set
                 # of unit vectors, so length is out of the picture on both sides.
@@ -434,7 +498,7 @@ class GusFidelityTests(unittest.TestCase):
         def indices(counter, pos_at, idx_at, dir_at):
             """Flatten a record multiset to one index per emitted LINE. Counted WITH
             multiplicity: floods 2 and 3 share a byte-identical INDEX 1 line, so they
-            collapse to one key and the bug is invisible unless counts are honoured."""
+            collapse to one key and the bug is invisible unless counts are honored."""
             out = []
             for rec, n in counter.items():
                 # Aim, not the raw vector: Gus's file carries 0 -1.5 0.4 and ours
@@ -459,10 +523,11 @@ class GusFidelityTests(unittest.TestCase):
 
     def test_dome_spot_tracks_the_dome_lamps_in_every_branch(self):
         """The re-added .acf dome spot lights the SAME fitting as Gus's two dome
-        lamps, so it has to sit on their color ramp (P4), not the era-colored
-        one the other two spots use. Putting them on different ramps is invisible
-        in the diff against Gus (he has no spots at all to compare to) and shows
-        up in-sim as one overhead fixture lit two colors at once."""
+        lamps, so it has to sit on their color ramp. Putting them on different
+        ramps is invisible in the diff against Gus (he has no spots at all to
+        compare to) and shows up in-sim as one overhead fixture lit two colors at
+        once. It was the reason the two moved onto the fluorescent ramp together
+        in 2026-07, and it is why they moved back off it together."""
         recs = interior_records()
         for value, name in ((0, "old halogen"), (1, "new halogen"), (2, "led")):
             with self.subTest(profile=name):
@@ -475,10 +540,13 @@ class GusFidelityTests(unittest.TestCase):
                 self.assertEqual(dome, spot)
 
     def test_pedestal_flood_stays_era_colored(self):
-        """Deviation #2 moves the DOME off Gus's era ramp and nothing else. The
-        pedestal flood must keep swinging orange -> amber -> blue-white: the
-        white-dome-over-warm-panels contrast is the point of that change, and
-        flattening the flood too would quietly undo it."""
+        """The pedestal flood must keep swinging orange -> amber -> blue-white.
+
+        It was the control for withdrawn deviation #2 (the dome going
+        fluorescent): the point of that change was the contrast between a white
+        dome and warm panels, so flattening the flood too would have quietly
+        undone it. The dome is era-colored again and the contrast is gone, but the
+        flood's own ramp is Gus's measured value and this is still what pins it."""
         recs = interior_records()
         seen = []
         for value in (0, 1, 2):
@@ -534,12 +602,9 @@ class GusFidelityTests(unittest.TestCase):
         recs = interior_records()
         per_cat = Counter()
         for rec, n in recs.items():
-            gates = _interior_gates(rec)
-            if any(g[0] == "ANIM_hide"
-                   and g[1] <= value_for(_category_of(g), 0) <= g[2]
-                   for g in gates):
-                continue            # not the old-halogen branch
-            for g in gates:
+            if _hidden(rec, 0):     # not the old-halogen branch (full stack)
+                continue
+            for g in _interior_gates(rec):
                 per_cat[_category_of(g)] += n
         # `map` is THREE lights: the two overhead reading lamps (Gus's "tablet"
         # pair) plus the re-added .acf spot on ckpt/lights/map. The ten panel
@@ -560,7 +625,7 @@ class GusFidelityTests(unittest.TestCase):
 
         Every arrangement of these has been wrong in-sim at least once: merging map
         into mainpnl put two knobs on one color switch; the reverse assignment
-        labelled the panel flood "Map Lights"; and `map` holding only the spot made
+        labeled the panel flood "Map Lights"; and `map` holding only the spot made
         the row look dead, that spot being invisible with the map knob down.
         Identify a light by its rheostat and position, never by its name."""
         recs = interior_records()
@@ -571,12 +636,9 @@ class GusFidelityTests(unittest.TestCase):
                 # lamp lines collapse to nine distinct records.
                 mainpnl, mapped = Counter(), Counter()
                 for rec, n in recs.items():
-                    gates = _interior_gates(rec)
-                    if any(g[0] == "ANIM_hide"
-                           and g[1] <= value_for(_category_of(g), profile) <= g[2]
-                           for g in gates):
+                    if _hidden(rec, profile):
                         continue
-                    cats = {_category_of(g) for g in gates}
+                    cats = {_category_of(g) for g in _interior_gates(rec)}
                     if "mainpnl" in cats:
                         mainpnl[rec] += n
                     elif "map" in cats:
@@ -706,21 +768,43 @@ class SpillCustomTests(unittest.TestCase):
 
 class CockpitMenuGateTests(unittest.TestCase):
     """The plugin hides its Cockpit submenu unless the aircraft's lights_inn.obj
-    binds our interior datarefs (plugin.cpp kInteriorObjNeedle / DetectInterior).
-    A contract ACROSS the build and the plugin — the DSL decides what the OBJ says,
-    C++ what it looks for — and drift shows up only in-sim, as a missing menu."""
+    binds our interior datarefs (kInteriorObjNeedle / DetectInterior). A contract
+    ACROSS the build and the plugin — the DSL decides what the OBJ says, C++ what it
+    looks for — and drift shows up only in-sim, as a missing menu.
+
+    ⚠ THE TWO STRINGS MOVED to `src/native/src/core/constants.h` (2026-08-07), the
+    shared library the plugin and the installer both link, so there is now ONE
+    definition instead of a plugin copy and a Python copy that had to agree. This
+    reads them from there and separately checks that plugin.cpp is still wired to
+    it — a literal creeping back into plugin.cpp would compile fine and quietly
+    reintroduce the drift."""
 
     PLUGIN = REPO / "src" / "native" / "src" / "plugin.cpp"
+    CONSTANTS_H = REPO / "src" / "native" / "src" / "core" / "constants.h"
 
     def _cpp_string(self, name):
         import re
-        text = self.PLUGIN.read_text(encoding="utf-8", errors="replace")
-        m = re.search(rf'\b{name}\s*=\s*"((?:[^"\\]|\\.)*)"', text)
-        self.assertIsNotNone(m, f"{name} not found in plugin.cpp")
-        return m.group(1)
+        text = self.CONSTANTS_H.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.lstrip().startswith("//"):
+                continue        # the header documents its own constants
+            m = re.search(rf'\b{name}\[\]\s*=\s*"((?:[^"\\]|\\.)*)"', line)
+            if m:
+                return m.group(1)
+        self.fail(f"{name} not found in core/constants.h")
 
     def test_detector_looks_for_the_installed_filename(self):
-        self.assertEqual(self._cpp_string("kInteriorObjName"), K.INTERIOR_OBJ)
+        self.assertEqual(self._cpp_string("kInteriorObj"), K.INTERIOR_OBJ)
+
+    def test_the_plugin_reads_the_shared_constants_rather_than_its_own(self):
+        """The regression guard for the move: a `static const char*
+        kInteriorObjNeedle = "…"` reappearing in plugin.cpp would build, run, and
+        put the two definitions back out of reach of each other."""
+        text = self.PLUGIN.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("photon::kInteriorObjNeedle", text)
+        self.assertIn("photon::kInteriorObj", text)
+        self.assertNotRegex(text, r'kInteriorObjNeedle\s*=\s*"')
+        self.assertNotRegex(text, r'kInteriorObjName\s*=\s*"')
 
     def test_generated_interior_obj_trips_the_detector(self):
         """A false negative here is a modded cockpit with no menu to drive it."""
@@ -749,6 +833,291 @@ class CockpitMenuGateTests(unittest.TestCase):
             with self.subTest(obj=p.name):
                 self.assertNotIn(needle, p.read_text(encoding="utf-8",
                                                      errors="replace"))
+
+
+class PluginSideValueSpaceTests(unittest.TestCase):
+    """The plugin's half of the interior value space — a contract with the OBJ the
+    build emits, and one whose failure is a cockpit lit two ways at once.
+
+    The dome is the reason this class exists. It went ternary → two-valued
+    (2026-07-28) → ternary (2026-08-03), and the SAME NUMBER means a different look
+    on either side of each of those moves."""
+
+    PLUGIN = REPO / "src" / "native" / "src" / "plugin.cpp"
+
+    def setUp(self):
+        self.cpp = self.PLUGIN.read_text(encoding="utf-8", errors="replace")
+
+    def test_the_prefs_schema_matches_the_value_space(self):
+        """⚠ Bump kIntPrefsSchema whenever a category's value space changes, not
+        merely when a category is added. A clamp cannot undo a meaning change: a
+        v2 `dome: 1` was LED and a v3 `dome: 1` is new halogen, and both are in
+        range."""
+        import re
+        m = re.search(r"kIntPrefsSchema\s*=\s*(\d+)", self.cpp)
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1)), 3)
+        # v1 and v3 are the same space, so ONLY v2 is migrated. `schema < 3` here
+        # would move a v1 file that is already correct.
+        self.assertIn("if (schema == 2)", self.cpp)
+
+    def test_the_plugin_and_the_dsl_agree_on_how_many_looks_each_category_has(self):
+        """The OBJ emits one gated branch per profile; the plugin's `values` says
+        how many buttons the row offers and what a profile folds onto. They are
+        edited in different files and nothing but this compares them."""
+        import re
+        table = re.search(r"kIntCategories\[NINT\] = \{(.*?)\n\};", self.cpp, re.S)
+        self.assertIsNotNone(table)
+        rows = re.findall(r'\{"(\w+)",\s*"[^"]+",\s*"[^"]+",\s*(\d+),', table.group(1))
+        self.assertEqual(len(rows), len(INT_VALUES))
+        cfg = B.load_config(wing="stock")
+        em = B.Emitter(cfg, "a320", "stock", target="interior")
+        for key, values in rows:
+            with self.subTest(category=key):
+                self.assertEqual(int(values), INT_VALUES[key])
+                self.assertEqual(len(em.profiles_of(key)), INT_VALUES[key])
+
+    def test_a_row_button_is_named_the_same_as_the_profile_that_sets_it(self):
+        """The Custom rows and the profile dropdown are two lists of the same
+        words, deliberately: the same name has to select the same look, or a user
+        comparing them is being told they differ."""
+        import re
+        table = re.search(r"kIntCategories\[NINT\] = \{(.*?)\n\};", self.cpp, re.S)
+        labels = set(re.findall(r'\{"(?:Old Halogen|New Halogen|LED)"', table.group(1)))
+        self.assertTrue(labels, "the ternary rows no longer use the era names")
+        profiles = re.search(r"kIntProfileItems\[\] = \{(.*?)\n\};", self.cpp, re.S)
+        for want in ("Old Halogen", "New Halogen", "LED"):
+            with self.subTest(label=want):
+                self.assertIn('"%s"' % want, table.group(1))
+                self.assertIn('"%s"' % want, profiles.group(1))
+        # The old parenthesised spelling is gone from both.
+        self.assertNotIn("Halogen (Old)", self.cpp)
+        self.assertNotIn("Halogen (New)", self.cpp)
+
+
+#: The four main panel flood lamps' authored stack sizes and cones. Gus stacks
+#: two or three coincident spill lights per lamp to fake a soft falloff; the
+#: optimized set keeps the WIDEST cone of each (cone runs backwards, so the
+#: smallest number) and boosts its size.
+FLOOD_BOOST = 1.5
+FLOOD_SIZE = 0.471
+FLOOD_STACK_LIGHTS = 10          # 2 + 3 + 3 + 2
+FLOOD_OPTIMIZED_LIGHTS = 4       # one per lamp
+
+
+class OptimizedLightCountTests(unittest.TestCase):
+    """The reduced-light-count cockpit, gated on ToLissPhoton/interior/optimized.
+
+    Gus's stack is an EFFECT TRICK and stays the default: 0 is his ten flood
+    lights, 1 is four. The failure modes are the interior's usual ones — both
+    sets drawing at once (twice the cost and a double-bright panel), neither
+    drawing (four dark lamps), or the reduced set silently keeping the NARROW
+    cone of a stack and lighting a bright spot in a dark pool."""
+
+    def setUp(self):
+        self.recs = interior_records()
+
+    def test_zero_is_gus_s_full_stack_and_one_is_the_reduced_set(self):
+        """Polarity, and it is the load-bearing half: an OBJ8 ANIM_hide reading a
+        dataref that does not exist sees 0 FOREVER (an OBJ binds dataref names at
+        load time). So 0 has to be the authored look — with the plugin absent, or
+        older than the OBJ, the cockpit is Gus's, never a reduced set nobody
+        asked for."""
+        full = branch_records(self.recs, 0, optimized=0)
+        lean = branch_records(self.recs, 0, optimized=1)
+        self.assertEqual(sum(full.values()), 26)   # Gus's 23 + the 3 .acf spots
+        self.assertEqual(sum(lean.values()),
+                         26 - FLOOD_STACK_LIGHTS + FLOOD_OPTIMIZED_LIGHTS)
+
+    def test_exactly_one_set_is_visible_at_each_value(self):
+        """The ANIM_show trap in its two-valued form: a block starts VISIBLE, so a
+        gate that covers neither value leaves BOTH sets drawing — which is not a
+        crash, not a log line, just a panel lit twice at whatever cost the switch
+        was meant to save."""
+        cfg = B.load_config(wing="stock")
+        inn = B.Emitter(cfg, "a320", "stock", target="interior").emit()
+        blocks, stack = [], []
+        for line in inn.splitlines():
+            s = line.strip()
+            if s.startswith("ANIM_begin"):
+                stack.append([])
+            elif s.startswith("ANIM_end"):
+                if stack:
+                    b = stack.pop()
+                    if b:
+                        blocks.append(b)
+            elif s.startswith("ANIM_hide") and s.endswith(OPTIMIZE_DREF):
+                lo, hi = (float(x) for x in s.split()[1:3])
+                if stack:
+                    stack[-1].append((lo, hi))
+        # one full + one reduced block per lamp per era branch
+        self.assertEqual(len(blocks), 4 * 2 * 3)
+        for value in (0, 1):
+            visible = sum(1 for b in blocks
+                          if not any(lo <= value <= hi for lo, hi in b))
+            self.assertEqual(visible, len(blocks) // 2,
+                             f"optimized={value}: {visible} of {len(blocks)} "
+                             f"blocks visible, expected half")
+
+    def test_only_the_panel_floods_change(self):
+        """Nothing else in the cockpit is a stack, so nothing else may move. A
+        `drop` that reached the dome or the console strips would delete a light
+        the user can see, not one hiding inside another."""
+        for profile in (0, 1, 2):
+            with self.subTest(profile=profile):
+                full = colors_by_category(self.recs, profile, optimized=0)
+                lean = colors_by_category(self.recs, profile, optimized=1)
+                self.assertEqual(full, lean)      # colour is untouched either way
+                for cat in INT_VALUES:
+                    a = Counter(r for r in branch_records(self.recs, profile, 0))
+                    b = Counter(r for r in branch_records(self.recs, profile, 1))
+                    changed = {r for r in (a - b) | (b - a)}
+                    # every changed record is a panel flood: position 0 0 0
+                    # (their placement rides the mount animation)
+                    self.assertTrue(all(r[1] == (0.0, 0.0, 0.0) for r in changed),
+                                    changed)
+
+    def test_the_survivor_is_the_widest_cone_of_its_stack(self):
+        """The authoring rule, checked per FIXTURE against the DSL — the emitted
+        OBJ cannot answer this, since two lamps share a rheostat index and their
+        records flatten together.
+
+        Keeping a NARROW cone would leave a bright spot ringed by the dark the
+        stack existed to fill in, and it looks deliberate enough in a screenshot
+        to survive review."""
+        cfg = B.load_config(wing="stock")
+        em = B.Emitter(cfg, "a320", "stock", target="interior")
+        stacks = 0
+        for name, fx in B.resolve_airframe(cfg, "a320")["fixtures"].items():
+            lights = fx.get("lights") or []
+            opts = [(l, em.optimize_of(l, name)) for l in lights
+                    if fx.get("target") == "interior"]
+            if not any(o for _, o in opts):
+                continue
+            stacks += 1
+            cones = [em.field({**em.types[l["type"]], **l}["cone"], "int_old", None)
+                     for l, _ in opts]
+            kept = [c for (l, o), c in zip(opts, cones) if o and o[0] == "boost"]
+            self.assertEqual(len(kept), 1,
+                             f"{name}: the reduced set must be exactly one light")
+            self.assertEqual(kept[0], min(cones),
+                             f"{name}: kept cone {kept[0]} is not the widest "
+                             f"(smallest) of {cones}")
+        self.assertEqual(stacks, 4)     # the four panel floods, and only those
+        # ...and the concrete numbers, so a re-tune is a visible diff here too:
+        # lamps 1 and 4 keep cos(35°), lamps 2 and 3 cos(50°).
+        floods = [r for r in branch_records(self.recs, 0, optimized=1).elements()
+                  if r[1] == (0.0, 0.0, 0.0)]
+        self.assertEqual(len(floods), FLOOD_OPTIMIZED_LIGHTS)
+        self.assertEqual(sorted(r[6] for r in floods),
+                         [0.643, 0.643, 0.819, 0.819])
+
+    def test_the_survivor_is_boosted_and_nothing_else_is(self):
+        """`boost` scales slot 8 — SIZE on an airplane_panel_sp, the only
+        magnitude such a light has (colour is the palette's and brightness is the
+        rheostat's). It must not touch colour, aim or cone: this is meant to
+        stand in for the missing lights, not to become a different lamp."""
+        full = branch_records(self.recs, 0, optimized=0)
+        lean = branch_records(self.recs, 0, optimized=1)
+        for r in lean.elements():
+            if r[1] != (0.0, 0.0, 0.0):
+                # every non-flood light is untouched between the two sets
+                self.assertIn(r, full)
+                continue
+            with self.subTest(cone=r[6]):
+                self.assertAlmostEqual(r[4], round(FLOOD_SIZE * FLOOD_BOOST, 3))
+                # the same light at its authored size is in the full stack, and
+                # differs ONLY in that slot
+                twin = [s for s in full.elements()
+                        if s[:4] == r[:4] and s[5:] == r[5:]]
+                self.assertTrue(twin, f"no unboosted twin for {r}")
+                self.assertAlmostEqual(twin[0][4], FLOOD_SIZE)
+
+    def test_the_dsl_and_the_plugin_name_the_same_dataref(self):
+        """Two files, one wire. A rename on either side is silent: the OBJ's gate
+        reads 0 forever and the switch does nothing."""
+        cpp = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn(f'"{OPTIMIZE_DREF}"', cpp)
+        self.assertEqual(B.OPTIMIZE_DREF.format(target="interior"), OPTIMIZE_DREF)
+
+    def test_a_debug_build_carries_no_optimize_gate(self):
+        """The dev tuner owns every parameter of every light in a debug OBJ and
+        gives each its own slot; a gate there could only hide the light being
+        tuned, and a boosted duplicate would spend a second slot on it."""
+        cfg = B.load_config(wing="stock")
+        text = B.Emitter(cfg, "a320", "stock", target="interior", debug=True).emit()
+        self.assertNotIn(OPTIMIZE_DREF, _code(text))
+
+    def test_optimize_on_the_exterior_is_refused(self):
+        """It would fail OPEN and silently — the plugin registers no
+        ToLissPhoton/exterior/optimized, so the reduced set could never be
+        selected — and the frozen goldens would start failing `check` with no
+        clue as to why."""
+        cfg = B.load_config(wing="stock")
+        em = B.Emitter(cfg, "a320", "stock", target="exterior")
+        with self.assertRaises(SystemExit):
+            em.optimize_of({"type": "nav_beam", "optimize": "drop"}, "test")
+
+    def test_a_bad_optimize_value_is_an_error_not_a_shrug(self):
+        """A typo must not fall through as "no optimize", which would leave the
+        whole stack in the reduced set and read in-sim as the switch doing
+        nothing at all."""
+        cfg = B.load_config(wing="stock")
+        em = B.Emitter(cfg, "a320", "stock", target="interior")
+        for bad in ("keep", ["boost"], ["boost", "lots"], ["boost", -1]):
+            with self.subTest(value=bad):
+                with self.assertRaises(SystemExit):
+                    em.optimize_of({"type": "int_panelflood", "optimize": bad},
+                                   "test")
+
+    def test_the_switch_is_registered_at_xpluginstart_as_int_and_float(self):
+        """Both tripwires at once, and both fail silently.
+
+        An OBJ binds dataref NAMES at load time, so a name registered later than
+        XPluginStart leaves the gate reading 0 for the life of that aircraft; and
+        registering one type makes X-Plane advertise the type wrong, which does
+        the same thing. Either way the switch simply never works — and 0 being
+        the fail-open value is what makes that a dud switch rather than a dark
+        cockpit."""
+        cpp = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        start = cpp.index("PLUGIN_API int XPluginStart")
+        body = cpp[start:cpp.index("PLUGIN_API int XPluginEnable")]
+        self.assertIn("kIntOptimizedRef", body)
+        reg = body[body.index("gIntOptimizedRef = XPLMRegisterDataAccessor("):]
+        self.assertIn("xplmType_Int | xplmType_Float", reg[:200])
+        self.assertIn("ReadIntOptimizedInt", reg[:300])
+        self.assertIn("ReadIntOptimizedFloat", reg[:300])
+
+    def test_it_is_a_global_setting_not_a_per_livery_one(self):
+        """It is a statement about the MACHINE, not about the aeroplane. Per
+        livery it would appear to forget itself on every repaint — and a user who
+        turned it on for a 40-livery folder did not mean "on this one paint"."""
+        cpp = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn('kCockpitKey = "$cockpit"', cpp)
+        # skipped by the livery loop, or EntryFromJson would read it as a
+        # phantom aircraft and write it straight back as one
+        self.assertIn("if (kv.first == kCockpitKey)", cpp)
+        # ...and always written, like the Displays block: "absent means default"
+        # cannot express a switch someone deliberately turned off.
+        self.assertIn('\\"optimized\\": %d', cpp)
+        self.assertNotIn("interior_optimized", cpp)
+
+    def test_a_fixture_with_no_optimize_emits_nothing_extra(self):
+        """The floor under every other fixture and the whole exterior: no
+        `optimize:` anywhere in a group means not one extra byte, so the goldens
+        and Gus's own comparison are untouched."""
+        cfg = B.load_config(wing="stock")
+        inn = B.Emitter(cfg, "a320", "stock", target="interior").emit()
+        # the gate appears only inside the four flood fixtures
+        for fixture in ("Dome Lights", "Pedestal & Tables", "Map Lights",
+                        "Console Lights"):
+            block = inn.split(fixture)[1].split("ANIM_end\r\n\r\n")[0]
+            self.assertNotIn(OPTIMIZE_DREF, block)
+        ext = B.Emitter(cfg, "a320", "stock", target="exterior").emit()
+        self.assertNotIn("optimized", ext)
 
 
 class TrapTests(unittest.TestCase):
@@ -958,7 +1327,7 @@ class DebugLightBuildTests(unittest.TestCase):
         nine params through its dataref, but ANIM_trans takes a dataref of its own.
 
         The keyframes must span ∓DEBUG_POS_RANGE keyed on the SAME values, so the
-        dataref reads directly as metres; any other keying rescales every edit."""
+        dataref reads directly as meters; any other keying rescales every edit."""
         em, text = self._debug()
         lines = [l.strip() for l in text.splitlines() if l.strip().startswith("ANIM_trans")]
         moves = [l for l in lines if B.DEBUG_POS_DREF in l]
@@ -969,7 +1338,7 @@ class DebugLightBuildTests(unittest.TestCase):
                  f"ANIM_trans\t0 0 -{r}\t0 0 {r}\t-{r} {r}\t{B.DEBUG_POS_DREF}[2]"]
         self.assertEqual(moves[:3], want0)
         # light n owns exactly elements [3n, 3n+1, 3n+2] — the mapping the plugin's
-        # DbgReadPos mirrors, and an off-by-one nudges the neighbouring light
+        # DbgReadPos mirrors, and an off-by-one nudges the neighboring light
         indices = [int(l.rsplit("[", 1)[1].rstrip("]")) for l in moves]
         self.assertEqual(indices, list(range(3 * len(em.debug_lights))))
 

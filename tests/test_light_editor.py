@@ -7,7 +7,7 @@ format — and every way they can disagree fails SILENTLY in the simulator:
 
   * a wrong slot count leaves the tail of the lights black,
   * a wrong keyframe span rescales every position edit by a constant,
-  * a wrong marker stride draws one light's arrow on its neighbour,
+  * a wrong marker stride draws one light's arrow on its neighbor,
   * and a wrong parameter ORDER aims the light somewhere the window does not
     say — which is the bug that cost this project a 48-permutation axis hunt
     (see the DATAREF-order note in CLAUDE.md).
@@ -143,7 +143,7 @@ class OwnershipTests(unittest.TestCase):
         # An OBJ binds dataref names at LOAD time. Registering later - in
         # XPluginEnable, or lazily when the tab opens - leaves every debug light
         # reading 0 for the life of that aircraft.
-        start = PLUGIN_CPP.index("static void StartPanelProbe() {")
+        start = PLUGIN_CPP.index("static void StartPanelPass() {")
         end = PLUGIN_CPP.index("\n}", start)
         self.assertIn("RegisterDbgLightRefs();", PLUGIN_CPP[start:end])
 

@@ -76,6 +76,52 @@ OBJ_TARGETS = {
 
 TARGETS = ("exterior", "interior", "screens")
 
+# ─── the optimized (reduced-light-count) variant ─────────────────────────────
+# Gus's cockpit stacks two or three overlapping spill lights on ONE position to
+# get a soft, graded pool out of X-Plane's hard-edged cones. It is an effect
+# trick and it works — but each light in the stack is a real light the renderer
+# pays for, so the four main panel floods alone cost ten.
+#
+# A light may therefore declare `optimize:` in the layout DSL, which emits a
+# SECOND, cheaper copy of its group beside the authored one, the two gated
+# against each other on this dataref:
+#
+#     optimize: drop;         this light is not in the reduced set
+#     optimize: boost <f>;    this light IS the reduced set, at <f>x its slot-8
+#                             magnitude (`size` here; `intensity` on an exterior
+#                             class) to make up for the ones that went away
+#
+# A light that declares NEITHER is unconditioned and is emitted exactly once, so
+# every fixture that has no `optimize:` anywhere — which is all of them but the
+# four floods, and the whole exterior — is byte-identical to before.
+#
+# ⚠ POLARITY IS FAIL-OPEN, and deliberately so: an OBJ8 ANIM_hide reading a
+# dataref that does not exist sees 0 forever (an OBJ binds dataref NAMES at load
+# time), so 0 has to be the AUTHORED look. With the plugin absent, or older than
+# this OBJ, the cockpit is Gus's full stack — never the reduced set, and never
+# both at once.
+OPTIMIZE_DREF = "ToLissPhoton/{target}/optimized"
+
+# ─── whole-OBJ master gates ──────────────────────────────────────────────────
+# A target may wrap its ENTIRE body in one ANIM_hide block, so that switching the
+# feature off costs the renderer one dataref read rather than N lights drawn at
+# alpha 0. The screens OBJ is the case that motivates it: with "backlight
+# illumination" off, its six LIGHT_SPILL_CUSTOMs were still six lights, each
+# read through a 9-float accessor, contributing nothing.
+#
+# ⚠ SAME FAIL-OPEN POLARITY, and it is why this dataref is named for the OFF
+# state rather than the on one: absent reads 0, 0 must mean "draw". Naming it
+# `.../enabled` would make a missing plugin mean an invisible OBJ, which reads
+# in-sim as "the .acf attachment never happened" and sends the next person after
+# the wrong bug entirely — the same reasoning that bakes the alpha low rather
+# than at 0 (see SCREENS_CREDIT).
+#
+# ⚠ Must agree with kScreensDisabledRef in src/native/src/plugin.cpp; a test
+# compares the two.
+TARGET_MASTER_GATE = {
+    "screens": "ToLissPhoton/screens/disabled",
+}
+
 # What a bare `build` (--target both) produces. "screens" is deliberately NOT here:
 # it is an experiment, it is dev-only, and dist/ is what make_release.py packages —
 # so it must never arrive in a release bundle by default. Ask for it by name, or
@@ -105,10 +151,10 @@ DEBUG_MANIFEST = DEBUG_MANIFESTS["interior"]   # back-compat alias
 # Position needs a separate mechanism: LIGHT_SPILL_CUSTOM keeps x/y/z in the OBJ and
 # passes only `r g b a size dx dy dz cone` through the dataref, so each debug light is
 # wrapped in three ANIM_trans blocks keyed on ∓DEBUG_POS_RANGE — the dataref then reads
-# directly as metres of offset. One shared array indexed [3n+axis]; a dataref per axis
+# directly as meters of offset. One shared array indexed [3n+axis]; a dataref per axis
 # per light would be 192 registrations.
 DEBUG_POS_DREF = "ToLissPhoton/debug/pos"
-# Metres of travel either way; keep in step with DebugPosRange in the dev plugin.
+# Meters of travel either way; keep in step with DebugPosRange in the dev plugin.
 # Deliberately far wider than a tuning nudge: the orientation cycler moves a light by
 # `permute(pos) - pos`, which is as large as the coordinates themselves (cockpit z
 # reaches ~-5 m), and X-Plane clamps outside the outermost keyframe.
@@ -127,7 +173,7 @@ DEBUG_COMPARE_DREF = "ToLissPhoton/debug/compare"
 # dot 0 at the light's origin, the rest marching along its aim vector. Billboards
 # draw as sprites in empty air, so the string reads as a little arrow you can fly
 # the camera around. LIGHT_CUSTOM is the primitive because it is the only OBJ8 light
-# that is a plain textured billboard with author-controlled colour and size and no
+# that is a plain textured billboard with author-controlled color and size and no
 # dependency on a sim state (a named airplane_*_bb is gated on that light being
 # switched on, which in a parked cockpit it is not).
 #
@@ -142,13 +188,13 @@ DEBUG_MARK_DREF = "ToLissPhoton/debug/marker"
 # DSL uses for a ternary category — hide [-0.5, n+0.5] and [n+1.5, ∞), so -1
 # matches neither and shows everything.
 DEBUG_MARK_SHOW_DREF = "ToLissPhoton/debug/markers"
-# The 9 LIGHT_CUSTOM params (r g b a s s1 t1 s2 t2), so marker colour and size are
+# The 9 LIGHT_CUSTOM params (r g b a s s1 t1 s2 t2), so marker color and size are
 # live knobs too — a marker you cannot see is worse than none. One per dot ROLE, so
-# the three parts of the marker are told apart by colour at a glance.
+# the three parts of the marker are told apart by color at a glance.
 DEBUG_MARK_PARAM_DREF = "ToLissPhoton/debug/markparam"
 # The marker is an origin dot, an axis arrow, and a ring of dots on the CONE RIM at
 # the arrow's tip. The rim is what makes aim judgeable: an axis line alone tells you
-# very little when the pool it produces is a metre wide, and the first version's
+# very little when the pool it produces is a meter wide, and the first version's
 # 20 cm arrow was reported in-sim as not obviously following the light. The rim
 # draws the actual beam the `spread` says you asked for.
 DEBUG_MARK_AXIS_DOTS = 5
@@ -171,7 +217,7 @@ DEBUG_MAX_LIGHTS = 64
 
 # How far a `dir:` may stray from unit length before `build` says so. Loose enough
 # that a hand-rounded vector (0 -0.995 0.1, length 1.0000) passes and a genuinely
-# unnormalised one (0 -0.15 -0.1, length 0.18) does not. See Emitter.check_unit_dir.
+# unnormalized one (0 -0.15 -0.1, length 0.18) does not. See Emitter.check_unit_dir.
 UNIT_DIR_TOLERANCE = 0.02
 
 DEBUG_BANNER = """\
@@ -229,23 +275,35 @@ INTERIOR_CREDIT = """# ToLiss Photon Lighting — interior (cockpit) lights
 # variant files into one runtime-switchable OBJ.
 #
 # Per category dataref ToLissPhoton/interior/<category>:
-#   map, mainpnl, pedestal, console — 0 = old halogen, 1 = new halogen, 2 = LED
-#   dome                            — 0 = fluorescent, 1 = LED (two-valued: a
-#     fluorescent fitting has no incandescent era, so both halogen looks matched)"""
+#   dome, map, mainpnl, pedestal, console
+#                                   — 0 = old halogen, 1 = new halogen, 2 = LED
+#
+# And one dataref that is not a category, ToLissPhoton/interior/optimized:
+#   0 = the main panel floods as Gus authored them, a stack of two or three
+#       overlapping lights per lamp (ten in all) for a soft-edged pool
+#   1 = one light per lamp — the widest cone of its stack, at 1.5x size
+# 0 is the fail-open value: with the plugin absent this gate reads 0 and the
+# cockpit is Gus's."""
 
 # Credit/warning banner for the generated screens OBJ.
 SCREENS_CREDIT = """# ToLiss Photon Lighting — display (LCD screen) glow  [EXPERIMENTAL]
 # GENERATED from src/lights/lights.{style,layout}.phdsl — do not hand-edit.
 #
 # Six LIGHT_SPILL_CUSTOM lights, one per main display unit, throwing the screens'
-# own bluish-grey wash into the cockpit. Each binds ToLissPhoton/screens/spill/<n>,
+# own bluish-gray wash into the cockpit. Each binds ToLissPhoton/screens/spill/<n>,
 # which the Photon plugin drives from AirbusFBW/DUBrightness[<du>] — so a screen
 # that is off or dimmed contributes nothing.
 #
 # THIS OBJ IS NOT REFERENCED BY A STOCK ToLiss AIRCRAFT. It draws only after
 # build/patch_acf_screens.py adds it to the .acf attachment table, and
-# `patch_acf_screens.py --reverse` removes it again. It is un-gated and has no
-# menu row: there is one look, and brightness comes from the alpha slot.
+# `patch_acf_screens.py --reverse` removes it again.
+#
+# There is one LOOK and so no menu row of looks; brightness comes from the alpha
+# slot. The whole file is wrapped in ONE ANIM_hide reading
+# ToLissPhoton/screens/disabled, which is the user's "backlight illumination"
+# switch: with it off the renderer skips the block entirely rather than drawing
+# six lights at alpha 0. The dataref is named for the OFF state because a gate
+# whose dataref is missing reads 0 — so 0 has to mean DRAW.
 #
 # With the plugin absent the dataref is not found and X-Plane draws the baked
 # parameters unmodified, so alpha is baked LOW deliberately — the degraded state
@@ -597,7 +655,7 @@ class Emitter:
         Every dot rides its own dataref-driven translation, and the plugin puts the
         aim into those offsets each frame. That is why there is no ANIM_rotate here:
         rotating about the OBJ origin would swing a cockpit-coordinate light through
-        a five-metre arc, so it would need a static translate to the light first,
+        a five-meter arc, so it would need a static translate to the light first,
         and the whole rig would then duplicate maths the plugin already does to
         report the absolute position."""
         big = 1e6      # any value above the last light's window; -1 must escape it
@@ -637,7 +695,7 @@ class Emitter:
         Deliberately a WARNING and not a fix. Most of the offenders are Gus's
         measured interior vectors, and silently rescaling the trusted baseline is
         exactly the kind of quiet rewrite this project has been bitten by; a
-        normalisation is a visible, reviewable edit to the .phdsl."""
+        normalization is a visible, reviewable edit to the .phdsl."""
         length = math.sqrt(sum(v * v for v in d))
         if length < 1e-9:                     # 0 0 0 is omnidirectional, not an error
             return
@@ -649,7 +707,7 @@ class Emitter:
             self.nonunit_dirs[(type_name, tuple(d))] = length
 
     def light_line(self, light, *, profile, side, group, fixture, mirror,
-                   fixture_name="", category="", mount=None):
+                   fixture_name="", category="", mount=None, boost=1.0):
         # appearance from the light type; placement (position/dir) from the light
         tpl = self.types[light["type"]] if "type" in light else {}
         merged = {**tpl, **{k: v for k, v in light.items() if k != "type"}}
@@ -689,10 +747,16 @@ class Emitter:
         # interior's airplane_panel_sp / airplane_inst_sp read the same slot as
         # a bare fractional SIZE (1.414, 0.471, ...). A light type declares
         # `size:` or `intensity:` to pick which — never both.
+        #
+        # `boost` scales exactly this slot and nothing else. It is what
+        # `optimize: boost <f>` spends to make one light stand in for a stack:
+        # for the interior classes slot 8 is the SIZE, which is the only
+        # magnitude an airplane_panel_sp light has (colour is the palette's,
+        # brightness is the rheostat's), so "50% brighter" is 1.5x here.
         if "size" in merged:
-            slot = fmt(self.field(merged["size"], profile, side))
+            slot = fmt(self.field(merged["size"], profile, side) * boost)
         else:
-            inten = self.field(merged.get("intensity", 0), profile, side)
+            inten = self.field(merged.get("intensity", 0), profile, side) * boost
             slot = f"{int(round(inten))}cd"
 
         # A light type carrying `spill_dref` emits LIGHT_SPILL_CUSTOM instead of
@@ -739,8 +803,8 @@ class Emitter:
         cname = self.field(tcolor, profile, side)
         # Only a real tint (red/green) is worth naming in the comment; the
         # several shades of white are not — the profile suffix already says
-        # which era, and "-> Fluoro -> Old Halogen" reads as a contradiction.
-        colorlbl = (None if cname in ("white", "warm", "fluoro", "glow", "ecam")
+        # which era, and "-> White -> Old Halogen" says nothing twice.
+        colorlbl = (None if cname in ("white", "warm", "glow", "ecam")
                     else cname.capitalize())
         sidelbl = SIDE_LABEL.get(side)
         if sidelbl and colorlbl:
@@ -790,6 +854,50 @@ class Emitter:
             lines.append(f"ANIM_hide {fmt(branch + 0.5)} {fmt(last + 0.5)} {dref}")
         return lines
 
+    def optimize_dref(self):
+        return OPTIMIZE_DREF.format(target=self.target)
+
+    def optimize_gate(self, optimized):
+        """The ANIM line selecting the reduced (`optimized`) or the authored set.
+
+        Deliberately the SAME two-valued encoding every exterior category uses —
+        "hide when the dataref reads the other branch's value" — rather than a
+        second spelling of the same idea. Nine shipping categories already prove
+        this form works against an int-backed dataref that only ever holds 0 or
+        1, which is exactly what the plugin writes here."""
+        dref = self.optimize_dref()
+        return f"ANIM_hide {'0 0' if optimized else '1 1'} {dref}"
+
+    def optimize_of(self, light, where):
+        """A light's `optimize:` declaration -> (mode, factor) or None.
+
+        mode is "drop" (absent from the reduced set) or "boost" (it IS the
+        reduced set, scaled by factor). Validated here rather than in the DSL
+        loader because the failure it guards against is a silent one: a
+        misspelled value would otherwise fall through as "no optimize" and leave
+        the whole stack in the reduced set, which looks in-sim exactly like the
+        switch doing nothing."""
+        tpl = self.types.get(light.get("type"), {}) if "type" in light else {}
+        v = light.get("optimize", tpl.get("optimize"))
+        if v is None:
+            return None
+        if self.target == "exterior":
+            # The exterior has frozen goldens and no `optimized` dataref in the
+            # plugin, so this would fail open and silently — refuse it loudly.
+            raise SystemExit(
+                f"{where}: 'optimize:' is not supported on the exterior target "
+                f"(no {self.optimize_dref()} dataref exists, so the reduced set "
+                f"could never be selected)")
+        if v == "drop":
+            return ("drop", 1.0)
+        ok = (isinstance(v, list) and len(v) == 2 and v[0] == "boost"
+              and isinstance(v[1], (int, float)) and not isinstance(v[1], bool)
+              and v[1] > 0)
+        if ok:
+            return ("boost", float(v[1]))
+        raise SystemExit(
+            f"{where}: bad 'optimize: {v}' — expected 'drop' or 'boost <factor>'")
+
     def emit_branch(self, fixture, category, *, branch, side, mirror, indent="", name="",
                     fixed_profile=None):
         # An un-gated fixture (`profile:` instead of `category:`) has exactly one
@@ -807,17 +915,51 @@ class Emitter:
             gate = g.get("gate")
             gi = indent + "\t"
             body = [f"{gi}\t" + self.describe(fixture, g, side, profile, name)]
-            for li_idx, light in enumerate(g["lights"]):
-                if self.annotate:
-                    body.append(f"{gi}\t# @{name}|{gi_idx}|{li_idx}|{side or 'c'}")
-                # A debug light is a multi-line block, so split rather than assume
-                # one line. reindent() recomputes depth from ANIM nesting later.
+            # Lights split three ways by their `optimize:` declaration: plain ones
+            # are emitted once and unconditioned, the rest go into the two gated
+            # sub-blocks below. `full` holds the authored stack, `lean` the
+            # reduced set. Both stay EMPTY for every fixture that declares no
+            # `optimize:` at all, in which case not one extra byte is emitted.
+            full, lean = [], []
+
+            # A debug light is a multi-line block, so split rather than assume one
+            # line. reindent() recomputes depth from ANIM nesting later.
+            def render(light, into, boost=1.0):
                 emitted = self.light_line(
                     light, profile=profile, side=side,
                     group=g, fixture=fixture, mirror=mirror,
-                    fixture_name=name, category=category or "", mount=mount)
+                    fixture_name=name, category=category or "", mount=mount,
+                    boost=boost)
                 for sub in emitted.split("\n"):
-                    body.append(gi + "\t" + sub.lstrip("\t"))
+                    into.append(gi + "\t" + sub.lstrip("\t"))
+
+            for li_idx, light in enumerate(g["lights"]):
+                opt = None if self.debug else self.optimize_of(
+                    light, f"{self.airframe} {name} {light.get('type', '?')}")
+                dest = body if opt is None else full
+                if self.annotate:
+                    dest.append(f"{gi}\t# @{name}|{gi_idx}|{li_idx}|{side or 'c'}")
+                render(light, dest)
+                # The boosted light appears TWICE — once at its authored size in
+                # the stack, once scaled in the reduced set — because the two sets
+                # are alternatives, not layers. A `drop` light appears once, in
+                # the stack only.
+                if opt and opt[0] == "boost":
+                    render(light, lean, boost=opt[1])
+            if full:
+                body.append(f"{gi}\tANIM_begin")
+                body.append(f"{gi}\t\t{self.optimize_gate(False)}")
+                body.append(f"{gi}\t\t# {fixture.get('comment') or name} "
+                            f"-> full light stack")
+                body.extend(full)
+                body.append(f"{gi}\tANIM_end")
+            if lean:
+                body.append(f"{gi}\tANIM_begin")
+                body.append(f"{gi}\t\t{self.optimize_gate(True)}")
+                body.append(f"{gi}\t\t# {fixture.get('comment') or name} "
+                            f"-> optimized (one light, boosted)")
+                body.extend(lean)
+                body.append(f"{gi}\tANIM_end")
             if gate:
                 lo, hi = gate["hide"]
                 lines.append(f"{gi}ANIM_begin")
@@ -906,18 +1048,20 @@ class Emitter:
 
     def emit(self):
         af = resolve_airframe(self.cfg, self.airframe)
-        parts = []
+        # Banner comments, kept apart from the fixtures so a target master gate can
+        # wrap the BODY without swallowing the credit block into an ANIM level.
+        head, parts = [], []
         if self.target == "interior":
-            parts.append(INTERIOR_CREDIT)
-            parts.append("")
+            head.append(INTERIOR_CREDIT)
+            head.append("")
         elif self.target == "screens":
-            parts.append(SCREENS_CREDIT)
-            parts.append("")
+            head.append(SCREENS_CREDIT)
+            head.append("")
         if self.debug:
-            parts.append(DEBUG_BANNER)
+            head.append(DEBUG_BANNER)
             # State which half this file has: "the X/Y/Z knobs do nothing" and "the
             # tool is broken" look identical from the cockpit.
-            parts.append(
+            head.append(
                 "# POSITION TUNING IS ON (the default): every light is wrapped in "
                 "three ANIM_trans\n#   blocks reading ToLissPhoton/debug/pos, so the "
                 "dev window's X/Y/Z rows MOVE it.\n#   Rebuild with --no-debug-pos to "
@@ -942,13 +1086,23 @@ class Emitter:
                 f"{self.airframe}: no {self.target} fixtures — nothing to emit. "
                 f"(An airframe with no {self.target} lights should be left out of "
                 f"OBJ_TARGETS entirely rather than building an empty OBJ.)")
+        # ONE ANIM_hide around every fixture in the target (see TARGET_MASTER_GATE).
+        # Wrapping the whole body is the point: with the feature off the renderer
+        # skips the block instead of drawing N lights that contribute nothing.
+        #
+        # NOT in a debug build — the dev tuner owns every parameter of every light
+        # in that file, and a master gate could only hide the one being tuned.
+        master = TARGET_MASTER_GATE.get(self.target)
+        if master and not self.debug:
+            parts = (["ANIM_begin", f"ANIM_hide 1 1 {master}"]
+                     + parts + ["ANIM_end"])
         # The header is deliberately NOT run through reindent(): reindent strips
         # every line, which would eat the load-bearing trailing tab on the
         # interior header's "TEXTURE\t". Splitting it out leaves exterior output
         # byte-identical (its header has no leading/trailing whitespace, and
         # contributes no ANIM nesting, so depth still starts at 0).
         return (HEADERS[self.target] + "\n"
-                + reindent("\n".join(parts))).replace("\n", "\r\n")
+                + reindent("\n".join(head + parts))).replace("\n", "\r\n")
 
 
 # ─── normalized parsing (for check) ───────────────────────────────────────────
@@ -1266,7 +1420,7 @@ def cmd_build(args):
                 # pos_tunable says whether the ANIM_trans wrappers are really in the
                 # OBJ; without it the dev window shows X/Y/Z knobs that move nothing.
                 # marker_dots sizes the plugin's offset array and tells it how many
-                # dots each light owns; a mismatch would drive a neighbour's marker.
+                # dots each light owns; a mismatch would drive a neighbor's marker.
                 blob = json.dumps({"version": 1, "airframe": af, "target": tgt,
                                    "obj": fname, "pos_tunable": em.debug_pos,
                                    "marker_dots": DEBUG_MARK_DOTS,
@@ -1282,7 +1436,7 @@ def cmd_build(args):
         print(f"note: {len(nonunit)} light type(s) have a non-unit `dir:`. X-Plane "
               f"compares `cone` against a\n  DOT PRODUCT with that vector, so aim and "
               f"spread interact — a suspect in both the\n  'cone does nothing' and "
-              f"'cone changes the aim' reports. Normalising is a .phdsl\n  edit, "
+              f"'cone changes the aim' reports. Normalizing is a .phdsl\n  edit, "
               f"deliberately not automatic (docs/dsl.md).")
         for (tname, d), length in sorted(nonunit.items()):
             unit = [rnd(x / length) for x in d]

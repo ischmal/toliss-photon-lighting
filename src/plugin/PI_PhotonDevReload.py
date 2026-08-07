@@ -120,12 +120,12 @@ ActivityTimeoutSeconds  = 10.0  # if NO ToLiss activity is seen by now, restore 
 RestoreGuardSeconds     = 2.0   # after the restore write, keep re-asserting this long
 MaxSettleSeconds        = 45.0  # hard cap on the settle wait. Must exceed ToLiss's slowest
                                 # init - if we cap out BEFORE ToLiss quiesces we restore while
-                                # it's still initialising, and it clobbers power AND the camera
+                                # it's still initializing, and it clobbers power AND the camera
                                 # view mode (which culls the exterior). Raise if you still see
                                 # "max-cap" in the log instead of "quiesced".
 # Camera restore: after ToLiss's init has quiesced we position the saved EXTERNAL pose and
 # HOLD it, re-asserting every frame so ToLiss's later view resets can't steal it back. Two
-# distinct steal mechanisms, two defences: (a) ToLiss moves the camera while we still OWN it
+# distinct steal mechanisms, two defenses: (a) ToLiss moves the camera while we still OWN it
 # -> our CameraFunc overwrites the position every frame, so we win; (b) ToLiss takes camera
 # OWNERSHIP (its own controlCamera / a view-mode change), which fires inIsLosingControl and
 # STOPS CameraFunc from being called at all - the per-frame overwrite then dies and ToLiss
@@ -162,7 +162,7 @@ MaxArrayElements = 1024        # cap when snapshotting array datarefs (OHPLightS
 # The smoothing is what makes it cinematic: velocity EASES toward the target instead of
 # snapping, so starts and stops are soft rather than stepped. CineSmoothingSeconds is the
 # time constant - larger = longer, more languid ramps (0 = instant, mechanical).
-CineMoveSpeed      = 0.35   # metres/second at multiplier 1.0 (deliberately very slow)
+CineMoveSpeed      = 0.35   # meters/second at multiplier 1.0 (deliberately very slow)
 CineRotateSpeed    = 3.0    # degrees/second at multiplier 1.0
 CineZoomSpeed      = 0.25   # zoom factor change per second at multiplier 1.0
 CineSmoothingSeconds = 0.6  # velocity ease-in/out time constant (0 = no smoothing)
@@ -214,7 +214,7 @@ DebugManifestRelPath = DebugManifests[0][1]   # back-compat alias
 DebugDataRefPrefix   = "ToLissPhoton/debug/light/"
 # Position comes by a different route: the debug build wraps each light in three
 # dataref-driven ANIM_trans blocks reading DebugPosDataRef[3n+axis] as an offset in
-# metres. One shared array — a dataref per axis per light would be 192 registrations.
+# meters. One shared array — a dataref per axis per light would be 192 registrations.
 # DebugPosRange is the ANIM keyframe span and must equal DEBUG_POS_RANGE in
 # build/build_objs.py; a mismatch silently rescales every position edit. It is far wider
 # than a tuning nudge needs because the orientation cycler below drives this array too,
@@ -272,12 +272,12 @@ DebugValCount   = DebugParamCount + DebugPosCount + DebugAimCount
 # amount a click moved something was never on screen, and "did that do anything?"
 # is the question this window exists to answer. Here the button label IS the amount
 # added. One ladder serves every row because each is either a 0..1 fraction (rgb,
-# alpha, cone) or metres (pos, size, dir), and 1 -> 0.001 spans both.
+# alpha, cone) or meters (pos, size, dir), and 1 -> 0.001 spans both.
 # 10 is here for the ANGLE rows: aim is in degrees now, and swinging a light through a
 # quadrant at 1 deg a click is 90 clicks. It is a legitimate position step too (10 cm at
 # the 0.1 end, 10 m at this one — the latter only useful inside the +-12 m span).
 DebugSteps      = (10.0, 1.0, 0.1, 0.01, 0.001)
-DebugDefaultStep = 1.0                    # a degree, or a metre — the useful middle
+DebugDefaultStep = 1.0                    # a degree, or a meter — the useful middle
 DebugMarkColor = (1.0, 0.0, 1.0)         # magenta — nothing in a cockpit is this color
 DebugBlinkHz    = 2.0
 
@@ -301,13 +301,13 @@ DebugMarkerParamDataRef = "ToLissPhoton/debug/markparam"   # /0 origin dot, /1 a
 # RIM at the arrow's tip. The rim is what was missing from the first version — an axis
 # line alone was reported in-sim as "reflects position well but does not seem fully
 # oriented with the spill light", which is what a 20 cm line looks like next to a pool
-# of light a metre wide. Drawing the actual cone makes aim and spread both judgeable.
+# of light a meter wide. Drawing the actual cone makes aim and spread both judgeable.
 DebugMarkerAxisDots = 5
 DebugMarkerRimDots  = 4
 DebugMarkerDots     = 1 + DebugMarkerAxisDots + DebugMarkerRimDots
-DebugMarkerReach    = 0.6         # metres from the light to the arrow tip, nudgeable
+DebugMarkerReach    = 0.6         # meters from the light to the arrow tip, nudgeable
 DebugMarkerSize     = 0.05        # LIGHT_CUSTOM size, nudgeable in the window
-# One colour per part. The whole point is to see WHICH END is the light and where the
+# One color per part. The whole point is to see WHICH END is the light and where the
 # beam edge falls, so these must stay clearly distinct from each other.
 DebugMarkerOriginColor = (0.2, 1.0, 0.3, 1.0)   # green  — the light itself
 DebugMarkerAxisColor   = (1.0, 0.6, 0.1, 1.0)   # amber  — which way it points
@@ -348,8 +348,8 @@ DebugAimPresets = (("Fwd", 0.0, 0.0), ("Aft", 0.0, 180.0),
 #   * cone 0 — cos(90 deg). If slot 8 turns out to be a direction component after all,
 #     a baseline of 0 contributes nothing to it, keeping probes 5..7 clean.
 #   * size 4 m — big enough that the pool lands on real geometry rather than the panel
-#     two centimetres away, which is what made cone changes look inert.
-#   * white, alpha 1 — no rheostat, no palette, nothing to misread as a colour bug.
+#     two centimeters away, which is what made cone changes look inert.
+#   * white, alpha 1 — no rheostat, no palette, nothing to misread as a color bug.
 DebugProbeBaseline = (1.0, 1.0, 1.0, 1.0, 4.0, 0.0, 0.0, 0.0, 0.0)
 DebugProbeValue = 1.0
 # What we EXPECT each slot to do, printed beside the probe so the answer is a
@@ -478,8 +478,8 @@ UI_BULLET = "• "
 
 COL_TEXT   = (0.90, 0.90, 0.90)
 COL_BRIGHT = (1.0, 1.0, 1.0)
-# "Dim" is a de-emphasis, not a low-contrast grey: these windows draw on X-Plane's own
-# mid-grey chrome, where 0.55 grey-on-grey was unreadable. Rank by weight, not by
+# "Dim" is a de-emphasis, not a low-contrast gray: these windows draw on X-Plane's own
+# mid-gray chrome, where 0.55 gray-on-gray was unreadable. Rank by weight, not by
 # fading toward the background.
 COL_DIM    = (0.80, 0.80, 0.83)
 COL_ACTIVE = (0.0, 0.729, 1.0)
@@ -701,7 +701,7 @@ class PythonInterface:
         self.dbgProbe = None
         self.dbgMarkerMode = "off"
         self.dbgMarkerSize = DebugMarkerSize
-        self.dbgMarkerReach = DebugMarkerReach   # metres to the arrow tip / cone ring
+        self.dbgMarkerReach = DebugMarkerReach   # meters to the arrow tip / cone ring
         self.dbgMarkerDots = DebugMarkerDots   # re-read from the manifest
         self.dbgCompare = 1             # 1 = tunable debug copies, 0 = original lines
         self.dbgLights = []             # manifest rows
@@ -714,7 +714,7 @@ class PythonInterface:
         # reads as the light refusing to move, not as the feature being off.
         self.dbgPosTunable = False
         self.dbgSel = 0
-        self.dbgStep = DebugDefaultStep   # metres / units per -/+ click
+        self.dbgStep = DebugDefaultStep   # meters / units per -/+ click
         self.dbgIsolate = False
         self.dbgBlink = False
         self.dbgMark = False
@@ -1181,7 +1181,7 @@ class PythonInterface:
                 continue
 
     def _current_aircraft_dir(self):
-        """Normalised folder of the user's aircraft (.acf), or None if undeterminable."""
+        """Normalized folder of the user's aircraft (.acf), or None if undeterminable."""
         try:
             fileName, path = xp.getNthAircraftModel(0)
             if path:
@@ -2197,7 +2197,7 @@ class PythonInterface:
                 count = total
             # Stride comes from the MANIFEST, not the constant: the installed OBJ baked
             # its own dot count into the indices, so an older one must still address its
-            # own dots rather than a neighbouring light's.
+            # own dots rather than a neighboring light's.
             stride = self.dbgMarkerDots or DebugMarkerDots
             out = []
             for i in range(offset, min(total, offset + count)):
@@ -2224,9 +2224,9 @@ class PythonInterface:
                 offset = 0
             if count < 0:                       # the "give me all of it" convention
                 count = DebugParamCount
-            colour = (DebugMarkerOriginColor, DebugMarkerAxisColor,
+            color = (DebugMarkerOriginColor, DebugMarkerAxisColor,
                       DebugMarkerRimColor)[max(0, min(2, int(refCon)))]
-            params = list(colour) + [self.dbgMarkerSize] + list(DebugMarkerST)
+            params = list(color) + [self.dbgMarkerSize] + list(DebugMarkerST)
             out = params[offset:min(DebugParamCount, offset + count)]
             values.extend(out)
             return len(out)
@@ -2244,7 +2244,7 @@ class PythonInterface:
         * the rest — a ring on the CONE RIM at that same distance, radius
           `tan(half-spread) * reach`. This is the part that makes aim judgeable: a
           bare axis line was reported in-sim as not obviously following the light,
-          which is what a short line looks like beside a pool of light a metre wide.
+          which is what a short line looks like beside a pool of light a meter wide.
           The ring draws the beam the `spread` row claims you asked for, so "is the
           lit patch inside the ring" is a question with a yes/no answer.
 
@@ -2260,7 +2260,7 @@ class PythonInterface:
         what turns `Dir < / >` into a usable search: the marker is the reference (what
         the angles say), the light is the sim's answer, and you cycle until they agree.
 
-        Normalised here whatever the vector's length, because the marker shows
+        Normalized here whatever the vector's length, because the marker shows
         direction — length is the sim's problem, and `build` warns about it."""
         base = self._dbg_pos_offset(n)
         if dot == 0 or n >= len(self.dbgLights):
@@ -2393,7 +2393,7 @@ class PythonInterface:
             return 0
 
     def _dbg_pos_offset(self, n):
-        """What the three ANIM_trans blocks for light `n` should read, in metres.
+        """What the three ANIM_trans blocks for light `n` should read, in meters.
 
         Two terms, kept separate so the orientation search stays usable:
 
@@ -2574,7 +2574,7 @@ class PythonInterface:
             self.dbgPosTunable = bool(data.get("pos_tunable", False))
             # How many marker dots the OBJ baked per light. It strides the offset
             # array, so reading it from the manifest rather than assuming the constant
-            # means a stale OBJ drives ITS OWN dots instead of a neighbour's.
+            # means a stale OBJ drives ITS OWN dots instead of a neighbor's.
             self.dbgMarkerDots = int(data.get("marker_dots", 0))
         except Exception:
             self.dbgNote = "manifest read failed"
@@ -2589,7 +2589,7 @@ class PythonInterface:
             d = [float(x) for x in (list(d) + [0.0, 0.0, 0.0])[:3]]
             # Aim seeded FROM the authored vector, then the vector rewritten from the
             # aim, so the window opens on the light as authored and every later edit
-            # flows angles -> vector. The rewrite also normalises: a light authored
+            # flows angles -> vector. The rewrite also normalizes: a light authored
             # with a non-unit dir is shown, and emitted, as the unit form of itself.
             aim = _dir_to_aim(d)
             vals = [float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0,
@@ -2880,7 +2880,7 @@ class PythonInterface:
         _log("  offset applied was %s %s %s from baked %s"
              % (fmt(v[9]), fmt(v[10]), fmt(v[11]),
                 " ".join(fmt(x) for x in light.get("pos", []))))
-        # The EXACT nine floats X-Plane reads for this light, in order, labelled. This
+        # The EXACT nine floats X-Plane reads for this light, in order, labeled. This
         # is the line that separates "our maths is wrong" from "the sim disagrees about
         # what slot 5 means" — the two are indistinguishable from inside the cockpit,
         # and that ambiguity is what the aim-axis report came down to.
@@ -3039,7 +3039,7 @@ class PythonInterface:
                  ("+", lambda: self._dbg_nudge_marker("size", +1))], minWidth=30)
             # Reach is how far the arrow and the cone ring are drawn. Adjustable
             # because the right length depends entirely on the light: a 20 cm arrow
-            # was unreadable next to a pool of light a metre across.
+            # was unreadable next to a pool of light a meter across.
             _draw_text(COL_DIM, x2 + UI_GAP, y - btnH + 4,
                        "reach %s" % self._fmt_num(self.dbgMarkerReach))
             self._ui_button_row(
@@ -3088,7 +3088,7 @@ class PythonInterface:
                     y -= btnH + 4
                 y -= UI_GAP
 
-            # A/B row, labelled with what is SHOWING rather than what clicking does:
+            # A/B row, labeled with what is SHOWING rather than what clicking does:
             # while "Original" is up the tuner controls nothing, which has to be obvious.
             self._ui_button_row(l + UI_PAD, y - btnH, y, mx, my, self.dbgHits, [
                 ("Debug lights", self._dbg_toggle_compare, bool(self.dbgCompare)),

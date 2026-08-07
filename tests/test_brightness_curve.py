@@ -13,7 +13,7 @@ So this file pins three separate things:
     the dead zone. Plain Hermite through these knots undershoots below zero just
     past 0.2, and a clamped undershoot is a visible step in the middle of a fade;
   * that both consumers actually call it, and that the FX one applies it in the
-    right place (after lo/hi normalisation, before the floor).
+    right place (after lo/hi normalization, before the floor).
 
 The curve is re-implemented here from the knots rather than being read out of the
 C++ — an independent implementation is what makes the shape assertions worth
@@ -114,7 +114,7 @@ class ShapeTests(unittest.TestCase):
 
     def test_the_dead_zone_is_really_dead(self):
         """Anything up to the second knot is zero — not 'nearly', zero. A glow
-        that is faintly on with the knob at its stop is the artefact this curve
+        that is faintly on with the knob at its stop is the artifact this curve
         was asked for."""
         for x in (0.0, 0.05, 0.1, 0.15, 0.1999):
             self.assertEqual(response(x), 0.0, "x=%s should be fully dark" % x)
@@ -187,21 +187,70 @@ class WiringTests(unittest.TestCase):
         self.assertIn("BrightnessResponse", m.group(1))
         self.assertIn("kScreenGain", m.group(1))
 
-    def test_the_fx_driver_factor_curves_after_normalising_and_before_the_floor(self):
-        """Order matters twice over: lo/hi must normalise first or the curve is
+    def test_the_fx_driver_factor_curves_after_normalizing_and_before_the_floor(self):
+        """Order matters twice over: lo/hi must normalize first or the curve is
         being handed a value in the source's own units, and the floor must lift
         AFTER or 'never fully off' stops meaning that once the curve has
-        flattened the bottom of the knob."""
+        flattened the bottom of the knob.
+
+        The normalization lives in FxDriverNorm since the test pin was added, so
+        the order now spans two functions — but it is the same three stages and
+        the same reason, and the split is what keeps the curve editor's live
+        marker reading the number the compositor reads."""
+        norm = re.search(
+            r"static bool FxDriverNorm\(FxDriver& d, float\* out\)\s*\{(.*?)\n\}",
+            PLUGIN_CPP, re.S)
+        self.assertIsNotNone(norm, "FxDriverNorm moved")
+        self.assertIn("(v - d.lo) / span", norm.group(1),
+                      "lo/hi must normalize before anything else sees the value")
+        self.assertNotIn("FxCurveEval", norm.group(1),
+                         "the shape is the factor's business, not the reading's")
+
         m = re.search(
-            r"static float FxDriverFactor\(FxDriver& d,\s*bool useCurve\)\s*\{(.*?)\n\}",
+            r"static float FxDriverFactor\(FxDriver& d,\s*const FxCurve\* shape\)"
+            r"\s*\{(.*?)\n\}",
             PLUGIN_CPP, re.S)
         self.assertIsNotNone(m, "FxDriverFactor moved")
         body = m.group(1)
-        normalise = body.index("(v - d.lo) / span")
-        curve = body.index("BrightnessResponse")
+        normalize = body.index("FxDriverNorm")
+        curve = body.index("FxCurveEval")
         floor = body.index("d.floorF + f")
-        self.assertLess(normalise, curve, "curve must come after lo/hi")
+        self.assertLess(normalize, curve, "curve must come after lo/hi")
         self.assertLess(curve, floor, "curve must come before the floor")
+
+    def test_the_test_pin_replaces_the_reading_and_not_the_factor(self):
+        """⚠ The dev brightness pin sits inside FxDriverNorm, ahead of the curve
+        and the floor. Pinning the FACTOR instead would draw a straight line
+        through whatever shape is authored — and the editor plots that shape
+        beside the slider, so the one control for sweeping a curve would be the
+        one control that bypasses it.
+
+        It also must not reach FxDriverPowered: power, bus and breaker are facts
+        about the aircraft, and a slider able to fake them would let a look be
+        authored against an electrical state the cockpit is not in."""
+        norm = re.search(
+            r"static bool FxDriverNorm\(FxDriver& d, float\* out\)\s*\{(.*?)\n\}",
+            PLUGIN_CPP, re.S)
+        self.assertIn("gFxDriveManual", norm.group(1))
+
+        powered = re.search(r"static bool FxDriverPowered\(FxDriver& d\)\s*\{(.*?)\n\}",
+                            PLUGIN_CPP, re.S)
+        self.assertIsNotNone(powered, "FxDriverPowered moved")
+        self.assertNotIn("gFxDriveManual", powered.group(1))
+        self.assertNotIn("FxDriverNorm", powered.group(1),
+                         "power is a threshold on the RAW value, never a knob")
+
+    def test_the_held_pin_has_a_watchdog(self):
+        """⚠ It is held, not latched, and the pane that would release it is not
+        drawn when the Dev window is hidden. Without an expiry, a drag
+        interrupted by anything that hides the window pins every brightness
+        driver for the rest of the session, with the control that did it out of
+        sight."""
+        self.assertIn("static void FxExpireDriveOverride()", PLUGIN_CPP)
+        m = re.search(r"static void DrawPanelFx\(\)\s*\{(.*?)\n\}", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "DrawPanelFx moved")
+        self.assertIn("FxExpireDriveOverride()", m.group(1),
+                      "the expiry must run from a path that is not the pane")
 
     def test_the_fx_curve_switch_does_not_reach_the_screen_lights(self):
         """gFxCurve is a tuning switch on a dev-only feature. If it ever gated
@@ -216,12 +265,48 @@ class WiringTests(unittest.TestCase):
         self.assertRegex(PLUGIN_CPP, r'key == "curve"')
 
     def test_the_curve_is_a_parameter_not_a_global_read(self):
-        """FxDriverFactor takes the switch rather than reading gFxCurve, because
-        it is per TARGET: two stacks can share one driver and want different
-        shapes, so a global read there would make the second one silently follow
-        the first."""
+        """FxDriverFactor takes the shape rather than reading gFxCurve, because
+        it is per TARGET and now per LAYER: two stacks can share one driver and
+        want different shapes, so a global read there would make the second one
+        silently follow the first."""
         m = re.search(r"static float FxDriverFactor\(.*?\n\}", PLUGIN_CPP, re.S)
         self.assertNotIn("gFxCurve", m.group(0))
+
+    def test_one_interpolator_serves_the_built_in_and_the_authored_curves(self):
+        """A layer may carry knots of its own. If those went through a second
+        implementation, a custom curve reading slightly differently from the
+        built-in one THROUGH THE SAME KNOTS would be indistinguishable in-sim
+        from having placed a knot wrong."""
+        for fn in ("BrightnessResponse", "FxCurveEval"):
+            m = re.search(r"static float %s\(.*?\n\}" % fn, PLUGIN_CPP, re.S)
+            self.assertIsNotNone(m, "%s moved" % fn)
+            self.assertIn("EvalMonotoneCurve", m.group(0),
+                          "%s must go through the shared interpolator" % fn)
+        # And the built-in FxCurve really is kBrightnessCurve, so "which curve is
+        # in force" can be one pointer rather than a pointer plus a bool.
+        m = re.search(r"static const FxCurve& FxBuiltInCurve\(\).*?\n\}", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("kBrightnessCurve", m.group(0))
+
+    def test_an_authored_curve_never_reaches_the_spill_lights(self):
+        """Same argument as the gFxCurve test above, one level further in. The
+        spill lights are shipping and unswitchable; a layer's curve is a property
+        of one painted layer."""
+        m = re.search(r"gScreenAlpha\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
+        self.assertNotIn("FxCurveEval", m.group(1))
+        self.assertNotIn("FxShapeFor", m.group(1))
+
+    def test_the_authored_curve_machinery_is_not_dev_only(self):
+        """panelfx.txt is a SHIPPED artifact and may carry an `lcurve` line, so
+        every user's plugin has to be able to evaluate one. Only the editor is
+        dev tooling."""
+        for symbol in ("static void BuildMonotoneTangents(",
+                       "static float EvalMonotoneCurve(",
+                       "struct FxCurve {",
+                       "static float FxCurveEval("):
+            self.assertLess(PLUGIN_CPP.index(symbol),
+                            PLUGIN_CPP.index("#if PHOTON_DEV\nstatic"),
+                            "%s must not be dev-only" % symbol)
 
     def test_the_curve_is_defined_outside_the_dev_guard(self):
         """The screen glow is a shipping feature and calls BrightnessResponse

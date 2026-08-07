@@ -330,7 +330,7 @@ def expand_value(decls, axes, where, base=None):
                 if any(ax == a for conds, _ in items for ax, _ in conds)]
     if not involved:
         # NB: not `items[-1][1]` — with nothing in AXIS_ORDER involved there may
-        # still be BOUND_AXES conditions to honour, and last-wins would ignore
+        # still be BOUND_AXES conditions to honor, and last-wins would ignore
         # them (silently picking another variant's value).
         result = _cell(items, base, where)
         if result is MISSING:

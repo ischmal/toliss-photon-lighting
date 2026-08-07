@@ -4,6 +4,108 @@ project(ToLissPhotonNative CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- binary hygiene: static CRT on Windows -----------------------------------
+# ⚠ GLOBAL, and it has to be: photoncore is linked into BOTH the `.xpl` and
+# `photon-installer`, and mixing /MT and /MD across a static library and the module
+# that consumes it is a link-time warning at best and two heaps at worst.
+#
+# Static is the right side to land on. `photon-installer` is a file an end user
+# downloads and double-clicks; a missing-VC++-redistributable dialog on a lighting
+# mod reads as malware, and there is no installer-for-the-installer to fix it with.
+# The `.xpl` gains the same property (it previously took the default /MD and so
+# quietly depended on the redistributable being present). Nothing crosses the module
+# boundary that cares — the plugin talks to X-Plane through the XPLM C API and keeps
+# every CRT resource inside itself.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# --- photoncore: the shared static library -----------------------------------
+# Constants, the version, the file patchers, detection, the manifest — everything
+# the plugin, the installer and the tests all need to agree on. See
+# docs/installer_cpp_plan.md §3.
+#
+# ⚠ photoncore MUST NOT INCLUDE ANY XPLM HEADER OR LINK THE SDK. The installer and
+# the core tests build on machines and CI runners with no X-Plane SDK, and that
+# independence is what keeps the release matrix simple. Anything needing XPLM stays
+# in plugin.cpp and calls INTO core, never the reverse. The SDK check below sits
+# under this block deliberately: `-DPHOTON_CORE_ONLY=ON` builds photoncore and its
+# tests without an SDK present at all.
+option(PHOTON_CORE_ONLY
+       "Build only photoncore + its tests (no X-Plane SDK required)" OFF)
+
+set(PHOTON_CORE_SOURCES
+    src/core/constants.cpp
+    src/core/fsutil.cpp
+    src/core/marker.cpp
+    src/core/acf.cpp
+    src/core/manifest.cpp
+    src/core/patch_acf.cpp
+    src/core/patch_acf_screens.cpp
+    src/core/patch_glow.cpp
+    src/core/patch_realwings.cpp
+    src/core/config.cpp
+    src/core/detect.cpp
+    src/core/payload.cpp
+    src/core/actions.cpp)
+
+add_library(photoncore STATIC ${PHOTON_CORE_SOURCES})
+# `third_party/` is on the include path so the JSON header is reached as
+# `third_party/nlohmann/json.hpp` — the same shape stb and imgui use.
+target_include_directories(photoncore PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(photoncore PUBLIC cxx_std_17)
+
+if(WIN32)
+    target_compile_definitions(photoncore PRIVATE
+        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    # ⚠ Source files hold UTF-8 string literals (the ⚠ in log lines, and every
+    # comment). MSVC otherwise reads them in the system code page and mangles them.
+    target_compile_options(photoncore PUBLIC /utf-8)
+endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(photoncore PUBLIC Threads::Threads)
+# GCC before 9 keeps std::filesystem in a separate library.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
+    target_link_libraries(photoncore PUBLIC stdc++fs)
+endif()
+
+# --- photoncore_tests: plain-main assert exe ---------------------------------
+# No framework, matching the offline ImGui reproduction harness that found the
+# CmdListsCount bug in a minute after two sim restarts found nothing. Runs on all
+# three OSes in CI; also the place to reproduce a patcher bug without X-Plane.
+add_executable(photoncore_tests tests/core_tests.cpp)
+target_link_libraries(photoncore_tests PRIVATE photoncore)
+enable_testing()
+add_test(NAME photoncore_tests COMMAND photoncore_tests)
+
+# --- photon-installer: the compiled end-user installer -----------------------
+# ⚠ Links photoncore and NOTHING X-Plane. It builds on a runner with no SDK, which
+# is what keeps the CI matrix simple — and is why the SDK check below this block
+# never runs for it.
+add_executable(photon-installer
+    src/installer/main.cpp
+    src/installer/cli.cpp)
+target_link_libraries(photon-installer PRIVATE photoncore)
+
+if(APPLE)
+    set_target_properties(photon-installer PROPERTIES
+        OSX_ARCHITECTURES "arm64;x86_64")   # universal 2, same as the .xpl
+elseif(NOT MSVC)
+    # The same flags the `.xpl` already uses: a distro's libstdc++ is older than the
+    # one this was built against more often than not, and the installer has to run
+    # before anything else does.
+    target_link_options(photon-installer PRIVATE
+        -static-libgcc -static-libstdc++)
+endif()
+
+if(PHOTON_CORE_ONLY)
+    message(STATUS "ToLissPhoton: CORE-ONLY build - photoncore + photoncore_tests, no SDK needed.")
+    return()
+endif()
+
 # --- locate the X-Plane SDK --------------------------------------------------
 # Download from https://developer.x-plane.com/sdk/ and unzip so that
 #   <XPLANE_SDK>/CHeaders/XPLM/XPLMDefs.h   exists.
@@ -22,12 +124,17 @@ endif()
 
 # --- dev tooling -------------------------------------------------------------
 # ONE flag for everything that must not ship: the Dev menu and window, the panel
-# probe, the FX compositor and its history, and the repo build commands. OFF by
-# default, so a plain `cmake --build` is always a release build and
-# make_release.py cannot bundle something that paints over the captain's PFD.
+# PROBE, the FX compositor's EDITOR and history, the live light editor, and the
+# repo build commands. OFF by default, so a plain `cmake --build` is always a
+# release build and make_release.py cannot bundle something that paints over the
+# captain's PFD.
+#
+# ⚠ The FX COMPOSITOR ITSELF IS NOT BEHIND THIS FLAG any more — it ships, driven
+# by the panelfx.txt the installer puts in the plugin folder and controlled from
+# the Displays tab. What stays here is the tooling that AUTHORS that file.
 #
 #   cmake -B build -A x64 -DPHOTON_DEV=ON        (or: deploy.ps1 -Dev)
-option(PHOTON_DEV "Build the dev menu, Dev window and panel probe" OFF)
+option(PHOTON_DEV "Build the dev menu, Dev window, panel probe and FX editor" OFF)
 
 # --- Dear ImGui --------------------------------------------------------------
 # Vendored at third_party/imgui/ (see its README for version and update steps).
@@ -44,6 +151,7 @@ set(PHOTON_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
 add_library(ToLissPhoton MODULE
     src/plugin.cpp
     src/imgui_xplm.cpp
+    src/sysmetrics.cpp
     "${PHOTON_IMGUI_DIR}/imgui.cpp"
     "${PHOTON_IMGUI_DIR}/imgui_draw.cpp"
     "${PHOTON_IMGUI_DIR}/imgui_tables.cpp"
@@ -69,19 +177,24 @@ target_compile_definitions(ToLissPhoton PRIVATE
 # flight loops + modern widgets. Bump to XPLM400=1 (XPLM410=1) for XP12-only APIs.
 target_compile_definitions(ToLissPhoton PRIVATE XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1)
 
+# Threads are UNCONDITIONAL. They were a dev-only dependency (the Build tab shells
+# out off-thread) until the performance tool shipped: src/sysmetrics.cpp samples
+# CPU and GPU load on its own thread, because collecting a wildcard PDH query on
+# the simulator thread would put a spike into the very frame times it measures.
+find_package(Threads REQUIRED)
+target_link_libraries(ToLissPhoton PRIVATE Threads::Threads photoncore)
+
 if(PHOTON_DEV)
     target_compile_definitions(ToLissPhoton PRIVATE PHOTON_DEV=1)
     # Linux links no GL of its own: like the XPLM symbols, glBegin & co. resolve
     # from the host process at load time.
-    message(STATUS "ToLissPhoton: DEV build - Dev menu, panel probe and FX compositor are IN. Do not ship it.")
-    find_package(Threads REQUIRED)          # the Build tab runs commands off-thread
-    target_link_libraries(ToLissPhoton PRIVATE Threads::Threads)
-    # stb_image is header-only and its implementation is compiled inside the same
-    # #if PHOTON_DEV block in plugin.cpp, so nothing extra is listed here — the
-    # include directory above is unconditional only because CMake has no reason
-    # to hide it. It decodes the FX compositor's overlay images; the SDK has no
-    # image loader of its own. See third_party/stb/README.md.
+    message(STATUS "ToLissPhoton: DEV build - Dev menu, panel probe and FX editor are IN. Do not ship it.")
 endif()
+
+# stb_image is header-only and its implementation is compiled into plugin.cpp, so
+# nothing is listed as a source — only the include directory above, which is
+# unconditional because the FX compositor (which decodes the overlay images with
+# it) now ships. The SDK has no image loader of its own; see third_party/stb/README.md.
 
 # --- per-platform: the SDK's required macro, linkage, and arch folder --------
 # Exactly one of APL/IBM/LIN must be 1 (SDK convention).

@@ -32,3 +32,7 @@ __pycache__/
 src/native/SDK/
 src/native/build/
 src/native/build-dev/
+# The SDK-free tree: `cmake -DPHOTON_CORE_ONLY=ON` builds photoncore,
+# photoncore_tests and photon-installer with no X-Plane SDK present, which is what
+# CI uses for the installer and what a contributor without the SDK can still run.
+src/native/build-core/

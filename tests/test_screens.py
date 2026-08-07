@@ -26,7 +26,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import build_objs as B          # noqa: E402
-import patch_acf_screens as PS  # noqa: E402
+from installer import patch_acf_screens as PS  # noqa: E402
 import photon_dsl as PD        # noqa: E402
 
 PLUGIN_CPP = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
@@ -41,6 +41,16 @@ SPILL_PREFIX = "ToLissPhoton/screens/spill/"
 def build(airframe="a320", debug=False):
     cfg = B.load_config(wing="stock")
     return B.Emitter(cfg, airframe, "stock", target="screens", debug=debug).emit()
+
+
+def code(text):
+    """The OBJ with its comments dropped.
+
+    The credit banner NAMES the gate dataref and says what it does — which is
+    where a reader meets it first — so a test that greps the whole file counts
+    the documentation as an occurrence."""
+    return "\n".join(ln for ln in text.replace("\r\n", "\n").split("\n")
+                     if not ln.strip().startswith("#"))
 
 
 def spill_lines(text):
@@ -78,26 +88,133 @@ class BuildTests(unittest.TestCase):
 
 
 class NoGatingTests(unittest.TestCase):
-    """The screens have ONE look, so the OBJ is deliberately un-gated.
+    """The screens have ONE look, so no light here is gated on a LOOK.
 
     A category with two branches that render identically is a dead menu row, which
-    has already shipped twice on the interior. Emitting a gate here would either
-    do that or need a fake second palette. If someone later gives these a category,
-    these tests fail and the reasoning has to be revisited on purpose."""
+    has already shipped twice on the interior. Emitting a category here would
+    either do that or need a fake second palette. If someone later gives these a
+    category, these tests fail and the reasoning has to be revisited on purpose.
 
-    def test_no_anim_hide_or_show_anywhere(self):
-        text = build()
-        self.assertNotIn("ANIM_hide", text)
+    The ONE gate in the file is the master on/off block (MasterGateTests below),
+    which is not a look — it is the whole feature."""
+
+    def test_the_only_gate_is_the_master_block(self):
+        text = code(build())
         self.assertNotIn("ANIM_show", text)
+        self.assertEqual(text.count("ANIM_hide"), 1)
+        self.assertIn(f"ANIM_hide 1 1 {MASTER_DREF}", text)
 
     def test_no_screens_category_dataref_is_referenced(self):
         self.assertNotIn("ToLissPhoton/screens/" + "<category>", build())
-        self.assertNotRegex(build(), r"ToLissPhoton/screens/(?!spill/)")
+        self.assertNotRegex(code(build()),
+                            r"ToLissPhoton/screens/(?!spill/|disabled)")
 
-    def test_one_anim_block_per_light(self):
+    def test_one_anim_block_per_light_inside_the_master_block(self):
         text = build().replace("\r\n", "\n")
-        self.assertEqual(text.count("ANIM_begin"), 6)
-        self.assertEqual(text.count("ANIM_end"), 6)
+        self.assertEqual(text.count("ANIM_begin"), 6 + 1)
+        self.assertEqual(text.count("ANIM_end"), 6 + 1)
+
+
+#: The whole-OBJ gate. Named for the OFF state on purpose — see MasterGateTests.
+MASTER_DREF = "ToLissPhoton/screens/disabled"
+
+
+class MasterGateTests(unittest.TestCase):
+    """One ANIM_hide around the whole OBJ, so that switching "backlight
+    illumination" off costs one dataref read rather than six spill lights drawn
+    at alpha 0.
+
+    Turning the alpha down was always enough to make them INVISIBLE; it was never
+    enough to make them FREE, and free is the entire point of the switch. Six
+    LIGHT_SPILL_CUSTOMs are six lights the renderer sets up and six 9-float
+    accessor calls, whatever alpha says."""
+
+    def test_the_gate_wraps_every_light(self):
+        text = build().replace("\r\n", "\n")
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        gate = lines.index(f"ANIM_hide 1 1 {MASTER_DREF}")
+        self.assertEqual(lines[gate - 1], "ANIM_begin")
+        self.assertEqual(lines[-1], "ANIM_end")
+        for ln in lines:
+            if ln.startswith("LIGHT_SPILL_CUSTOM"):
+                self.assertGreater(lines.index(ln), gate)
+
+    def test_the_gate_is_outside_every_per_light_block(self):
+        """Nesting matters: a gate INSIDE the six blocks would be six gates, and
+        the renderer would still walk six blocks to find them all off."""
+        recs = B.parse_records(build())
+        for rec in recs:
+            self.assertEqual(rec[0][0][3], MASTER_DREF,
+                             "the master gate is not the outermost one")
+
+    def test_polarity_is_fail_open(self):
+        """⚠ Named for the OFF state, and this is why: an OBJ8 ANIM_hide reading a
+        dataref that does not exist sees 0 forever (an OBJ binds dataref NAMES at
+        load time). With the plugin absent — or older than the OBJ — 0 has to mean
+        DRAW, or the six lights vanish and it reads in-sim as "the .acf attachment
+        never happened", sending the next person after the wrong bug entirely.
+
+        Same reasoning that bakes the alpha low rather than at 0 (SCREENS_CREDIT):
+        the degraded state is a faint glow, never nothing."""
+        self.assertTrue(MASTER_DREF.endswith("/disabled"))
+        self.assertIn(f"ANIM_hide 1 1 {MASTER_DREF}", code(build()))
+
+    def test_the_builder_and_the_plugin_name_the_same_dataref(self):
+        self.assertEqual(B.TARGET_MASTER_GATE["screens"], MASTER_DREF)
+        self.assertIn(f'"{MASTER_DREF}"', PLUGIN_CPP)
+
+    def test_the_gate_is_derived_from_the_user_switch_not_stored(self):
+        """One source of truth. A cached copy updated in the engine loop would be
+        a second place to forget, and it would lag the checkbox by a frame — and
+        it must read the switch through DisplayFeatureOn, so the Displays master
+        cannot be forgotten at this one consumer (see DisplaysMasterTests)."""
+        m = re.search(r"static int\s+ReadScreensDisabledInt\(void\*\)\s*\{([^}]*)\}",
+                      PLUGIN_CPP)
+        self.assertIsNotNone(m)
+        self.assertIn("DisplayFeatureOn(gDisplays.spill)", m.group(1))
+        m = re.search(r"static float ReadScreensDisabledFloat\(void\*\)\s*\{([^}]*)\}",
+                      PLUGIN_CPP)
+        self.assertIsNotNone(m)
+        self.assertIn("DisplayFeatureOn(gDisplays.spill)", m.group(1))
+
+    def test_the_gate_is_registered_at_xpluginstart_as_int_and_float(self):
+        """The registration tripwire, same as every category dataref: an OBJ binds
+        NAMES at load time and one registered late — or as one type only — reads 0
+        forever. Here 0 means "draw", so the failure is a switch that does nothing
+        rather than six missing lights, which is the right way round but still
+        wrong."""
+        start = PLUGIN_CPP.index("PLUGIN_API int XPluginStart")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("PLUGIN_API int XPluginEnable")]
+        reg = body[body.index("gScreensDisabledRef = XPLMRegisterDataAccessor("):]
+        self.assertIn("xplmType_Int | xplmType_Float", reg[:200])
+        self.assertIn("ReadScreensDisabledInt", reg[:300])
+        self.assertIn("ReadScreensDisabledFloat", reg[:300])
+
+    def test_the_alpha_path_still_gates_too(self):
+        """BOTH halves stay. The OBJ block is the cheap gate for the user's
+        switch; the per-frame alpha is what follows the DU knobs and the DC bus,
+        neither of which belongs in an ANIM_hide. Removing the alpha gating
+        because "the block is hidden anyway" would leave the spill lit through a
+        bus failure whenever the switch happens to be on."""
+        engine = re.search(r"const float userGain = [^\n]*", PLUGIN_CPP)
+        self.assertIsNotNone(engine)
+        self.assertIn("DisplayFeatureOn(gDisplays.spill)", engine.group(0))
+        self.assertIn("const bool busLive = DcBusLive();", PLUGIN_CPP)
+
+    def test_a_debug_build_has_no_master_gate(self):
+        """The dev tuner owns every light in a debug OBJ; a master gate could only
+        hide the one being tuned, and it is driven by a user switch the tuning
+        session has no reason to be holding on."""
+        self.assertNotIn(MASTER_DREF, code(build(debug=True)))
+
+    def test_the_interior_has_no_master_gate(self):
+        """Deliberately screens-only. The cockpit lights are not one feature with
+        one switch — they are five categories the user picks looks for — so there
+        is no state in which hiding all of them is what was asked for."""
+        self.assertNotIn("interior", B.TARGET_MASTER_GATE)
+        cfg = B.load_config(wing="stock")
+        inn = B.Emitter(cfg, "a320", "stock", target="interior").emit()
+        self.assertNotIn("/disabled", inn)
 
 
 class FixtureProfileSyntaxTests(unittest.TestCase):
@@ -250,7 +367,7 @@ airframe a320 {
 
     def test_angles_survive_a_condition_block(self):
         """`@led { aim: ...; }` must convert inside the condition dict too, or a
-        conditioned aim would reach the Emitter as an unrecognised property."""
+        conditioned aim would reach the Emitter as an unrecognized property."""
         cfg = self._parse("cone: 0.1; aim: 0 0;  @led { aim: 0 180; }")
         got = self._type(cfg)["dir"]
         self.assertEqual(got["halogen"], [0.0, 0.0, -1.0])
@@ -372,7 +489,15 @@ class DUMappingTests(unittest.TestCase):
 
 
 class ReleaseIsolationTests(unittest.TestCase):
-    """The experiment must not reach dist/ — and so a release bundle — by default."""
+    """`screens` must not reach dist/ from a bare `build`.
+
+    ⚠ This is no longer the same statement as "must not reach a release bundle".
+    make_release.py now emits the screen-glow OBJ deliberately, straight from the
+    Emitter (build_screens_payload) — which is precisely WHY these tests still
+    matter: `dist/` is a dev tree that a tuning pass rewrites constantly, and the
+    bundle must be built from the DSL rather than from whatever happens to be
+    sitting there. A debug build of this target is bound to
+    ToLissPhoton/debug/light/* and is not installable."""
 
     def test_default_build_targets_exclude_screens(self):
         self.assertNotIn("screens", B.DEFAULT_TARGETS)

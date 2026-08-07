@@ -196,7 +196,7 @@ class InteriorInstallTests(unittest.TestCase):
         return self.fa.objects / name
 
     def test_patches_all_four_acf_in_both_formats(self):
-        import patch_acf as P
+        from installer import patch_acf as P
         self._install()
         for name in self.fa.acfs:
             with self.subTest(acf=name):
@@ -207,7 +207,7 @@ class InteriorInstallTests(unittest.TestCase):
     def test_never_patches_a_bak_file(self):
         """Durantula keeps an a320.acf.durantula.bak of this very file; patching
         it would corrupt Durantula's own uninstall."""
-        import patch_acf as P
+        from installer import patch_acf as P
         self._install()
         bak = (self.fa.folder / "a320.acf.durantula.bak").read_text(encoding="utf-8")
         self.assertEqual(bak, STOCK_ACF)

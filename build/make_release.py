@@ -3,14 +3,20 @@
 Build the ToLiss Photon installer release bundle.
 
 Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the compiled
-native plugin, so the end-user installer never needs the DSL toolchain to
-*generate* lighting nor a C++ toolchain to build the plugin. The RealWings live
-patch is one exception — it rewrites the user's already-installed RealWings mod
-files in place, at install time, so it can't be pre-baked the same way; the
-skin-glow redirect (patch_glow.py) is another, rewriting ToLiss's own mesh OBJs in
-place. A small copy of the DSL toolchain (build_objs.py, photon_dsl.py,
-patch_realwings.py, patch_glow.py + the two .phdsl files) is bundled under
-payload/dsl/ for those purposes.
+native plugin, so the end-user installer needs neither the DSL toolchain nor a C++
+toolchain.
+
+⚠ THE BUNDLE NO LONGER CARRIES THE DSL TOOLCHAIN AT ALL. It used to ship
+`payload/dsl/` — build_objs.py, photon_dsl.py and the two `.phdsl` files — for the
+one install-time step that could not be pre-baked: the RealWings live patch, which
+rewrites the user's already-installed mod files in place and so has to resolve each
+replacement light's parameters against the DSL. Those parameters are now RESOLVED
+AT BUNDLE TIME into `payload/realwings_patch.json` (see `stage_realwings_patch` and
+build/patch_realwings.py) and applied by `installer/realwings.py`, which is
+stdlib-only. The skin-glow redirect and the two `.acf` patchers never needed the
+DSL and now live in the installer package outright. Net effect: install time has
+zero DSL dependency, which is the precondition for the C++ installer
+(docs/installer_cpp_plan.md §2).
 
 The plugin is the native `.xpl` (no XPPython3/Python at runtime). It is a fat
 plugin: `--plugin-dir` points at a `ToLissPhoton/` folder holding one
@@ -21,6 +27,7 @@ matrix (all three `<arch>/` dirs merged into one folder) — see
 
 Usage:
     python build/make_release.py [--out DIR] [--plugin-dir DIR] [--zip]
+    python build/make_release.py --payload-only [--out DIR]
 
 Output (default --out release/, gitignored like dist/) — the Python-Universal
 bundle (`python install.py`, needs only Python 3.8+, runs on any OS):
@@ -29,11 +36,19 @@ bundle (`python install.py`, needs only Python 3.8+, runs on any OS):
     release/README.txt
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
     release/payload/objs/interior/lights_inn.obj      (wing- & airframe-independent)
+    release/payload/objs/screens/lights_screens.obj   (display glow, A3xx)
     release/payload/textures/interior/*.png           (Gus's set, ~57 MiB)
     release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl   (all arches in CI)
-    release/payload/dsl/...
+    release/payload/plugindata/{panelfx.txt,overlays/*.png}   (into the plugin folder)
+    release/payload/realwings_patch.json              (resolved from the DSL)
 With --zip: release/ToLissPhoton-Installer-v<VER>-Python-Universal.zip
 (extracts to one ToLissPhoton-Installer-v<VER>-Python-Universal/ folder).
+
+`--payload-only` stages just `payload/` (no installer copy, no README, no zip, and
+no plugin unless one is built) into `--out`, defaulting to the REPO ROOT so it
+lands next to `install.py`. That is the dev path: `install.py` used to build OBJs
+on the fly from the DSL when run out of a checkout, which made the toolchain an
+install-time dependency in the one place it had to not be. Stage, then run.
 """
 from __future__ import annotations
 
@@ -47,19 +62,23 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "build"))
 sys.path.insert(0, str(REPO))
 import build_objs as B  # noqa: E402
+import patch_realwings as RWBUILD  # noqa: E402  (build/patch_realwings.py)
 import readme as _readme  # noqa: E402  (build/readme.py)
 from installer.constants import (  # noqa: E402
-    PLUGIN_FOLDER, PLUGIN_USER_DIRS, VERSION, WINGS, XPL_NAME,
+    PANELFX_FILE, PLUGIN_DATA_DIRNAME, PLUGIN_FOLDER, PLUGIN_USER_DIRS,
+    WINGS, XPL_NAME,
 )
+from installer.realwings import PATCH_JSON  # noqa: E402
+# ⚠ THE VERSION COMES FROM core/version.h, not from installer/constants.py. That
+# header is the one definition the plugin and the compiled installer both read, so
+# a bundle's NAME can no longer disagree with what the About tab reports (§8c).
+from version import VERSION  # noqa: E402  (build/version.py)
 
 INSTALLER_ENTRY = REPO / "install.py"
 INSTALLER_PKG = REPO / "installer"
 # The loose-.py bundle is the "Python-Universal" release download: readable
 # Python that runs on any OS (its plugin/ is the fat folder with every arch).
 BUNDLE_NAME = f"ToLissPhoton-Installer-v{VERSION}-Python-Universal"
-DSL_TOOLCHAIN_FILES = ["build_objs.py", "photon_dsl.py", "patch_realwings.py",
-                       "patch_glow.py", "patch_acf.py"]
-DSL_CONFIG_FILES = ["lights.style.phdsl", "lights.layout.phdsl"]
 # Default location of the compiled native fat-plugin folder (CMake build output).
 DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
 
@@ -106,6 +125,62 @@ def build_interior_payload(payload: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(text.encode("utf-8"))
     print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
+
+
+def build_screens_payload(payload: Path):
+    """The display-glow OBJ, built ONCE like the interior one and for the same
+    reasons: no wing variants, and the A3xx flight decks are the same model so the
+    six display positions are identical.
+
+    ⚠ NOT covered by `build_objs.py build` — `screens` is deliberately absent from
+    DEFAULT_TARGETS so a bare build cannot slip an experiment into `dist/`. That
+    makes this call the only thing that puts it in a bundle, so it is emitted
+    straight from the Emitter here rather than copied out of `dist/`."""
+    cfg = B.load_config(wing="stock")
+    fname = B.OBJ_TARGETS["a320"]["screens"]
+    text = B.Emitter(cfg, "a320", "stock", target="screens").emit()
+    dest = payload / "objs" / "screens" / fname
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(text.encode("utf-8"))
+    print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
+
+
+def stage_plugin_data(payload: Path):
+    """The plugin's runtime data files — the Panel FX layer definition and the
+    overlay images it names — staged under payload/plugindata/ mirroring the
+    plugin folder's own layout, so the installer copies the tree in verbatim.
+
+    ⚠ The overlays are enumerated, not listed. `panelfx.txt` names images by file
+    name and a layer whose image is missing is SKIPPED at runtime rather than
+    drawn as a solid, so a hard-coded list that fell one behind the look would
+    ship a cockpit quietly missing a layer."""
+    src_fx = REPO / "src" / "native" / PANELFX_FILE
+    if not src_fx.is_file():
+        raise SystemExit(
+            f"Panel FX layer definition not found: {src_fx}\n"
+            f"It is the authored look and cannot be regenerated. On a dev machine "
+            f"it is symlinked from the plugin folder — see src/native/README.md.")
+    dest_root = payload / PLUGIN_DATA_DIRNAME
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True)
+    # Read + write rather than copyfile: on a dev machine the repo copy is the
+    # TARGET of the plugin folder's symlink, and staging must capture its contents
+    # either way.
+    (dest_root / PANELFX_FILE).write_bytes(src_fx.read_bytes())
+    n = 0
+    for d in PLUGIN_USER_DIRS:
+        src = REPO / "src" / "native" / d
+        if not src.is_dir():
+            continue
+        for f in sorted(src.rglob("*")):
+            if not f.is_file():
+                continue
+            out = dest_root / d / f.relative_to(src)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, out)
+            n += 1
+    print(f"  staged payload/{PLUGIN_DATA_DIRNAME}/ ({PANELFX_FILE} + {n} overlay image(s))")
 
 
 def stage_interior_textures(payload: Path):
@@ -165,21 +240,71 @@ def stage_plugin(payload: Path, plugin_dir: Path):
         print(f"    skipped {name}/ — user/dev content, not a shipped artifact")
 
 
-def stage_dsl_toolchain(payload: Path):
-    """Mirrors the real repo's build/ + src/lights/ relative layout under
-    payload/dsl/, because build_objs.py locates its DSL config two directories
-    up from its own file (REPO = Path(__file__).parent.parent) — flattening
-    this into one directory would break that lookup."""
-    dsl = payload / "dsl"
-    build_dest = dsl / "build"
-    build_dest.mkdir(parents=True, exist_ok=True)
-    for name in DSL_TOOLCHAIN_FILES:
-        shutil.copyfile(REPO / "build" / name, build_dest / name)
-    lights_dest = dsl / "src" / "lights"
-    lights_dest.mkdir(parents=True, exist_ok=True)
-    for name in DSL_CONFIG_FILES:
-        shutil.copyfile(REPO / "src" / "lights" / name, lights_dest / name)
-    print(f"  staged payload/dsl/ (RealWings live-patch toolchain)")
+def stage_realwings_patch(payload: Path):
+    """Resolve the RealWings wingtip replacements out of the DSL and write them to
+    `payload/realwings_patch.json`.
+
+    ⚠ THIS IS WHAT REPLACED `payload/dsl/`. The RealWings patch rewrites the user's
+    already-installed mod OBJs in place, so unlike our own OBJs it cannot be
+    pre-baked as a file — but its NUMBERS can, and that is the whole difference
+    between an installer that needs the DSL parser and one that doesn't. Same
+    shape as `build_objs_payload` above: resolve at bundle time, apply at install
+    time.
+
+    ⚠ The output is a GENERATED ARTIFACT and carries a `_generated` header saying
+    so. Tuning still lives in `lights.layout.phdsl`; this file is downstream of it
+    and is overwritten on every build."""
+    dest = payload / PATCH_JSON
+    data = RWBUILD.write_patch_data(dest)
+    frames = ", ".join(sorted(data["airframes"]))
+    print(f"  wrote payload/{PATCH_JSON} "
+          f"({len(data['classes'])} baked light class(es); airframes: {frames})")
+
+
+# Where CMake leaves the compiled installer, per generator. Multi-config
+# generators (MSVC, Xcode) nest by configuration; single-config ones do not.
+INSTALLER_EXE_NAMES = ("photon-installer.exe", "photon-installer")
+INSTALLER_BUILD_DIRS = (
+    REPO / "src" / "native" / "build",
+    REPO / "src" / "native" / "build-core",
+)
+
+
+def find_installer_binary(explicit: Path | None = None) -> Path | None:
+    """The compiled `photon-installer`, or None if it has not been built."""
+    if explicit is not None:
+        return explicit if explicit.is_file() else None
+    for base in INSTALLER_BUILD_DIRS:
+        for sub in ("", "Release", "RelWithDebInfo"):
+            for name in INSTALLER_EXE_NAMES:
+                p = base / sub / name if sub else base / name
+                if p.is_file():
+                    return p
+    return None
+
+
+def stage_compiled_installer(out: Path, explicit: Path | None = None) -> Path | None:
+    """Stage the compiled `photon-installer` beside `payload/`.
+
+    ⚠ IT GOES NEXT TO `payload/`, NOT INSIDE IT. The binary resolves its payload
+    from its OWN directory rather than the working directory — that is what lets a
+    user run it from Downloads, from a USB stick, or from inside
+    Resources/plugins/ — so the two have to be siblings.
+
+    Absent is not an error: this repo's own release path still builds the
+    Python-Universal bundle, and one release ships BOTH installers side by side
+    (docs/installer_cpp_plan.md §9) before the Python one is deleted. A machine that
+    has not built the C++ side still produces a complete Python bundle."""
+    exe = find_installer_binary(explicit)
+    if exe is None:
+        print("  ! photon-installer not built — bundle staged without it "
+              "(build it: cmake --build src/native/build --config Release)")
+        return None
+    dest = out / exe.name
+    shutil.copyfile(exe, dest)
+    dest.chmod(dest.stat().st_mode | 0o111)   # keep it executable on macOS/Linux
+    print(f"  staged {dest.name} ({exe.stat().st_size // 1024} KiB) from {exe}")
+    return dest
 
 
 def stage_installer(out: Path):
@@ -212,32 +337,70 @@ def make_zip(out: Path) -> Path:
 
 def main():
     ap = argparse.ArgumentParser(description="Build the ToLiss Photon installer release bundle")
-    ap.add_argument("--out", default="release", help="output dir (default: release/)")
+    ap.add_argument("--out", help="output dir (default: release/, or the repo "
+                                  "root with --payload-only)")
     ap.add_argument("--plugin-dir", default=str(DEFAULT_PLUGIN_DIR),
                     help="native fat-plugin folder holding <arch>/%s "
                          "(default: the CMake build output under src/native/build/)" % XPL_NAME)
     ap.add_argument("--zip", action="store_true", help="also zip the release folder")
+    ap.add_argument("--payload-only", action="store_true",
+                    help="stage only payload/ (the dev path: stage beside "
+                         "install.py, then run it). Tolerates an unbuilt plugin.")
+    ap.add_argument("--installer-exe",
+                    help="the compiled photon-installer to stage (default: the "
+                         "CMake output under src/native/build*/)")
     args = ap.parse_args()
 
-    out = Path(args.out)
+    out = Path(args.out) if args.out else (REPO if args.payload_only
+                                           else REPO / "release")
     if not out.is_absolute():
         out = REPO / out
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    payload = out / "payload"
+
+    # ⚠ --payload-only never wipes `out`: its default IS the repo root. Only the
+    # payload/ subtree it owns is replaced.
+    if args.payload_only:
+        if payload.exists():
+            shutil.rmtree(payload)
+        payload.mkdir(parents=True)
+    else:
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
 
     plugin_dir = Path(args.plugin_dir)
     if not plugin_dir.is_absolute():
         plugin_dir = REPO / plugin_dir
 
-    payload = out / "payload"
-    print(f"building release v{VERSION} -> {out}")
+    print(f"building {'payload' if args.payload_only else 'release'} "
+          f"v{VERSION} -> {out}")
     build_objs_payload(payload)
     build_interior_payload(payload)
+    build_screens_payload(payload)
+    stage_realwings_patch(payload)
     stage_interior_textures(payload)
-    stage_plugin(payload, plugin_dir)
-    stage_dsl_toolchain(payload)
+    # A dev staging a payload to try the TUI has usually not built the plugin, and
+    # refusing over it would make the dev path harder than the one it replaced. A
+    # real release still fails loudly — the installer has nothing to install
+    # without it.
+    if args.payload_only and not plugin_dir.is_dir():
+        print(f"  ! no native plugin at {plugin_dir} — staged without it "
+              f"(build it to test the plugin install)")
+    else:
+        stage_plugin(payload, plugin_dir)
+    stage_plugin_data(payload)
+
+    if args.payload_only:
+        print(f"\npayload staged: {payload}\n"
+              f"run the installer with: python install.py")
+        return
+
     stage_installer(out)
+    # ⚠ BOTH installers ship for one release (§9): the compiled one is primary and
+    # the Python bundle is the fallback, and the release notes say so. This is the
+    # only period in which both exist; the Python half goes one release later.
+    stage_compiled_installer(
+        out, Path(args.installer_exe) if args.installer_exe else None)
     stage_readme(out)
 
     if args.zip:

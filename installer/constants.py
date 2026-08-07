@@ -1,12 +1,13 @@
-"""Shared constants for the installer package. Kept dependency-free (no import
-of build_objs) so the installer runs standalone from the release payload,
-which does not ship the DSL toolchain (except payload/dsl/, used only for the
-RealWings live patch — see actions.py)."""
+"""Shared constants for the installer package. Kept dependency-free (no import of
+build_objs) so the installer runs standalone from the release payload — which ships
+NO DSL toolchain at all: the RealWings live patch was the last install-time
+consumer, and its numbers are now resolved into `payload/realwings_patch.json` at
+bundle time (see installer/realwings.py)."""
 from __future__ import annotations
 
 from pathlib import Path
 
-VERSION = "0.6"
+VERSION = "0.8"
 
 # airframe key -> (aircraft-folder glob under Aircraft/, X-Plane tree folder,
 # OBJ filename, fallback pretty name if skunkcrafts_updater.cfg is missing).
@@ -20,14 +21,14 @@ AIRFRAMES = {
     "a339": ("ToLissA339*", "A339", "ExternalLights_XP12.obj", "ToLiss A330-900"),
 }
 
-# How to recognise a ToLiss airframe from its skunkcrafts_updater.cfg, so
+# How to recognize a ToLiss airframe from its skunkcrafts_updater.cfg, so
 # detection no longer depends on the folder NAME or its location under Aircraft/
 # (the user may rename it or drop it in a sub-hangar like Aircraft/My Hangar/…).
 # Matched case-insensitively as substrings, `module` first (the ToLiss update-repo
 # URL, e.g. …/aircraft-repositories/A330-900/ — the most stable machine id), then
 # the display `name`. Tokens are mutually exclusive so order between airframes is
 # irrelevant. detect._identify_airframe falls back to the airframe-specific OBJ
-# filename above, then the folder glob, if a cfg is absent/unrecognised.
+# filename above, then the folder glob, if a cfg is absent/unrecognized.
 AIRFRAME_CFG_IDS = {
     "a319": {"module": "/A319/",     "name": "A319"},
     "a320": {"module": "/A320/",     "name": "A320"},
@@ -48,6 +49,30 @@ INTERIOR_OBJ = "lights_inn.obj"
 # (docs/interior_plan.md decision #14): different cockpit model, different
 # rheostat indices, and Gus's mod does not cover it.
 INTERIOR_AIRFRAMES = ("a319", "a320", "a321")
+
+# ─── display (screen) glow ────────────────────────────────────────────────────
+# Six LIGHT_SPILL_CUSTOM lights washing each display unit's own light back into
+# the cockpit (docs/screens_plan.md).
+#
+# ⚠ Unlike every other OBJ we install, this one has NO stock counterpart and is
+# NOT referenced by a stock ToLiss aircraft. Nothing draws it until
+# build/patch_acf_screens.py adds it to the `.acf` `_obja/*` attachment table —
+# which is exactly what makes it optional, and also why the install is TWO steps
+# that must both be undone. Consequences that bit elsewhere and bind here:
+#
+#  * The OBJ goes in the manifest's `screens.added[]`, never `backed_up[]`:
+#    uninstall must DELETE it, the same rule the interior's pedals_details_*.png
+#    already follow. Restoring a backup that never existed leaves it forever.
+#  * Detaching is a `.acf` edit, reversed by the patcher rather than by restoring
+#    a snapshot, so it composes with Durantula's rewrite of the same table.
+#
+# Part of the BASE install on A3xx (not an opt-in): it works on a stock cockpit,
+# so it does not depend on the interior mod, and whether the glow is visible is a
+# runtime choice on the plugin's Displays tab rather than an install-time one.
+# A339 is out for the same reason it is out of the interior — different cockpit
+# model, so these screen positions are simply not its.
+SCREENS_OBJ = "lights_screens.obj"
+SCREENS_AIRFRAMES = ("a319", "a320", "a321")
 
 # Gus Rodrigues' Light Mod on the .org — a SEPARATE file entry per variant, so the
 # opt-in screen's "Open X-Plane.org page…" picks by airframe rather than reusing
@@ -135,28 +160,49 @@ PLUGIN_FOLDER = "ToLissPhoton"
 XPL_NAME = "ToLissPhoton.xpl"
 PLUGIN_DIR_REL = Path("Resources") / "plugins" / PLUGIN_FOLDER
 
-# Subfolders of the plugin folder that belong to the USER, not to the installer.
-# The installer neither writes nor removes anything under these, and they are
-# never staged into a release bundle.
+# Subfolders of the plugin folder that hold USER content as well as ours.
+# `plugin_files()` (the verbatim whole-tree copy) skips them entirely and they are
+# never swept into a release bundle by a `--plugin-dir` that happens to point at a
+# DEPLOYED folder — that is how CI merges the per-OS arches, and such a folder on a
+# dev machine holds whatever images that dev dropped there.
 #
 # `overlays/` is the Panel FX compositor's image folder
 # (Resources/plugins/ToLissPhoton/overlays/, see src/native/README.md). The
-# compositor is entirely inside `#if PHOTON_DEV`, so a shipped `.xpl` never reads
-# it and nothing here installs one — `docs/fcu_tint_plan.md` §4 is explicit that
-# the feature stays out of install.py and the release bundle until the look is
-# accepted in-sim. Two things still have to be true meanwhile:
+# compositor now SHIPS, so the starter images are an installed artifact — but they
+# go through the plugin-DATA payload below, by NAME, precisely so this rule can
+# stay true in both directions:
 #
-#  * uninstall must not `rmtree` the plugin folder out from under images the user
-#    (or `deploy.ps1`) put there. They are hand-made and unrecoverable, exactly
-#    like the interior's `added[]` files are unrestorable — same shape of rule,
-#    opposite direction.
-#  * `--plugin-dir` pointed at a DEPLOYED plugin folder (a plausible way to build
-#    a bundle, and how CI merges per-OS arches) must not sweep a dev machine's
-#    overlays into a release, where they would ship as inert dead weight.
-#
-# When the compositor does ship, this stays: the starter images become an
-# installed artifact, but a user's own images are still theirs.
+#  * install writes only the names we ship, so a user's own images survive an
+#    upgrade;
+#  * uninstall removes only the names we ship, so it can never `rmtree` a folder
+#    of hand-made PNGs that have no backup and no stock counterpart — the same
+#    shape of rule as the interior's `added[]`, opposite direction.
 PLUGIN_USER_DIRS = ("overlays",)
+
+# ─── Panel FX: the shipped plugin-folder data files ──────────────────────────
+# Runtime data the `.xpl` reads out of its OWN folder rather than out of
+# Output/preferences: they are part of the mod's look, not part of a user's
+# settings, so they belong next to the plugin and are replaced by an upgrade.
+#
+# `panelfx.txt` is the authored Panel FX layer definition (targets, layers, blend
+# modes, brightness drivers). ⚠ A SHIPPING `.xpl` NEVER WRITES IT — the Displays
+# tab's toggles and strengths persist in Output/preferences/ToLissPhoton_profiles.json
+# instead. Two reasons, and both have bitten similar designs: an installer upgrade
+# would otherwise clobber a user's settings, and on a dev machine the file is a
+# SYMLINK into the repo, so a user-facing toggle would write itself into source.
+#
+# ⚠ INSTALL SKIPS A SYMLINK. A dev keeps `panelfx.txt` symlinked at the repo copy
+# so in-sim edits (PHOTON_DEV builds do write it) land in source control; a test
+# run of the installer must not replace that link with a plain file and silently
+# detach the loop. See actions._install_plugin_data.
+PANELFX_FILE = "panelfx.txt"
+
+# The bundle stages these under `payload/plugindata/`, MIRRORING the plugin
+# folder's own layout (`panelfx.txt`, `overlays/*.png`), and the installer copies
+# that tree in verbatim. A directory walk rather than a name list on purpose: the
+# overlay set changes whenever the look does, and a list is what silently ships
+# one image fewer than the layers reference.
+PLUGIN_DATA_DIRNAME = "plugindata"
 
 XPLANE_ORG_URL = ("https://forums.x-plane.org/files/file/"
                   "100717-toliss-photon-exterior-lighting-mod-for-toliss-a319a320a321")

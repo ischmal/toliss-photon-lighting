@@ -1,6 +1,6 @@
 """Generate the starter overlay images for the Panel FX compositor.
 
-The compositor lets a layer be an IMAGE rather than a flat colour. An empty drop
+The compositor lets a layer be an IMAGE rather than a flat color. An empty drop
 folder is a bad first experience, so four worked examples ship with the plugin --
 generated rather than committed as binaries, because the interesting part is the
 recipe and a 4-line change here beats re-exporting a PNG from a paint program.
@@ -10,8 +10,8 @@ recipe and a 4-line change here beats re-exporting a PNG from a paint program.
 ⚠ ALPHA IS COVERAGE, and it is what these images are really made of. The plugin
 premultiplies on upload and every blend mode treats a zero-alpha texel as "leave
 this pixel alone", so an overlay's shape lives in its alpha channel and its RGB
-is usually just white -- the LAYER COLOUR does the tinting. That is why a
-darkening vignette is opaque at the EDGES: the layer supplies the dark colour and
+is usually just white -- the LAYER COLOR does the tinting. That is why a
+darkening vignette is opaque at the EDGES: the layer supplies the dark color and
 Multiply, and the image only says where it lands.
 
 Written with zlib + struct rather than Pillow: this repo's tooling is stdlib-only
@@ -65,12 +65,12 @@ def smoothstep(t):
 # cockpit as the top of the target. Confirm with the ? identify button before
 # trusting that on a target you have not looked at.
 IMAGES = {
-    # Bright at the top, gone by halfway. Add or Screen, warm colour: the soft
+    # Bright at the top, gone by halfway. Add or Screen, warm color: the soft
     # wash a display's own bezel throws onto the glass.
     "gradient_top.png":  (256, 256, lambda u, v: 1.0 - smoothstep(v * 2.0)),
 
     # Opaque at the EDGES, clear in the middle -- the shape of what a Multiply
-    # with a dark colour should darken. The reverse (opaque centre) would tint
+    # with a dark color should darken. The reverse (opaque center) would tint
     # exactly the part of a readout you want left alone.
     "vignette_edges.png": (256, 256, lambda u, v: smoothstep(
         (math.hypot(u - 0.5, v - 0.5) / 0.7071 - 0.55) / 0.45)),

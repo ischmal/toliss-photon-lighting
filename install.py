@@ -24,7 +24,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from installer import actions, config, detect, payload
+from installer import actions, config, detect, payload, realwings
 from installer import tui
 from installer.constants import (
     AIRFRAMES, GITHUB_URL, INTERIOR_AIRFRAMES, INTERIOR_ORG_URL, VERSION,
@@ -406,7 +406,7 @@ def screen_interior(ac: dict) -> bool:
     body = (
         "ToLiss Photon includes Light Mod by Gus Rodrigues, offering improved "
         "cockpit lighting textures and three interior light profiles: "
-        "Halogen (Old), Halogen (New), and LED."
+        "Old Halogen, New Halogen, and LED."
     )
     idx, note = 0, None
     while True:
@@ -625,12 +625,17 @@ def main():
     LOG = Log(VERSION, dry_run=DRY_RUN)
 
     if payload.available():
-        LOG.write(f"payload mode: {payload.mode()}"
-                  + (f" (building from repo at {payload.ROOT})"
-                     if payload.mode() == "dev" else ""))
+        LOG.write(f"payload: {payload.PAYLOAD_DIR}"
+                  + ("" if payload.realwings_available()
+                     else f" (no {realwings.PATCH_JSON} — the RealWings wingtip "
+                          f"patch will be skipped)"))
     else:
+        # ⚠ There is no longer a repo fallback that builds this on the fly (see
+        # installer/payload.py), so a dev checkout lands here too — hence the
+        # staging command in the message rather than just "build a release".
         LOG.write(f"no installable payload found (looked in {payload.PAYLOAD_DIR}); "
-                  f"install/uninstall will fail until a release is built", "ERROR")
+                  f"install/uninstall will fail until one is staged — "
+                  f"python build/make_release.py --payload-only", "ERROR")
 
     tui.enable_vt()
     tui.enter_alt_screen()

@@ -11,15 +11,15 @@ import io
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
-from installer import payload
+from installer import patch_acf, patch_acf_screens, patch_glow, payload, realwings
 from installer.constants import (
     AIRFRAMES, BACKUP_DIRNAME, GLOW_AIRFRAMES, INTERIOR_AIRFRAMES,
     INTERIOR_LIVERY_EXTS, INTERIOR_OBJ, INTERIOR_TEXTURES,
-    INTERIOR_TEXTURES_ADDED, MANIFEST_NAME,
-    PLUGIN_DIR_REL, PLUGIN_FOLDER, PLUGIN_USER_DIRS, REALWINGS_DIR, VERSION,
+    INTERIOR_TEXTURES_ADDED, MANIFEST_NAME, PANELFX_FILE,
+    PLUGIN_DIR_REL, PLUGIN_FOLDER, PLUGIN_USER_DIRS, REALWINGS_DIR,
+    SCREENS_AIRFRAMES, SCREENS_OBJ, VERSION,
 )
 
 
@@ -118,26 +118,23 @@ def _backup_once(src: Path, backup_dir: Path, manifest: dict, log, dry_run: bool
     return True
 
 
-# ─── RealWings live patch (delegates to the bundled DSL toolchain copy) ───────
-def _import_patch_realwings():
-    dsl = payload.dsl_dir()
-    if not dsl.is_dir():
-        raise ActionError(f"bundled RealWings patch toolchain missing: {dsl}")
-    if str(dsl) not in sys.path:
-        sys.path.insert(0, str(dsl))
-    import patch_realwings as P  # bundled copy — see payload.dsl_dir()
-    return P
-
-
+# ─── RealWings live patch (precomputed data + the in-package applier) ─────────
+# ⚠ NO DSL IMPORT HERE, AND NEVER AGAIN ONE. Every patcher below used to be
+# reached by putting a BUNDLED COPY of build/ on sys.path — which is what forced
+# a release to ship `payload/dsl/` (the whole DSL parser) and made install time
+# depend on the build toolchain. The appliers now live in this package and the
+# RealWings numbers are resolved at BUNDLE time into `realwings_patch.json`
+# (docs/installer_cpp_plan.md §2a). What is left is a plain function call.
 def _patch_realwings(rw_dir: Path, airframe: str, dry_run: bool, log) -> int:
-    P = _import_patch_realwings()
     buf = io.StringIO()
     n = 0
     with contextlib.redirect_stdout(buf):
         try:
-            # airframe selects per-airframe RealWings offset overrides in the DSL
-            n = P.run(rw_dir, airframe=airframe, dry=dry_run) or 0
-        except SystemExit as e:
+            # airframe selects per-airframe RealWings offset overrides, resolved
+            # out of the DSL at bundle time and carried in the patch data
+            n = realwings.run(rw_dir, payload.realwings_patch_data(),
+                              airframe=airframe, dry=dry_run) or 0
+        except realwings.RealWingsError as e:
             log.write(f"realwings patch: {e}", "WARN")
     for line in buf.getvalue().splitlines():
         log.write(f"[realwings] {line}")
@@ -145,13 +142,16 @@ def _patch_realwings(rw_dir: Path, airframe: str, dry_run: bool, log) -> int:
 
 
 def _patch_realwings_reverse(rw_dir: Path, dry_run: bool, log) -> int:
-    P = _import_patch_realwings()
+    """⚠ The reverse takes NO patch data. It only restores `.obj.bak` siblings, so
+    it must keep working against a bundle whose `realwings_patch.json` is missing
+    or a schema this installer can't read — otherwise a user could end up unable
+    to undo a patch they successfully applied with an older build."""
     buf = io.StringIO()
     n = 0
     with contextlib.redirect_stdout(buf):
         try:
-            n = P.run(rw_dir, dry=dry_run, reverse=True) or 0
-        except SystemExit as e:
+            n = realwings.run(rw_dir, {}, dry=dry_run, reverse=True) or 0
+        except realwings.RealWingsError as e:
             log.write(f"realwings reverse: {e}", "WARN")
     for line in buf.getvalue().splitlines():
         log.write(f"[realwings] {line}")
@@ -159,23 +159,12 @@ def _patch_realwings_reverse(rw_dir: Path, dry_run: bool, log) -> int:
 
 
 # ─── skin-glow live patch (repoint ToLiss's ExternalLightBrightnesses regions) ──
-def _import_patch_glow():
-    dsl = payload.dsl_dir()
-    if not dsl.is_dir():
-        raise ActionError(f"bundled skin-glow patch toolchain missing: {dsl}")
-    if str(dsl) not in sys.path:
-        sys.path.insert(0, str(dsl))
-    import patch_glow as G  # bundled copy — see payload.dsl_dir()
-    return G
-
-
 def _patch_glow(objects: Path, airframe: str, dry_run: bool, log) -> int:
-    G = _import_patch_glow()
     buf = io.StringIO()
     n = 0
     with contextlib.redirect_stdout(buf):
         try:
-            n = G.run(objects, airframe, dry=dry_run) or 0
+            n = patch_glow.run(objects, airframe, dry=dry_run) or 0
         except SystemExit as e:
             log.write(f"glow patch: {e}", "WARN")
     for line in buf.getvalue().splitlines():
@@ -183,17 +172,7 @@ def _patch_glow(objects: Path, airframe: str, dry_run: bool, log) -> int:
     return n
 
 
-# ─── .acf cockpit-spot patch (delegates to the bundled DSL toolchain copy) ────
-def _import_patch_acf():
-    dsl = payload.dsl_dir()
-    if not dsl.is_dir():
-        raise ActionError(f"bundled .acf patch toolchain missing: {dsl}")
-    if str(dsl) not in sys.path:
-        sys.path.insert(0, str(dsl))
-    import patch_acf as A  # bundled copy — see payload.dsl_dir()
-    return A
-
-
+# ─── .acf cockpit-spot patch ──────────────────────────────────────────────────
 def _patch_acf(aircraft_dir: Path, reverse: bool, dry_run: bool, log) -> list[str]:
     """Patch (or revert) the cockpit spot block in every .acf of an aircraft.
 
@@ -202,18 +181,45 @@ def _patch_acf(aircraft_dir: Path, reverse: bool, dry_run: bool, log) -> list[st
     a snapshot, so it composes with whatever else has edited the file since
     (Durantula rewrites 312 lines of the very same file). Restoring a whole-file
     backup here would silently undo those other mods."""
-    A = _import_patch_acf()
     buf = io.StringIO()
     touched = []
     with contextlib.redirect_stdout(buf):
         try:
-            touched = A.run(aircraft_dir, reverse=reverse, dry=dry_run) or []
+            touched = patch_acf.run(aircraft_dir, reverse=reverse, dry=dry_run) or []
         except SystemExit as e:
             log.write(f"acf patch: {e}", "WARN")
-        except A.AcfError as e:
+        except patch_acf.AcfError as e:
             log.write(f"acf patch: {e}", "WARN")
     for line in buf.getvalue().splitlines():
         log.write(f"[acf] {line}")
+    return [Path(p).name for p in touched]
+
+
+# ─── .acf screen-glow attachment ──────────────────────────────────────────────
+def _patch_acf_screens(aircraft_dir: Path, reverse: bool, dry_run: bool, log) -> list[str]:
+    """Attach (or detach) lights_screens.obj in every .acf of an aircraft.
+
+    ⚠ A REFUSAL HERE IS NOT A FAILED INSTALL. The patcher refuses when the file
+    has no `lights_inn.obj` attachment row to copy a frame from, because that row
+    is the only correct source for the OBJ origin (26.00 / 20.75 / 6.78 ft on the
+    A319 / A320 / A321) and guessing one mis-places every screen light. So the
+    AcfError is logged and the step reported as skipped, exactly like the cockpit
+    spot block's — the rest of the install is unaffected and the glow is simply
+    absent, which is its own honest degraded state.
+
+    Returns the .acf file NAMES touched, for the manifest."""
+    buf = io.StringIO()
+    touched = []
+    with contextlib.redirect_stdout(buf):
+        try:
+            touched = patch_acf_screens.run(aircraft_dir, reverse=reverse,
+                                            dry=dry_run) or []
+        except SystemExit as e:
+            log.write(f"acf screens: {e}", "WARN")
+        except patch_acf_screens.AcfError as e:
+            log.write(f"acf screens: {e}", "WARN")
+    for line in buf.getvalue().splitlines():
+        log.write(f"[acf screens] {line}")
     return [Path(p).name for p in touched]
 
 
@@ -372,6 +378,85 @@ def _install_interior(ac: dict, objects: Path, backup_dir: Path, manifest: dict,
     return steps
 
 
+def _install_screens(objects: Path, manifest: dict, log, dry_run: bool) -> list[str]:
+    """The display-glow install: one OBJ plus one `.acf` attachment.
+
+    ⚠ TWO STEPS, BOTH REVERSIBLE, NEITHER A BACKUP. `lights_screens.obj` has no
+    stock counterpart, so it is recorded in `screens.added[]` and DELETED on
+    uninstall — `_backup_once` would only log "nothing to back up" and leave it
+    orphaned. The attachment is a `.acf` edit reversed by the patcher rather than
+    by restoring a snapshot, so it composes with Durantula's rewrite of the very
+    same `_obja` table.
+
+    ⚠ THE OBJ ALONE DOES NOTHING. ToLiss neither ships nor references it, so an
+    install that wrote the file but failed to attach it is not a half-working
+    glow, it is no glow at all — which is why the attach result is reported as its
+    own step rather than folded into the OBJ's."""
+    aircraft_dir = objects.parent
+    steps: list[str] = []
+    screens = manifest.setdefault("screens", {})
+
+    target = objects / SCREENS_OBJ
+    added = screens.setdefault("added", [])
+    if SCREENS_OBJ not in added:
+        added.append(SCREENS_OBJ)
+    text = _inject_marker(payload.screens_obj_text(), VERSION, "screens")
+    log.write(f"writing {target} ({len(text)} bytes, dry_run={dry_run})")
+    if not dry_run:
+        _atomic_write_bytes(target, text.encode("utf-8"))
+    steps.append(f"Installed {SCREENS_OBJ} (display glow) → {objects.name}")
+
+    touched = _patch_acf_screens(aircraft_dir, reverse=False, dry_run=dry_run, log=log)
+    screens["acf_patched"] = touched
+    if touched:
+        steps.append(f"Attached the display-glow OBJ in {len(touched)} .acf file(s): "
+                     + ", ".join(touched))
+    else:
+        steps.append("! Could not attach the display-glow OBJ to any .acf — "
+                     "display glow will not draw (the rest of the install is fine)")
+
+    screens.update(installed=True, version=VERSION)
+    return steps
+
+
+def _install_plugin_data(plugin_root: Path, log, dry_run: bool) -> list[str]:
+    """Copy the plugin's runtime data files (`panelfx.txt`, `overlays/`) in.
+
+    ⚠ A SYMLINK IS LEFT ALONE. A dev keeps `panelfx.txt` symlinked at the repo
+    copy so that in-sim edits from a PHOTON_DEV build land in source control;
+    overwriting the link with a plain file during a test install would detach that
+    loop silently, and the next edit would go nowhere anyone looks. `is_symlink()`
+    is checked on the DESTINATION and does not follow, so this holds whether or
+    not the link resolves.
+
+    Overlay images are written by name, so a user's own images in the same folder
+    are neither overwritten nor removed."""
+    steps: list[str] = []
+    files = payload.plugin_data_files()
+    if not files:
+        log.write("no plugin data files in this build (no panelfx.txt/overlays) — skipped")
+        return steps
+    wrote, linked = 0, []
+    for rel, src in files:
+        dest = plugin_root / rel
+        if dest.is_symlink():
+            log.write(f"plugin data {rel} is a symlink — left as-is (dev setup)")
+            linked.append(rel)
+            continue
+        if _files_identical(dest, src):
+            continue
+        wrote += 1
+        if not dry_run:
+            _atomic_write_bytes(dest, src.read_bytes())
+    log.write(f"plugin data -> {plugin_root} ({wrote} written, {len(linked)} symlinked, "
+              f"{len(files)} total; dry_run={dry_run})")
+    steps.append(f"Installed Panel FX data ({PANELFX_FILE} + overlay images) → "
+                 f"Resources\\plugins\\{PLUGIN_FOLDER}")
+    for rel in linked:
+        steps.append(f"Kept your symlinked {rel} — not overwritten")
+    return steps
+
+
 def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
             interior: bool = False, progress=None) -> list[str]:
     """Install (or reinstall/upgrade) Photon onto one aircraft. Returns a list
@@ -379,7 +464,7 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
 
     `interior` opts into the cockpit-lighting mod, a separate axis from the
     exterior one (docs/interior_plan.md §5). It is False by default so every
-    existing caller keeps the exterior-only behaviour."""
+    existing caller keeps the exterior-only behavior."""
     if not payload.available():
         raise ActionError(f"bundled payload not found next to the installer "
                           f"({payload.PAYLOAD_DIR}) — this build is incomplete")
@@ -428,6 +513,11 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
                   f"(avoids locking a loaded .xpl)")
         steps.append(f"ToLiss Photon plugin already current [{', '.join(arches)}] — kept")
 
+    # The plugin's runtime data (Panel FX layers + overlay images) goes in right
+    # after the binary. Plain data files, so unlike the `.xpl` they are never
+    # locked by a running sim and this step cannot be the one that fails.
+    steps += _install_plugin_data(plugin_root, log, dry_run)
+
     target = objects / fname
     if _backup_once(target, backup_dir, manifest, log, dry_run):
         steps.append(f"Backed up original {fname} → {objects.name}\\{BACKUP_DIRNAME}")
@@ -448,8 +538,7 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
     # bookkeeping or .bak file. Gated on GLOW_AIRFRAMES so airframes that don't need
     # it never even load the patch toolchain (matching the RealWings block).
     if airframe in GLOW_AIRFRAMES:
-        glow = _import_patch_glow()
-        for f in glow.target_files(objects, airframe):
+        for f in patch_glow.target_files(objects, airframe):
             if _backup_once(f, backup_dir, manifest, log, dry_run):
                 steps.append(f"Backed up original {f.name} → {objects.name}\\{BACKUP_DIRNAME}")
         n = _patch_glow(objects, airframe, dry_run, log)
@@ -464,7 +553,15 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
     manifest.pop("realwings_patched", None)
     if wing == "realwings":
         rw_dir = objects / REALWINGS_DIR[airframe]
-        if rw_dir.is_dir():
+        if not payload.realwings_available():
+            # A bundle built before the DSL decoupling has no realwings_patch.json.
+            # Reported rather than raised: the base install is complete and correct,
+            # and the mod's baked lights simply keep their fixed colors.
+            log.write(f"no {realwings.PATCH_JSON} in this build — skipping the "
+                      f"RealWings wingtip patch", "WARN")
+            steps.append("! This build carries no RealWings patch data — the mod's "
+                         "own wingtip lights are left as they are")
+        elif rw_dir.is_dir():
             n = _patch_realwings(rw_dir, airframe, dry_run, log)
             manifest["realwings_dir"] = str(rw_dir)
             manifest["realwings_patched"] = True
@@ -485,6 +582,17 @@ def install(ac: dict, wing: str, xplane_root: Path, log, dry_run: bool = False,
             steps.append(f"Reversed previous RealWings patch ({n} file(s) restored)")
         else:
             log.write(f"previous realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
+
+    # Display glow — part of the BASE install on the A3xx, not an opt-in. It works
+    # on a stock cockpit (it attaches its own OBJ and reads ToLiss's own
+    # DUBrightness), so it does not belong behind the interior's opt-in; whether
+    # the glow is visible is a runtime choice on the plugin's Displays tab. Gated
+    # on SCREENS_AIRFRAMES for the same reason as the interior: the A330-900 is a
+    # different flight deck and these six positions are not its.
+    if airframe in SCREENS_AIRFRAMES and payload.screens_available():
+        steps += _install_screens(objects, manifest, log, dry_run)
+    elif airframe in SCREENS_AIRFRAMES:
+        log.write("no screen-glow OBJ in this build — skipping display glow", "WARN")
 
     # Interior — opt-in and independent of everything above. Gated on
     # INTERIOR_AIRFRAMES so the A330-900 can never pick it up (decision #14):
@@ -551,6 +659,28 @@ def uninstall(ac: dict, xplane_root: Path, log, dry_run: bool = False,
             log.write(f"realwings dir gone, nothing to reverse: {rw_dir}", "WARN")
             steps.append("RealWings mod folder no longer present — nothing to reverse")
 
+    # ── display glow ──────────────────────────────────────────────────────────
+    # Nothing here is in `backed_up`, because nothing here replaced a stock file.
+    # DETACH FIRST, then delete: a `.acf` still naming an OBJ that is gone is a
+    # missing-object warning on every load, whereas an attached-but-unused row
+    # left behind by the reverse order is invisible until the user wonders why
+    # their `.acf` differs from stock.
+    screens = manifest.get("screens") or {}
+    if screens.get("installed"):
+        aircraft_dir = objects.parent
+        if screens.get("acf_patched"):
+            touched = _patch_acf_screens(aircraft_dir, reverse=True,
+                                         dry_run=dry_run, log=log)
+            steps.append(f"Detached the display-glow OBJ from {len(touched)} .acf file(s)")
+        for name in screens.get("added", []):
+            f = objects / name
+            if f.is_file():
+                log.write(f"removing added display-glow file {f} (dry_run={dry_run})")
+                if not dry_run:
+                    with contextlib.suppress(OSError):
+                        f.unlink()
+                steps.append(f"Removed added file {name}")
+
     # ── interior ──────────────────────────────────────────────────────────────
     # The OBJ and the nine stock-replacing textures are already restored by the
     # backed_up loop above. What remains is what a backup can't express.
@@ -607,38 +737,73 @@ def uninstall(ac: dict, xplane_root: Path, log, dry_run: bool = False,
 
 
 def _remove_plugin_dir(plugin_root: Path, log, dry_run: bool) -> list[str]:
-    """Remove the shared plugin folder, KEEPING anything under PLUGIN_USER_DIRS.
+    """Remove the shared plugin folder, keeping anything under PLUGIN_USER_DIRS
+    that WE did not put there.
 
     ⚠ Not `rmtree(plugin_root)`. `overlays/` sits inside the plugin folder and is
-    the user's own drop folder for Panel FX images — hand-made PNGs with no
-    backup and no stock counterpart, which a blanket recursive delete would take
-    with it. `deploy.ps1` seeds that folder file-by-file for exactly this reason
-    ("one typo away from deleting them"); the installer's teardown is the other
-    half of the same rule.
+    both our starter-image drop and the user's own — hand-made PNGs with no backup
+    and no stock counterpart, which a blanket recursive delete would take with it.
+    `deploy.ps1` seeds that folder file-by-file for exactly this reason ("one typo
+    away from deleting them"); the installer's teardown is the other half.
+
+    So a user dir is pruned by NAME against `payload.plugin_data_files()` — the
+    same list install wrote — rather than kept wholesale. That is what stops an
+    uninstall from stranding six of our own images and a `panelfx.txt` in a folder
+    the user never asked for, while still never touching an image they made.
+    A symlinked `panelfx.txt` is left alone here too: it is a dev's link into a
+    repo, and deleting it deletes their link, not our copy.
 
     Everything Photon itself installed still goes: the per-arch `.xpl` files and
-    their folders, then the plugin root — but only once it is empty, so a kept
-    folder leaves a plugin dir holding nothing but the user's images."""
+    their folders, then the plugin root — but only once it is empty, so a folder
+    with user content in it leaves a plugin dir holding exactly that."""
     steps: list[str] = []
     if not plugin_root.is_dir():
         log.write(f"shared plugin already absent: {plugin_root}")
         steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
         return steps
 
-    # Only a user dir with something IN it is kept. An empty overlays/ holds
-    # nothing to lose, and stranding it would leave a plugin folder behind for
-    # every dev who ever ran deploy.ps1 against a since-emptied folder.
-    kept = [d for d in sorted(plugin_root.iterdir())
-            if d.is_dir() and d.name in PLUGIN_USER_DIRS and any(d.iterdir())]
+    # Our own files inside the user dirs, so they can be removed by name.
+    try:
+        ours = {rel for rel, _ in payload.plugin_data_files()}
+    except payload.PayloadError:
+        ours = set()      # a bundle that never shipped data removes none of it
+
+    def _is_ours(f: Path, rel: str) -> bool:
+        # ⚠ `is_symlink()` FIRST. `is_file()` follows the link, so a dev's link
+        # whose target has moved reads as "not a file" and would fall through to
+        # the delete — taking the link with it for the one reason it was pointing
+        # at something worth keeping.
+        return rel in ours and not f.is_symlink()
+
+    kept_dirs, kept_names = [], []
+    for d in sorted(plugin_root.iterdir()):
+        if not (d.is_dir() and d.name in PLUGIN_USER_DIRS):
+            continue
+        keep_here = False
+        for f in sorted(d.rglob("*")):
+            if not (f.is_file() or f.is_symlink()):
+                continue
+            rel = f"{d.name}/{f.relative_to(d).as_posix()}"
+            if _is_ours(f, rel):
+                if not dry_run:
+                    with contextlib.suppress(OSError):
+                        f.unlink()
+            else:
+                kept_names.append(rel)
+                keep_here = True
+        if keep_here:
+            kept_dirs.append(d)
+
     log.write(f"removing shared plugin {plugin_root} "
-              f"(keeping: {', '.join(d.name for d in kept) or 'nothing'}; "
-              f"dry_run={dry_run})")
+              f"(keeping: {', '.join(kept_names) or 'nothing'}; dry_run={dry_run})")
     if not dry_run:
         for entry in plugin_root.iterdir():
-            if entry in kept:
+            if entry in kept_dirs:
                 continue
+            if entry.is_symlink() and entry.name in ours:
+                continue                       # a dev's link into their repo
             with contextlib.suppress(OSError):
-                if entry.is_dir():
+                if entry.is_dir() and not entry.is_symlink():
                     shutil.rmtree(entry, ignore_errors=True)
                 else:
                     entry.unlink()
@@ -646,8 +811,8 @@ def _remove_plugin_dir(plugin_root: Path, log, dry_run: bool) -> list[str]:
             plugin_root.rmdir()  # only succeeds if nothing was kept
 
     steps.append("Removed shared ToLiss Photon plugin (no other airframe uses Photon)")
-    for d in kept:
-        steps.append(f"Kept your own {d.name}\\ folder in "
-                     f"Resources\\plugins\\{PLUGIN_FOLDER} — delete it by hand "
-                     f"if you don't want it")
+    for d in kept_dirs:
+        steps.append(f"Kept your own file(s) in {d.name}\\ under "
+                     f"Resources\\plugins\\{PLUGIN_FOLDER} — delete them by hand "
+                     f"if you don't want them")
     return steps

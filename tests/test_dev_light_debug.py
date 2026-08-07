@@ -286,7 +286,7 @@ class ReadCallbackTests(unittest.TestCase):
         self.assertEqual(p.DbgReadArray(0, out, 0, -1), mod.DebugParamCount)
         self.assertEqual(len(out), mod.DebugParamCount)
 
-    def test_partial_read_honours_offset(self):
+    def test_partial_read_honors_offset(self):
         mod, xp = load_plugin_module()
         p = _loaded(mod, xp)
         out = []
@@ -353,7 +353,7 @@ class BrightnessAndIdentifyTests(unittest.TestCase):
 
 class PositionOffsetTests(unittest.TestCase):
     """Position is live via three dataref-driven ANIM_trans per light, reading a
-    single shared array as an OFFSET in metres from the baked spot."""
+    single shared array as an OFFSET in meters from the baked spot."""
 
     def test_the_position_array_registers_and_sizes_itself(self):
         mod, xp = load_plugin_module()
@@ -366,7 +366,7 @@ class PositionOffsetTests(unittest.TestCase):
     def test_each_light_reads_its_own_three_elements(self):
         """`ANIM_trans` references [3n+axis], so the mapping from array index to
         (light, axis) has to be exactly this. Off by one and every light is nudged
-        by its neighbour's offset."""
+        by its neighbor's offset."""
         mod, xp = load_plugin_module()
         p = _loaded(mod, xp)
         p.dbgVals[0][mod.DebugPosSlot:] = [0.1, 0.2, 0.3]
@@ -708,7 +708,7 @@ class SlotProbeTests(unittest.TestCase):
         """Both are load-bearing. dir 0 0 0 means a probe of 5/6/7 introduces the ONLY
         direction present, so nothing has to be disentangled from it; cone 0 means that
         if slot 8 turns out to be a direction component after all it contributes zero,
-        keeping those probes clean. And `size` has to be metres-large or the pool lands
+        keeping those probes clean. And `size` has to be meters-large or the pool lands
         on the panel 2 cm away, which is what made cone changes look inert."""
         mod, _ = load_plugin_module()
         base = mod.DebugProbeBaseline
@@ -730,7 +730,7 @@ class SlotProbeTests(unittest.TestCase):
         got = p._dbg_params(0)
         self.assertEqual(got[5:8], [0.0, 1.0, 0.0], "orientation must not be applied")
         self.assertEqual(got[3], 1.0, "alpha must be exactly the baseline's")
-        self.assertEqual(got[:3], [1.0, 1.0, 1.0], "Mark must not recolour a probe")
+        self.assertEqual(got[:3], [1.0, 1.0, 1.0], "Mark must not recolor a probe")
 
     def test_every_other_light_goes_dark_while_probing(self):
         """Two lit lights and you cannot say which one moved."""
@@ -855,8 +855,8 @@ class PositionMarkerTests(unittest.TestCase):
                                        places=6, msg="basis not orthogonal for %s" % d)
 
     def test_a_short_dir_vector_still_draws_a_full_length_arrow(self):
-        """int_panelflood's `0 -0.15 -0.1` is 0.18 long. Using it unnormalised would
-        draw a stub five times shorter than its neighbours' — which the eye reads as a
+        """int_panelflood's `0 -0.15 -0.1` is 0.18 long. Using it unnormalized would
+        draw a stub five times shorter than its neighbors' — which the eye reads as a
         weaker light, not as a shorter vector. The arrow shows DIRECTION."""
         mod, xp = load_plugin_module()
         p = _loaded(mod, xp, lights=[
@@ -868,7 +868,7 @@ class PositionMarkerTests(unittest.TestCase):
                                p.dbgMarkerReach, places=6)
 
     def test_an_omnidirectional_light_has_no_tail_to_draw(self):
-        """dir 0 0 0 is omni (the dome). Normalising it would divide by zero; the dots
+        """dir 0 0 0 is omni (the dome). Normalizing it would divide by zero; the dots
         stack on the origin instead, which reads as "no direction" rather than crashing
         the accessor mid-frame."""
         mod, xp = load_plugin_module()
@@ -932,7 +932,7 @@ class PositionMarkerTests(unittest.TestCase):
     def test_the_gate_value_picks_out_exactly_one_light(self):
         """Walk the OBJ's own hide ranges for every (shown light, gate value) pair —
         binding a marker to the wrong light is invisible in-sim, because a marker on the
-        neighbour looks exactly like a light that is somewhere unexpected."""
+        neighbor looks exactly like a light that is somewhere unexpected."""
         mod, xp = load_plugin_module()
         p = _loaded(mod, xp)
         count = 8
@@ -952,7 +952,7 @@ class PositionMarkerTests(unittest.TestCase):
         self.assertEqual(len(out), mod.DebugParamCount)
         self.assertEqual(out[:4], list(mod.DebugMarkerOriginColor))
         self.assertEqual(out[4], p.dbgMarkerSize)
-        # One colour per role, all three visibly different: the marker is only useful
+        # One color per role, all three visibly different: the marker is only useful
         # if you can tell the light from its aim from its beam edge at a glance.
         seen = []
         for role in range(mod.DebugMarkerRoles):
@@ -978,7 +978,7 @@ class PositionMarkerTests(unittest.TestCase):
 
     def test_the_stride_comes_from_the_manifest_not_the_constant(self):
         """A debug OBJ baked its own dot count into its indices. Reading the constant
-        instead would address a neighbouring light's dots the moment the count changes,
+        instead would address a neighboring light's dots the moment the count changes,
         and every arrow would land on the wrong lamp."""
         mod, xp = load_plugin_module()
         p = _loaded(mod, xp)
@@ -991,7 +991,7 @@ class PositionMarkerTests(unittest.TestCase):
 
     def test_generator_and_plugin_agree_on_every_marker_constant(self):
         """Four numbers span the two files and each fails silently: a dot-count mismatch
-        drives a neighbour's marker, a dataref rename draws nothing at all."""
+        drives a neighbor's marker, a dataref rename draws nothing at all."""
         mod, _ = load_plugin_module()
         sys.path.insert(0, str(REPO / "build"))
         import build_objs as B
@@ -1215,7 +1215,7 @@ class OrientationCyclerTests(unittest.TestCase):
         self.assertEqual(p.dbgOrientPos, len(mod.DebugOrientations) - 1)
 
     def test_the_correction_fits_inside_the_keyframe_span(self):
-        """A permutation of a cockpit coordinate is metres, not centimetres. If the
+        """A permutation of a cockpit coordinate is meters, not centimeters. If the
         ANIM_trans span cannot express it X-Plane clamps, and a CORRECT hypothesis
         would show up as a wrong one — the one failure this search cannot survive."""
         mod, _ = load_plugin_module()

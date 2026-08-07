@@ -375,12 +375,13 @@ class PluginRewriteSkipTests(unittest.TestCase):
 
 
 class OverlayFolderTests(unittest.TestCase):
-    """`Resources/plugins/ToLissPhoton/overlays/` (PLUGIN_USER_DIRS) is the Panel
-    FX compositor's image drop folder — the user's files, not an installed
-    artifact. The installer never writes one (the compositor is PHOTON_DEV-only;
-    docs/fcu_tint_plan.md §4), so the whole contract here is: don't touch it, and
-    above all don't take it out with the plugin folder on uninstall. Those PNGs
-    are hand-made with no backup and no stock counterpart to restore."""
+    """`Resources/plugins/ToLissPhoton/overlays/` (PLUGIN_USER_DIRS) is BOTH the
+    Panel FX compositor's shipped starter images and the user's own drop folder.
+
+    Since the compositor ships, install writes our images into it — but by NAME,
+    which is what keeps the original contract intact in the same folder: a user's
+    hand-made PNG has no backup and no stock counterpart, so install must not
+    overwrite it and uninstall must not take it out with the plugin folder."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_overlay_"))
@@ -395,9 +396,12 @@ class OverlayFolderTests(unittest.TestCase):
         self.overlay.parent.mkdir(parents=True, exist_ok=True)
         self.overlay.write_bytes(b"\x89PNG\r\n\x1a\n fake user overlay\n")
 
-    def test_install_does_not_create_an_overlays_folder(self):
+    def test_install_writes_the_shipped_overlays_and_panelfx(self):
         actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
-        self.assertFalse((self.plugin_root / "overlays").exists())
+        for rel, src in payload.plugin_data_files():
+            dest = self.plugin_root / rel
+            self.assertTrue(dest.is_file(), f"{rel} not installed")
+            self.assertEqual(dest.read_bytes(), src.read_bytes(), rel)
 
     def test_install_leaves_an_existing_overlay_untouched(self):
         self._seed_overlay()
@@ -438,6 +442,65 @@ class OverlayFolderTests(unittest.TestCase):
                           remove_plugin=True)
         self.assertTrue(self.overlay.is_file())
         self.assertTrue((self.plugin_root / "win_x64" / "ToLissPhoton.xpl").is_file())
+
+
+class PanelFxDataTests(unittest.TestCase):
+    """`panelfx.txt` in the plugin folder — the authored Panel FX look.
+
+    ⚠ A DEV MACHINE SYMLINKS IT AT THE REPO COPY so that in-sim edits from a
+    PHOTON_DEV build land in source control. A test install that replaced the link
+    with a plain file would end that round trip silently: every later edit would
+    be written to a file nobody reads, and the repo copy would look like it had
+    simply stopped changing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_fxdata_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fa = FakeAircraft(self.tmp)
+        self.log = _NullLog()
+        self.plugin_root = self.fa.xplane_root / "Resources" / "plugins" / "ToLissPhoton"
+        self.fx = self.plugin_root / "panelfx.txt"
+
+    def _symlink_fx(self) -> Path:
+        """Point panelfx.txt at a stand-in for the repo copy. Skips where the OS
+        refuses — Windows needs Developer Mode or elevation for a file symlink,
+        and the behavior under test is real either way."""
+        target = self.tmp / "repo_panelfx.txt"
+        target.write_text("# the dev's own copy\nenabled 1\n", encoding="utf-8")
+        self.fx.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fx.symlink_to(target)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot create a symlink here: {e}")
+        return target
+
+    def test_install_writes_panelfx_into_the_plugin_folder(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(self.fx.is_file())
+        self.assertIn("layer ", self.fx.read_text(encoding="utf-8"))
+
+    def test_install_leaves_a_symlinked_panelfx_alone(self):
+        target = self._symlink_fx()
+        before = target.read_text(encoding="utf-8")
+        steps = actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        self.assertTrue(self.fx.is_symlink(), "the symlink was replaced by a file")
+        self.assertEqual(target.read_text(encoding="utf-8"), before,
+                         "the install wrote through the link into the repo copy")
+        self.assertTrue(any("symlink" in s for s in steps),
+                        f"the install did not report the kept symlink: {steps}")
+
+    def test_uninstall_leaves_a_symlinked_panelfx_alone(self):
+        target = self._symlink_fx()
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log,
+                          remove_plugin=True)
+        self.assertTrue(target.is_file(), "uninstall deleted the repo copy")
+
+    def test_uninstall_removes_our_own_panelfx(self):
+        actions.install(self.fa.ac, "stock", self.fa.xplane_root, self.log)
+        actions.uninstall(self.fa.ac, self.fa.xplane_root, self.log,
+                          remove_plugin=True)
+        self.assertFalse(self.plugin_root.exists())
 
 
 class PluginPayloadExclusionTests(unittest.TestCase):

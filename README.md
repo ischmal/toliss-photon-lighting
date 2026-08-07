@@ -90,9 +90,13 @@ files into one that can be switched in-sim, the same way the exterior lights wor
 * **LED**: cool white domes and flood, warm white on the smaller lamps.
 * **Auto**: follows whatever era the exterior profile resolved to.
 * **Custom**: set each group independently — Dome Lights, Map Lights, Main Panel Flood,
-  Pedestal & Tables, and Console Lights. The dome offers Fluorescent or LED rather than
-  the three looks: a real A320 dome light is a fluorescent fitting, so it doesn't follow
-  the halogen era of the panels below it.
+  Pedestal & Tables, and Console Lights. Every group offers all three looks.
+
+There is also a **Reduced light count** option (Cockpit tab, or the Cockpit sub-menu). The
+main panel floods are drawn as a stack of two or three overlapping lights each, which is
+what gives them their soft edge; this replaces each stack with one wider, brighter light —
+same colours, same knobs, six fewer lights for your GPU. Worth a try if the cockpit costs
+you frames.
 
 Installing it also replaces a set of cockpit textures and adjusts the aircraft's `.acf`
 files so the sim's three built-in cockpit spotlights follow the same switch. Uninstalling

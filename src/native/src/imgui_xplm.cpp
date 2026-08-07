@@ -10,7 +10,7 @@
 //
 //  * TEXTURES COME FROM XPLMGenerateTextureNumbers, not glGenTextures, and are
 //    bound with XPLMBindTexture2d. X-Plane caches texture-binding state; a raw
-//    glBindTexture desynchronises that cache and the corruption shows up in
+//    glBindTexture desynchronizes that cache and the corruption shows up in
 //    unrelated rendering later in the frame, which is a miserable thing to
 //    debug.
 //  * THERE IS NO EVENT LOOP. Input arrives as XPLM window callbacks, and the
@@ -40,6 +40,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "XPLMDataAccess.h"   // the boxel->pixel transform, see ReadTransform
 #include "XPLMGraphics.h"
@@ -100,6 +101,252 @@ void AssertFailed(const char* expr, const char* file, int line) {
 // metric together, which is the only way to scale that does not leave padding
 // and text disagreeing.
 static const float kUiScale = 1.0f;
+
+// ---- the UI font ------------------------------------------------------------
+//
+// Roboto, at 16 px, from X-PLANE'S OWN Resources/fonts/. ⚠ That is the whole
+// reason this is three lines and not a vendored binary: the sim ships
+// Roboto-Regular.ttf (alongside its licence) and has since XP11, so there is no
+// new file in the payload, no installer row, no licence to redistribute and
+// nothing an upgrade can leave stale. ImGui's built-in font is ProggyClean at
+// 13 px, a bitmap face frozen at one size — legible, and visibly not the same
+// century as the rest of this cockpit.
+//
+// ⚠ FAILURE IS SILENT AND FINE, deliberately. If the file is missing (a trimmed
+// install, a future sim reorganising its folders) AddFontFromFileTTF returns
+// null, ImGui falls back to the built-in font on its own, and the UI comes up
+// looking slightly worse rather than not at all. A missing typeface is not worth
+// a window that does not open, so this asserts nothing and only logs.
+//
+// The size is chosen for a TTF, not converted from ProggyClean's 13: a
+// hand-hinted bitmap face and an antialiased outline one do not read the same at
+// equal pixel heights, and 16 is where Roboto stops looking thin against the
+// dark theme. It is rasterised at kUiScale so the atlas is sharp rather than a
+// small atlas magnified by FontGlobalScale.
+static const char* const kUiFontFile = "Resources/fonts/Roboto-Regular.ttf";
+static const float       kUiFontSize = 16.0f;
+
+// Returns true when the atlas holds a real font, i.e. when FontGlobalScale must
+// NOT also be applied (the size below already carries the scale).
+static bool LoadUiFont(ImGuiIO& io) {
+    char root[512] = {0};
+    XPLMGetSystemPath(root);
+    if (!root[0]) return false;
+
+    // XPLM_USE_NATIVE_PATHS is on (see XPluginStart), so this is a native path
+    // with a trailing separator, and a forward slash appended to it is accepted
+    // by every platform's fopen — including Windows, where the two separators
+    // mix freely.
+    std::string path(root);
+    if (!path.empty() && path.back() != '/' && path.back() != '\\') path += '/';
+    path += kUiFontFile;
+
+    if (!io.Fonts->AddFontFromFileTTF(path.c_str(), kUiFontSize * kUiScale)) {
+        char buf[640];
+        std::snprintf(buf, sizeof(buf),
+                      "imgui: '%s' would not load - falling back to the built-in "
+                      "font. Cosmetic only.", path.c_str());
+        PhotonImgui::Log(buf);
+        return false;
+    }
+    if (PhotonImgui::Diagnostics()) {
+        char buf[640];
+        std::snprintf(buf, sizeof(buf), "imgui: UI font = %s at %.0f px",
+                      path.c_str(), kUiFontSize * kUiScale);
+        PhotonImgui::Log(buf);
+    }
+    return true;
+}
+
+// Padding inside the ROOT window, in ImGui units. Applied there and nowhere else
+// — see Draw().
+//
+// ⚠ ZERO ON PURPOSE, and it is what lets the panel meet the tab bar. The tab
+// bar's 1 px underline is drawn across the root's content region, so any padding
+// here insets the panel below it from that line by the same amount on three
+// sides and leaves the fill floating inside the window instead of being the page
+// the tabs sit on. The inset the content still needs is the PANEL's own
+// (UiBeginPanel's ImGuiChildFlags_AlwaysUseWindowPadding), which is inside the
+// fill rather than around it.
+//
+// X-Plane's own round-rect frame sits outside all of this and is not ours to
+// shrink, so the visible margin that remains is that decoration.
+static const float kRootPadding = 0.0f;
+
+// ⚠ EMPTY SPACE ABOVE THE PANEL, not padding inside it — the root window is moved
+// DOWN by this much and shortened to match (see Draw()), so the strip is X-Plane's
+// own window showing through rather than our background.
+//
+// That distinction is the whole point. The panel is opaque, and X-Plane draws its
+// "un-pop out" button in the top right corner of a popped-out window: padding
+// would leave that button underneath our fill, where it is invisible and looks
+// broken. Only vacating the strip uncovers it.
+static const float kRootTopMargin = 20.0f;
+
+// ---- the Photon theme --------------------------------------------------------
+//
+// ImGui's dark theme is a blue-accented gray, but its blue (0.26 0.59 0.98) is
+// its own — next to X-Plane's chrome it reads as a different application's
+// window sitting inside the simulator. So every accent is derived from ONE
+// color: #1678b5, the blue X-Plane uses in its own UI.
+//
+// ⚠ THE VARIANTS ARE DERIVED, NOT LISTED. The dark theme spends four or five
+// shades of its accent (rest / hovered / active, plus faded fills), and hand
+// picking each one is how a palette drifts into looking like several palettes.
+// Lighten/Darken/Fade below are the only way a shade is made here, so re-tuning
+// the whole UI is editing kUiBlue and kUiBlueDark and nothing else.
+//
+// There are exactly TWO stated colors — the accent and its dark variant — because
+// mixing toward black is not what the dark end of this ramp wants (see
+// kUiBlueDark). Every other shade in the theme comes off one of those two.
+//
+// Lighten mixes toward white and Darken toward black, both in ImGui's straight
+// (non-linear) color space — the same space the stock themes are written in, so
+// these sit correctly against the widgets that are not accented.
+static ImVec4 UiLighten(const ImVec4& c, float k) {
+    return ImVec4(c.x + (1.0f - c.x) * k, c.y + (1.0f - c.y) * k,
+                  c.z + (1.0f - c.z) * k, c.w);
+}
+static ImVec4 UiDarken(const ImVec4& c, float k) {
+    return ImVec4(c.x * (1.0f - k), c.y * (1.0f - k), c.z * (1.0f - k), c.w);
+}
+static ImVec4 UiFade(const ImVec4& c, float a) { return ImVec4(c.x, c.y, c.z, a); }
+
+// #1678b5 — X-Plane's UI blue. 22/255, 120/255, 181/255.
+static const ImVec4 kUiBlue = ImVec4(0.086f, 0.471f, 0.710f, 1.00f);
+
+// #285A79 — the accent's dark variant. 40/255, 90/255, 121/255.
+//
+// ⚠ STATED, not derived, and it is the one exception to the rule above. It is
+// the same hue (~202°) taken down in BOTH value and saturation; UiDarken only
+// does the first, because mixing toward black scales all three channels equally
+// and so holds saturation the whole way down. The difference is what a surface
+// sitting further back looks like versus a more intense blue that happens to be
+// darker. `light` is still derived — mixing toward white is the correct move for
+// the near end of the ramp.
+static const ImVec4 kUiBlueDark = ImVec4(0.157f, 0.353f, 0.475f, 1.00f);
+
+// #23282e — the panel fill. 35/255, 40/255, 46/255, and OPAQUE: it is a surface
+// the UI sits on, not a tint over the cockpit, and text over a bright daytime
+// windscreen is unreadable through anything less.
+//
+// ⚠ IT IS NOT ImGuiCol_WindowBg. The root window is TRANSPARENT and this is
+// painted by the content itself, one panel per tab (UiBeginPanel in plugin.cpp).
+// On the root it filled the strip behind the tab bar too, so the tabs sat on a
+// slab instead of on X-Plane's own window — the tab row is chrome, and chrome
+// belongs to the host window.
+//
+// ⚠ It does not reach the top of the X-Plane window either. `kRootTopMargin`
+// moves the root down so X-Plane's own decoration — and the "un-pop out" button
+// it draws in the top right corner of a popped-out window — is not painted over.
+// Widening WindowPadding instead would look identical inside the panel and leave
+// that button buried.
+static const ImVec4 kUiPanelBg = ImVec4(0.137f, 0.157f, 0.180f, 1.00f);
+
+namespace PhotonImgui {
+ImVec4 PanelBg() { return kUiPanelBg; }
+// The accent brought forward — the theme's "light" shade, and the value
+// ImGuiCol_CheckMark carried before it went white. Exported so the one call site
+// that still wants it (UiRadioButton) shares this expression instead of copying
+// the number, which is how a derived palette acquires a hand-picked outlier.
+ImVec4 AccentLight() { return UiLighten(kUiBlue, 0.25f); }
+}
+
+static void ApplyPhotonStyle() {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    ImVec4* c = s.Colors;
+
+    const ImVec4  light = PhotonImgui::AccentLight();
+    const ImVec4& dark  = kUiBlueDark;
+
+    // ---- metrics ----
+    // ⚠ NO WINDOW BORDER. With ImGuiCol_WindowBg transparent, a border draws a
+    // 1 px rectangle around empty space — it outlines the root's bounds rather
+    // than anything the eye reads as a panel, and it doubles up with X-Plane's
+    // own frame just outside it. The panel fill is the edge now.
+    s.WindowBorderSize = 0.0f;
+    // Just enough to take the corner off a frame without reading as a pill.
+    s.FrameRounding    = 2.0f;
+    s.GrabRounding     = 1.0f;
+    // ⚠ FramePadding is deliberately LEFT AT ImGui's default (4/3). It is a size
+    // rather than a margin — frame height is `FontSize + FramePadding.y * 2` — so
+    // raising it moves the height of every button, combo, tab and radio circle,
+    // the row pitch of both category grids, and the top of every pane under the
+    // tab bar. Tried at 6/4 and reverted (2026-08-03): too much moves for what it
+    // buys.
+
+    // See kUiPanelBg: the surface is drawn per pane, not here.
+    c[ImGuiCol_WindowBg]              = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    c[ImGuiCol_FrameBg]               = UiFade(dark, 0.55f);
+    c[ImGuiCol_FrameBgHovered]        = UiFade(kUiBlue, 0.55f);
+    c[ImGuiCol_FrameBgActive]         = UiFade(kUiBlue, 0.80f);
+
+    c[ImGuiCol_TitleBg]               = UiFade(dark, 0.85f);
+    c[ImGuiCol_TitleBgActive]         = dark;
+    c[ImGuiCol_TitleBgCollapsed]      = UiFade(dark, 0.55f);
+    c[ImGuiCol_MenuBarBg]             = UiFade(dark, 0.70f);
+
+    c[ImGuiCol_ScrollbarGrab]         = UiFade(kUiBlue, 0.55f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = UiFade(kUiBlue, 0.80f);
+    c[ImGuiCol_ScrollbarGrabActive]   = light;
+
+    // PURE WHITE, not `light`. The tick is drawn over ImGuiCol_CheckboxSelectedBg,
+    // which is the accent at full strength — an accent-derived mark on it is one
+    // blue on another and the tick has to be looked for. White is the only value
+    // that reads instantly at tick size.
+    //
+    // ⚠ ImGui draws the RADIO DOT with this same color; there is no separate slot
+    // for it. So the axis grids' dots turn white too, which is deliberate here but
+    // is worth knowing before this is tuned again.
+    c[ImGuiCol_CheckMark]             = ImVec4(1.0f, 1.0f, 1.0f, 1.00f);
+    c[ImGuiCol_CheckboxSelectedBg]    = kUiBlue;
+    c[ImGuiCol_SliderGrab]            = kUiBlue;
+    c[ImGuiCol_SliderGrabActive]      = light;
+
+    c[ImGuiCol_Button]                = UiFade(kUiBlue, 0.55f);
+    c[ImGuiCol_ButtonHovered]         = kUiBlue;
+    c[ImGuiCol_ButtonActive]          = light;
+
+    c[ImGuiCol_Header]                = UiFade(kUiBlue, 0.45f);
+    c[ImGuiCol_HeaderHovered]         = UiFade(kUiBlue, 0.75f);
+    c[ImGuiCol_HeaderActive]          = kUiBlue;
+
+    c[ImGuiCol_SeparatorHovered]      = UiFade(kUiBlue, 0.80f);
+    c[ImGuiCol_SeparatorActive]       = light;
+
+    c[ImGuiCol_ResizeGrip]            = UiFade(kUiBlue, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]     = UiFade(kUiBlue, 0.65f);
+    c[ImGuiCol_ResizeGripActive]      = UiFade(light, 0.90f);
+
+    c[ImGuiCol_InputTextCursor]       = light;
+
+    // ⚠ AN UNSELECTED TAB DRAWS NO FILL AT ALL — the one place a color is
+    // deliberately absent rather than merely dark. A tab bar reads as one
+    // selected thing among several unselected ones, and any fill on the others
+    // makes the reader compare two shades to find which is which; with nothing
+    // behind them the only painted tab in the bar is the one you are on, and the
+    // rest are labels. Note this is TRANSPARENT, not the panel color: the root
+    // window is transparent too (see kUiPanelBg), so the strip shows the cockpit
+    // through it and the tabs sit on X-Plane's own window.
+    c[ImGuiCol_Tab]                   = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_TabHovered]            = UiFade(kUiBlue, 0.80f);
+    c[ImGuiCol_TabSelected]           = kUiBlue;
+    c[ImGuiCol_TabSelectedOverline]   = light;
+    // Unfocused variants. Effectively dead as things stand — BeginTabBar sets
+    // ImGuiTabBarFlags_IsFocused unconditionally — but wrong here would surface
+    // the day that changes upstream.
+    c[ImGuiCol_TabDimmed]             = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_TabDimmedSelected]     = UiFade(kUiBlue, 0.65f);
+    c[ImGuiCol_TabDimmedSelectedOverline] = UiFade(light, 0.50f);
+
+    c[ImGuiCol_TableHeaderBg]         = UiFade(dark, 0.70f);
+    c[ImGuiCol_TextLink]              = light;
+    c[ImGuiCol_TextSelectedBg]        = UiFade(kUiBlue, 0.45f);
+    c[ImGuiCol_DragDropTarget]        = light;
+    c[ImGuiCol_NavCursor]             = kUiBlue;
+}
 
 namespace {
 
@@ -207,10 +454,20 @@ ImguiWindow::ImguiWindow(int width, int height, const char* title) {
     io.BackendPlatformName = "photon-xplm";
     io.BackendRendererName = "photon-gl-immediate";
 
-    ImGui::StyleColorsDark();
+    ApplyPhotonStyle();
+
+    // ⚠ The font is added HERE, before anything asks the atlas for its pixels.
+    // Adding one after the first GetTexDataAsRGBA32 rebuilds the atlas behind an
+    // already-uploaded texture, and the UI then draws every glyph at the wrong
+    // place in an image nothing re-uploads.
+    const bool ttf = LoadUiFont(io);
+
     if (kUiScale != 1.0f) {
         ImGui::GetStyle().ScaleAllSizes(kUiScale);
-        io.FontGlobalScale = kUiScale;
+        // ⚠ Only when the built-in font is in force. A TTF is rasterised at
+        // kUiFontSize * kUiScale already, and multiplying by the scale a second
+        // time here would double it.
+        if (!ttf) io.FontGlobalScale = kUiScale;
     }
 
     // ⚠ The font atlas is NOT uploaded here. glTexImage2D needs a current GL
@@ -218,7 +475,7 @@ ImguiWindow::ImguiWindow(int width, int height, const char* title) {
     // handler, neither of which is guaranteed to have one. Draw() does it on the
     // first frame instead, where a context provably exists.
 
-    // Centre on the main screen. Boxels, and the origin is bottom-left.
+    // Center on the main screen. Boxels, and the origin is bottom-left.
     int sl = 0, st = 0, sr = 0, sb = 0;
     XPLMGetScreenBoundsGlobal(&sl, &st, &sr, &sb);
     const int cx = (sl + sr) / 2, cy = (sb + st) / 2;
@@ -386,17 +643,34 @@ void ImguiWindow::Draw() {
 
     ImGui::NewFrame();
 
-    // One ImGui window filling the client area. X-Plane already drew the frame
-    // and title bar, so this one carries no chrome of its own — the alternative
-    // is two nested title bars, one of which does not respond to dragging.
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    // One ImGui window filling the client area, less the top margin. X-Plane
+    // already drew the frame and title bar, so this one carries no chrome of its
+    // own — the alternative is two nested title bars, one of which does not
+    // respond to dragging.
+    //
+    // ⚠ The inset between the content and the X-Plane window edge is set HERE and
+    // nowhere else. It is stated explicitly rather than inherited from
+    // ImGuiStyle::WindowPadding, because that style value is also what every
+    // child window, popup and tooltip in the UI uses — changing it there to move
+    // this one margin would reflow every panel in the Dev window too.
+    //
+    // ⚠ The top margin MOVES the window rather than padding it: see
+    // kRootTopMargin. io.DisplaySize is left alone — it is the mouse and clip
+    // space for the whole client area, and shrinking it would offset every hit
+    // test by 20 px while everything still looked right.
+    const float top = kRootTopMargin < h ? kRootTopMargin : 0.0f;
+    ImGui::SetNextWindowPos(ImVec2(0.0f, top));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y - top));
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
                                  | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse
                                  | ImGuiWindowFlags_NoBringToFrontOnFocus
                                  | ImGuiWindowFlags_NoSavedSettings;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kRootPadding, kRootPadding));
     if (ImGui::Begin("##photon_root", nullptr, flags)) {
-        if (BuildUi) BuildUi();
+        ImGui::PopStyleVar();          // pop INSIDE, so the tabs and panels the UI
+        if (BuildUi) BuildUi();        // builds get the normal style, not this one
+    } else {
+        ImGui::PopStyleVar();
     }
     ImGui::End();
 
@@ -448,7 +722,7 @@ bool ImguiWindow::WindowPixelRect(const Transform& t, float out[4]) const {
     MapPoint(t.mv, t.pr, t.vp, (float)mRight, (float)mTop,    &bx, &by);
     if (!Finite(ax) || !Finite(ay) || !Finite(bx) || !Finite(by)) return false;
 
-    // ⚠ Normalise rather than assume an ordering. Whether boxel-y-up comes out
+    // ⚠ Normalize rather than assume an ordering. Whether boxel-y-up comes out
     // pixel-y-up depends on the projection, and a negative width or height is a
     // GL error that silently drops every draw.
     out[0] = ax < bx ? ax : bx;
@@ -640,7 +914,7 @@ void ImguiWindow::RenderDrawData(ImDrawData* data) {
                 MapPoint(xf.mv, xf.pr, xf.vp, (float)mLeft + cmd.ClipRect.z,
                          (float)mTop - cmd.ClipRect.y, &bx, &by);
 
-                // Normalised, then held inside the window's own pixel rect: the
+                // Normalized, then held inside the window's own pixel rect: the
                 // root clip rect is the full client area, so a rounding error
                 // must not let a command paint over X-Plane's window frame.
                 float x0 = ax < bx ? ax : bx, x1 = ax < bx ? bx : ax;

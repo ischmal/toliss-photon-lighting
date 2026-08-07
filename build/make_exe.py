@@ -9,7 +9,8 @@ extracts to one tidy folder:
     ToLissPhoton-Installer-v<VER>-<Windows|macOS|Linux>[.zip|.tar.gz]
       └ ToLissPhoton-Installer-v<VER>-<OS>/
           ToLissPhoton-Installer-v<VER>-<OS>[.exe]   the installer
-          data/                                       objs/ + plugin/<arch> + dsl/
+          data/                objs/ + textures/ + plugin/<arch> + plugindata/
+                               + realwings_patch.json
           README.txt
 
 The binary is *loose* (no embedded payload); at runtime ``installer/payload.py``

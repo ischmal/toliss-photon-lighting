@@ -19,7 +19,7 @@
 
 class ImguiWindow {
 public:
-    // Size is in boxels. The window is created hidden and centred on the screen.
+    // Size is in boxels. The window is created hidden and centerd on the screen.
     ImguiWindow(int width, int height, const char* title);
     ~ImguiWindow();
 
@@ -88,6 +88,16 @@ private:
 };
 
 namespace PhotonImgui {
+// The Photon panel fill, #23282e. The theme leaves ImGuiCol_WindowBg
+// TRANSPARENT — the tab row is X-Plane's window showing through — so every pane
+// that wants a surface under it paints one with this. See UiBeginPanel in
+// plugin.cpp, which is the only thing that should need it.
+ImVec4 PanelBg();
+
+// The accent's light shade — what ImGuiCol_CheckMark used to be, before the
+// checkbox tick went pure white. Only UiRadioButton wants it; see there.
+ImVec4 AccentLight();
+
 // The backend has no access to plugin.cpp's Log(); this hands it one. Safe to
 // leave unset — messages are then dropped rather than crashing.
 void SetLogger(void (*fn)(const char*));

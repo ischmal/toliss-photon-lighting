@@ -345,7 +345,7 @@ def detect_aircraft(xplane_root, log=None) -> list[dict]:
         airframe = _identify_airframe(folder)
         if airframe is None:
             if log:
-                log.write(f"skipping non-ToLiss/unrecognised aircraft: {folder}", "DEBUG")
+                log.write(f"skipping non-ToLiss/unrecognized aircraft: {folder}", "DEBUG")
             continue
         _glob, _fld, _fname, pretty = AIRFRAMES[airframe]
         objects = folder / "objects"

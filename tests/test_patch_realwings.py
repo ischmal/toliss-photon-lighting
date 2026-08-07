@@ -217,6 +217,98 @@ class PatchFileTests(unittest.TestCase):
         self.assertIn("-2.9584354", p.read_text(encoding="utf-8"))
 
 
+class BundleTimeResolutionTests(unittest.TestCase):
+    """⚠ THE SPLIT'S CORRECTNESS NET (docs/installer_cpp_plan.md §2a).
+
+    The patcher used to resolve every emitted parameter out of the DSL at INSTALL
+    time. It now resolves them at BUNDLE time into `realwings_patch.json` and the
+    installer only applies them. The whole risk of that move is that the two ends
+    disagree — a value that survives a Python dict but not a JSON round trip, or a
+    dimension (side, wingtip, airframe) that the resolver keys one way and the
+    applier looks up another. Either would show up as wingtip lights that are
+    subtly wrong in a shipped bundle and perfect on the dev machine, which is the
+    hardest possible place to notice it.
+
+    So: resolve, serialize, reload, apply — and require the bytes to match the
+    live-DSL path exactly."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="photon_test_rwsplit_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.cfg = B.load_config(wing="realwings")
+        # A non-zero, side- and wingtip-varying offset, so the placement
+        # correction is actually exercised rather than passing by being null.
+        fx = B.resolve_airframe(self.cfg, "a320")["fixtures"]["wing_nav"]
+        fx["offset"] = dict(FENCE_ONLY)
+
+    def _write(self, name):
+        p = self.tmp / name
+        p.write_text(OBJ_TEMPLATE, encoding="utf-8")
+        return p
+
+    def test_json_round_trip_patches_byte_for_byte(self):
+        import json
+
+        from installer import realwings as RW
+
+        data = P.resolve_patch_data(self.cfg)
+        reloaded = json.loads(json.dumps(data))
+
+        for name in ("Main.obj", "MainNEO.obj"):
+            live, bundled = self._write(f"live_{name}"), self._write(f"bun_{name}")
+            with contextlib.redirect_stdout(io.StringIO()):
+                RW.patch_file(live, data, airframe="a320")
+                RW.patch_file(bundled, reloaded, airframe="a320")
+            self.assertEqual(bundled.read_text(encoding="utf-8"),
+                             live.read_text(encoding="utf-8"), name)
+            # and it is a real patch, not two identically-unpatched files
+            self.assertIn(P.MARKER, live.read_text(encoding="utf-8"))
+
+    def test_every_dimension_is_resolved(self):
+        """A record for every (airframe, class, wingtip, side). A gap would only
+        surface when a user happened to own that combination."""
+        data = P.resolve_patch_data(self.cfg)
+        self.assertIn(P.SOURCE_AIRFRAME, data["airframes"])
+        for af, per_class in data["airframes"].items():
+            self.assertEqual(sorted(per_class), sorted(P.SOURCE), af)
+            for cls, by_wingtip in per_class.items():
+                self.assertEqual(sorted(by_wingtip), sorted(P.WINGTIPS))
+                for wingtip, by_side in by_wingtip.items():
+                    self.assertEqual(sorted(by_side), sorted(P.SIDES))
+                    for side, rec in by_side.items():
+                        where = f"{af}/{cls}/{wingtip}/{side}"
+                        for field in ("category", "class", "index", "dir",
+                                      "branches"):
+                            self.assertIn(field, rec, where)
+                        self.assertEqual(len(rec["branches"]), 2, where)
+
+    def test_a339_is_absent_because_it_has_no_wing_mods(self):
+        """Same gate as the OBJ payload's (SUPPORTED_WINGS). A339 records would be
+        resolved off the A320 fixtures and mean nothing."""
+        self.assertNotIn("a339", P.resolve_patch_data(self.cfg)["airframes"])
+
+    def test_the_generated_file_says_it_is_generated(self):
+        """⚠ The one thing standing between this artifact and someone tuning a
+        light in it — which would be overwritten on the next build and, unlike a
+        DSL edit, reach nothing else."""
+        dest = self.tmp / "realwings_patch.json"
+        P.write_patch_data(dest, self.cfg)
+        text = dest.read_text(encoding="utf-8")
+        self.assertIn("DO NOT HAND-EDIT", text)
+        self.assertIn("lights.layout.phdsl", text)
+
+    def test_an_unknown_airframe_falls_back_to_the_source_airframe(self):
+        """`patch-realwings --root` without `--airframe` passes "?"; the applier
+        must resolve it the way the DSL resolver did, not KeyError."""
+        from installer import realwings as RW
+
+        data = P.resolve_patch_data(self.cfg)
+        rec = RW.record_for(data, "?", "airplane_nav_left_size", "fence", "port")
+        self.assertEqual(
+            rec, RW.record_for(data, P.SOURCE_AIRFRAME,
+                               "airplane_nav_left_size", "fence", "port"))
+
+
 class EmitterGuardTests(unittest.TestCase):
     def test_wingtip_offset_on_emitted_fixture_is_rejected(self):
         # @fence/@sharklet offsets are patcher-only; on a fixture the emitter

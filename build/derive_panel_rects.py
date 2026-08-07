@@ -112,7 +112,7 @@ def islands(verts, idx, tris):
 
 
 def in_plane_size(vs, n):
-    """(width, height) measured IN THE FACE'S OWN PLANE, metres.
+    """(width, height) measured IN THE FACE'S OWN PLANE, meters.
 
     ⚠ This used to be the axis-aligned x and y extents, and that is wrong for
     any face that is not vertical. It cost the MCDUs a whole pass: they lie

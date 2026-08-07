@@ -1,12 +1,12 @@
 # stb_image (vendored)
 
 `stb_image.h` v2.30, from https://github.com/nothings/stb — public domain
-(MIT alternative also offered; see the licence block at the end of the header).
+(MIT alternative also offered; see the license block at the end of the header).
 Unmodified. To update, overwrite the file; there is nothing else here.
 
 ## Why it is here
 
-The Panel FX compositor lets a layer be an **image** rather than a flat colour,
+The Panel FX compositor lets a layer be an **image** rather than a flat color,
 and X-Plane's SDK has no image loader — `XPLMLoadTexture` is gone from the XPLM4
 headers, and the only texture entry points left (`XPLMGenerateTextureNumbers`,
 `XPLMBindTexture2d`) hand out a texture *number* and expect you to have already

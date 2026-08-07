@@ -42,7 +42,7 @@ class C:
     BR_GREEN = "\033[92m"
     BR_YELLOW = "\033[93m"
     BR_WHITE = "\033[97m"
-    BR_BLACK = "\033[90m"  # grey
+    BR_BLACK = "\033[90m"  # gray
 
 
 def enable_vt():
@@ -296,7 +296,7 @@ def _dims():
 
 def _breadcrumb(active: int | None, width: int) -> str:
     """The progress indicator: done stages green, current bright+bold+underline,
-    upcoming grey."""
+    upcoming gray."""
     parts = []
     for i, name in enumerate(STAGES):
         if active is not None and i < active:
