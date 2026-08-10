@@ -6,7 +6,7 @@ RealWings bakes its own wingtip lights into MainNEO/SecondaryNEO/Main OBJs using
 X-Plane's *sizeable* named lights with fixed colors and no profile switching.
 Photon rewrites each one in place into a parametric light gated by the
 ToLissPhoton datarefs. This module works out WHAT each one should become;
-`installer/realwings.py` does the rewriting.
+`build/realwings_apply.py` does the rewriting.
 
 ⚠ THE SPLIT, AND WHY
 ---------------------
@@ -17,7 +17,7 @@ so the resolution moved to bundle time, exactly like the OBJs
 (docs/installer_cpp_plan.md §2a):
 
     build time   this module + build_objs  ->  payload/realwings_patch.json
-    install time installer/realwings.py    <-  payload/realwings_patch.json
+    install time core/patch_realwings.cpp <-  payload/realwings_patch.json
 
 ⚠ THAT JSON IS A GENERATED ARTIFACT, NEVER HAND-EDITED — see `resolve_patch_data`
 and the `_generated` header it writes. All lighting tuning still lives in the DSL;
@@ -55,9 +55,10 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from installer import realwings as RW           # noqa: E402
-from installer.realwings import MARKER          # noqa: E402  (re-export)
-from installer.realwings import RealWingsError  # noqa: E402  (re-export)
+import realwings_apply as RW                       # noqa: E402  (build/)
+from realwings_apply import MARKER                 # noqa: E402  (re-export)
+from realwings_apply import PATCH_JSON             # noqa: E402  (re-export)
+from realwings_apply import RealWingsError         # noqa: E402  (re-export)
 
 # Baked RealWings light class -> the Photon light it should render as, named as a
 # path into the DSL: <fixture> <group> <light type> in lights.layout.phdsl.
@@ -245,7 +246,7 @@ def realwings_airframes() -> list[str]:
 
 def resolve_patch_data(cfg=None, airframes=None) -> dict:
     """Resolve the WHOLE patch table out of the DSL — every (airframe, baked
-    class, wingtip, side) — as the structure `installer/realwings.py` applies.
+    class, wingtip, side) — as the structure the appliers consume.
 
     This is what `make_release.py` serializes into `payload/realwings_patch.json`
     and what the dev path hands straight to the applier in memory."""

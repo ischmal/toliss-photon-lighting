@@ -2,17 +2,21 @@
 """Bundle the finished per-platform archives into ONE all-platforms zip.
 
 The maintainer-convenience download: grab this single file from the workflow,
-extract it, and you have all four release assets ready to attach to a GitHub
+extract it, and you have all three release assets ready to attach to a GitHub
 Release / forum post in one go.
 
     ToLissPhoton-Installer-v<VER>-All-Platforms.zip
       ToLissPhoton-Installer-v<VER>-Windows.zip
       ToLissPhoton-Installer-v<VER>-macOS.zip
       ToLissPhoton-Installer-v<VER>-Linux.tar.gz
-      ToLissPhoton-Installer-v<VER>-Python-Universal.zip
+
+⚠ THREE, NOT FOUR. The Python-Universal bundle is gone with the Python installer
+(docs/installer_cpp_plan.md §10 decision 1). Nothing here enumerated it by name —
+the glob is what picks the archives up — so the count lives only in this comment
+and in the docs, which is exactly why both are worth keeping current.
 
 Only the archives actually present in --archives are included, so it still runs
-locally with just your own platform's bundle (+ the universal one).
+locally with just your own platform's bundle.
 
 Usage:
     python build/make_allzip.py --archives DIR [--out release]
@@ -25,8 +29,8 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
-from installer.constants import VERSION  # noqa: E402
+sys.path.insert(0, str(REPO / "build"))
+from version import VERSION  # noqa: E402  (read from core/version.h)
 
 ALL_NAME = f"ToLissPhoton-Installer-v{VERSION}-All-Platforms"
 PREFIX = f"ToLissPhoton-Installer-v{VERSION}-"
@@ -47,7 +51,7 @@ def main():
         out = REPO / out
     out.mkdir(parents=True, exist_ok=True)
 
-    # The four release archives (any subset present), never the all-platforms
+    # The three release archives (any subset present), never the all-platforms
     # zip itself (so re-running into the same dir can't nest it recursively).
     seen: dict[str, Path] = {}
     for p in sorted(src.rglob("*")):

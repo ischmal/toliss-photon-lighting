@@ -6,14 +6,15 @@ reads it through here — so a release bundle's NAME, the README it ships, the
 plugin's About tab and the OBJ version marker cannot disagree.
 
 They did disagree once: `kPhotonVersion` in plugin.cpp and `VERSION` in
-installer/constants.py drifted 0.6 against 0.7 through a whole feature, because
+the installer's own VERSION drifted 0.6 against 0.7 through a whole feature, because
 nothing in-sim looks wrong when they differ — the About tab simply reports an older
 version than the files beside it, which is exactly what a half-finished install
 looks like.
 
-`installer/constants.VERSION` is still a second copy for as long as the Python
-installer ships (it has to work from a bundle, where this header is not present);
-`tests/test_version.py` pins the two equal, and it dies with that installer.
+⚠ THERE IS NO SECOND COPY LEFT. `installer/constants.VERSION` was one until the
+Python installer was deleted (2026-08-09); `build/constants.py` now RE-EXPORTS what
+this module reads rather than restating it, and `tests/test_version.py` fails any
+build script that hard-codes a version again.
 
 ⚠ COMMENT LINES ARE SKIPPED. version.h documents its own required shape, and the
 first reader written against it matched that EXAMPLE — reporting the placeholder as

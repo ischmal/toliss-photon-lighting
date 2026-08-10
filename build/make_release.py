@@ -6,55 +6,88 @@ Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the compiled
 native plugin, so the end-user installer needs neither the DSL toolchain nor a C++
 toolchain.
 
-⚠ THE BUNDLE NO LONGER CARRIES THE DSL TOOLCHAIN AT ALL. It used to ship
-`payload/dsl/` — build_objs.py, photon_dsl.py and the two `.phdsl` files — for the
-one install-time step that could not be pre-baked: the RealWings live patch, which
-rewrites the user's already-installed mod files in place and so has to resolve each
-replacement light's parameters against the DSL. Those parameters are now RESOLVED
-AT BUNDLE TIME into `payload/realwings_patch.json` (see `stage_realwings_patch` and
-build/patch_realwings.py) and applied by `installer/realwings.py`, which is
-stdlib-only. The skin-glow redirect and the two `.acf` patchers never needed the
-DSL and now live in the installer package outright. Net effect: install time has
-zero DSL dependency, which is the precondition for the C++ installer
-(docs/installer_cpp_plan.md §2).
+⚠ THERE IS ONE INSTALLER AND IT IS COMPILED: `photon-installer`. The Python one is
+GONE — `install.py`, `installer/`, `build/make_exe.py`, the PyInstaller dependency,
+the Python-Universal bundle and the parity harness were all deleted on 2026-08-09
+(docs/installer_cpp_plan.md §9). The line to hold: a bundle carries exactly one
+executable, so no user is ever told which of two to run.
 
-The plugin is the native `.xpl` (no XPPython3/Python at runtime). It is a fat
-plugin: `--plugin-dir` points at a `ToLissPhoton/` folder holding one
-`<arch>/ToLissPhoton.xpl` per platform. Locally only the arch you compiled is
-present; a full multi-platform release is assembled in CI from the per-OS build
-matrix (all three `<arch>/` dirs merged into one folder) — see
+⚠ THIS SCRIPT IS STILL PYTHON, AND THAT IS NOT A LEFTOVER. It runs at BUILD time,
+where the DSL toolchain lives; what the port removed was Python at INSTALL time. Its
+shared constants come from `build/constants.py` (mirrored from `core/constants.cpp`
+and pinned to it by tests/test_version.py), and its version from `core/version.h`
+via `build/version.py` — never from a copy.
+
+⚠ THE BUNDLE CARRIES NO DSL TOOLCHAIN AT ALL. It used to ship `payload/dsl/` —
+build_objs.py, photon_dsl.py and the two `.phdsl` files — for the one install-time
+step that could not be pre-baked: the RealWings live patch, which rewrites the
+user's already-installed mod files in place and so has to resolve each replacement
+light's parameters against the DSL. Those parameters are now RESOLVED AT BUNDLE TIME
+into `payload/realwings_patch.json` (see `stage_realwings_patch` and
+build/patch_realwings.py) and applied by `core/patch_realwings.cpp`. The skin-glow
+redirect and the two `.acf` patchers never needed the DSL and are C++ outright. Net
+effect: install time has zero DSL dependency, which is the precondition for the C++
+installer (docs/installer_cpp_plan.md §2).
+
+The plugin is the native `.xpl` (no XPPython3/Python at runtime). `--plugin-dir`
+points at a `ToLissPhoton/` folder holding one `<arch>/ToLissPhoton.xpl` per
+platform, and X-Plane loads the subfolder matching the host OS. The FORMAT still
+allows all three side by side, but nothing ships that way any more: the bundle that
+did — Python-Universal, the only one whose installer ran on every OS — is gone, and
+each per-platform download now carries the one arch its own runner compiled. See
 .github/workflows/release.yml and src/native/README.md.
 
 Usage:
-    python build/make_release.py [--out DIR] [--plugin-dir DIR] [--zip]
+    python build/make_release.py [--out DIR] [--plugin-dir DIR] [--bundle]
     python build/make_release.py --payload-only [--out DIR]
 
-Output (default --out release/, gitignored like dist/) — the Python-Universal
-bundle (`python install.py`, needs only Python 3.8+, runs on any OS):
-    release/install.py
-    release/installer/...
-    release/README.txt
+Output (default --out release/, gitignored like dist/) — the STAGING layout, which
+is what the binary reads when run from a checkout, not a download:
+    release/photon-installer[.exe]                    the compiled installer
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
     release/payload/objs/interior/lights_inn.obj      (wing- & airframe-independent)
     release/payload/objs/screens/lights_screens.obj   (display glow, A3xx)
     release/payload/textures/interior/*.png           (Gus's set, ~57 MiB)
-    release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl   (all arches in CI)
+    release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl
     release/payload/plugindata/{panelfx.txt,overlays/*.png}   (into the plugin folder)
     release/payload/realwings_patch.json              (resolved from the DSL)
-With --zip: release/ToLissPhoton-Installer-v<VER>-Python-Universal.zip
-(extracts to one ToLissPhoton-Installer-v<VER>-Python-Universal/ folder).
 
-`--payload-only` stages just `payload/` (no installer copy, no README, no zip, and
-no plugin unless one is built) into `--out`, defaulting to the REPO ROOT so it
-lands next to `install.py`. That is the dev path: `install.py` used to build OBJs
-on the fly from the DSL when run out of a checkout, which made the toolchain an
-install-time dependency in the one place it had to not be. Stage, then run.
+`--bundle` additionally packs the DISTRIBUTABLE per-platform bundle, for the OS
+this runs on (the C++ toolchain cannot cross-compile, so one machine produces one
+platform's download; CI runs the same command on each of the three runners):
+
+    release/ToLissPhoton-Installer-v<VER>-<Windows|macOS|Linux>[.zip|.tar.gz]
+      └ ToLissPhoton-Installer-v<VER>-<OS>/
+          photon-installer[.exe]   the installer
+          data/                    objs/ + textures/ + plugin/<arch> + plugindata/
+                                   + realwings_patch.json
+          README.txt
+
+⚠ THE BUNDLE CALLS THE PAYLOAD FOLDER `data/`, not `payload/`. The binary accepts
+both (`core/payload.cpp` prefers `payload/`, then `data/`) precisely so a repo
+checkout with a staged `payload/` and a shipped bundle can both work; `data/` is
+the name the download has always used and the one its README documents.
+Compression is per-OS: Windows/macOS `.zip` (Explorer/Finder open it natively),
+Linux `.tar.gz` (convention, and it preserves the exec bit natively). The exec bit
+is written into the `.zip` external attrs too, so a macOS extraction is runnable
+without a manual `chmod`.
+
+`--payload-only` stages just `payload/` (no installer copy, no README, no archive,
+and no plugin unless one is built) into `--out`, defaulting to the REPO ROOT so it
+lands beside the repo root. That is the dev path: point the freshly built
+`photon-installer` at it with `--payload-dir`, or copy the binary next to it. The
+Python installer used to build OBJs on the fly from the DSL when run out of a
+checkout, which made the toolchain an install-time dependency in the one place it
+had to not be; staging is what replaced that.
 """
 from __future__ import annotations
 
 import argparse
+import platform
 import shutil
 import sys
+import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -64,23 +97,21 @@ sys.path.insert(0, str(REPO))
 import build_objs as B  # noqa: E402
 import patch_realwings as RWBUILD  # noqa: E402  (build/patch_realwings.py)
 import readme as _readme  # noqa: E402  (build/readme.py)
-from installer.constants import (  # noqa: E402
+from constants import (  # noqa: E402  (build/constants.py)
     PANELFX_FILE, PLUGIN_DATA_DIRNAME, PLUGIN_FOLDER, PLUGIN_USER_DIRS,
     WINGS, XPL_NAME,
 )
-from installer.realwings import PATCH_JSON  # noqa: E402
-# ⚠ THE VERSION COMES FROM core/version.h, not from installer/constants.py. That
-# header is the one definition the plugin and the compiled installer both read, so
-# a bundle's NAME can no longer disagree with what the About tab reports (§8c).
+from patch_realwings import PATCH_JSON  # noqa: E402  (build/patch_realwings.py)
+# ⚠ THE VERSION COMES FROM core/version.h. That header is the one definition the
+# plugin and the compiled installer both read, so a bundle's NAME cannot disagree
+# with what the About tab reports (§8c).
 from version import VERSION  # noqa: E402  (build/version.py)
 
-INSTALLER_ENTRY = REPO / "install.py"
-INSTALLER_PKG = REPO / "installer"
-# The loose-.py bundle is the "Python-Universal" release download: readable
-# Python that runs on any OS (its plugin/ is the fat folder with every arch).
-BUNDLE_NAME = f"ToLissPhoton-Installer-v{VERSION}-Python-Universal"
 # Default location of the compiled native fat-plugin folder (CMake build output).
 DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
+
+# platform.system() -> the pretty OS name used in the bundle filename + README.
+OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
 
 
 def build_objs_payload(payload: Path):
@@ -291,13 +322,13 @@ def stage_compiled_installer(out: Path, explicit: Path | None = None) -> Path | 
     user run it from Downloads, from a USB stick, or from inside
     Resources/plugins/ — so the two have to be siblings.
 
-    Absent is not an error: this repo's own release path still builds the
-    Python-Universal bundle, and one release ships BOTH installers side by side
-    (docs/installer_cpp_plan.md §9) before the Python one is deleted. A machine that
-    has not built the C++ side still produces a complete Python bundle."""
+    Absent is only a warning HERE, where a contributor with no C++ toolchain may
+    still want a staged payload to develop against. ⚠ `--bundle` turns the same
+    condition into a hard error, because a bundle without the installer is a
+    download with nothing to run — see `build_bundle`."""
     exe = find_installer_binary(explicit)
     if exe is None:
-        print("  ! photon-installer not built — bundle staged without it "
+        print("  ! photon-installer not built — staged without it "
               "(build it: cmake --build src/native/build --config Release)")
         return None
     dest = out / exe.name
@@ -307,32 +338,88 @@ def stage_compiled_installer(out: Path, explicit: Path | None = None) -> Path | 
     return dest
 
 
-def stage_installer(out: Path):
-    shutil.copyfile(INSTALLER_ENTRY, out / "install.py")
-    dest_pkg = out / "installer"
-    if dest_pkg.exists():
-        shutil.rmtree(dest_pkg)
-    shutil.copytree(INSTALLER_PKG, dest_pkg, ignore=shutil.ignore_patterns("__pycache__"))
-    print("staged install.py + installer/")
+def payload_arch(payload: Path) -> str | None:
+    """The one plugin arch this payload carries, for the README's contents list."""
+    return next((d.name for d in (payload / "plugin").rglob("*")
+                 if d.is_dir() and d.name.endswith("_x64")), None)
 
 
-def stage_readme(out: Path):
-    (out / "README.txt").write_text(_readme.render("Python"), encoding="utf-8")
-    print("staged README.txt (Python-Universal)")
+def stage_readme(out: Path, os_name: str, exe_name: str, arch: str | None):
+    (out / "README.txt").write_text(
+        _readme.render(os_name, exe_name=exe_name, arch=arch), encoding="utf-8")
+    print(f"staged README.txt ({os_name})")
 
 
-def make_zip(out: Path) -> Path:
-    """Zip the bundle into out/ itself (gitignored, like the other release
-    archives), extracting to one tidy BUNDLE_NAME/ folder. The zip is written
-    into `out`, so it's skipped from its own contents (`f != zip_path`)."""
-    zip_path = out / f"{BUNDLE_NAME}.zip"
-    if zip_path.exists():
-        zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(out.rglob("*")):
-            if f.is_file() and f != zip_path:
-                zf.write(f, Path(BUNDLE_NAME) / f.relative_to(out))
-    return zip_path
+def _archive(folder: Path, base_name: str, fmt: str, out_dir: Path,
+             exe_names: set[str]) -> Path:
+    """Pack `folder` into out_dir/<base_name>.<ext>, everything nested under a
+    single top-level <base_name>/ dir. Every name in `exe_names` is marked
+    executable (0o755) in the archive metadata so Unix extractions are runnable
+    without a manual chmod; Windows ignores it.
+
+    ⚠ THE EXEC BIT HAS TO BE WRITTEN, not inherited. A zip built without it hands
+    macOS and Linux a binary that is present, correct and not runnable — which
+    reads to the user as a corrupt download rather than as a permissions bit."""
+    if fmt == "zip":
+        dest = out_dir / f"{base_name}.zip"
+        if dest.exists():
+            dest.unlink()
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(folder.rglob("*")):
+                if not f.is_file():
+                    continue
+                arc = str(Path(base_name) / f.relative_to(folder))
+                zi = zipfile.ZipInfo(arc, date_time=time.localtime(f.stat().st_mtime)[:6])
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                mode = 0o755 if f.name in exe_names else 0o644
+                zi.external_attr = (mode & 0xFFFF) << 16
+                zf.writestr(zi, f.read_bytes())
+        return dest
+    # tar.gz — tarfile preserves the on-disk mode; force 0o755 on the binaries.
+    dest = out_dir / f"{base_name}.tar.gz"
+    if dest.exists():
+        dest.unlink()
+
+    def _filter(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+        ti.mode = 0o755 if Path(ti.name).name in exe_names else (
+            0o755 if ti.isdir() else 0o644)
+        return ti
+
+    with tarfile.open(dest, "w:gz") as tf:
+        tf.add(folder, arcname=base_name, filter=_filter)
+    return dest
+
+
+def build_bundle(out: Path, payload: Path, exe: Path | None,
+                 base_name: str, fmt: str) -> Path:
+    """Assemble and pack the distributable per-platform bundle:
+    <out>/<base_name>/{photon-installer[.exe], data/, README.txt}.
+
+    ⚠ A MISSING BINARY IS FATAL HERE. Staging a payload without one is a
+    reasonable dev state; shipping a download whose only executable is absent is
+    not, and the failure would surface as a user unzipping 60 MiB with nothing to
+    double-click."""
+    if exe is None:
+        raise SystemExit(
+            "cannot build a bundle without photon-installer — build it first:\n"
+            "  cmake --build src/native/build --config Release\n"
+            "or pass --installer-exe at the binary.")
+    stage = out / base_name
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    binary = stage / exe.name
+    shutil.copy2(exe, binary)
+    binary.chmod(binary.stat().st_mode | 0o111)
+    # ⚠ `data/`, not `payload/` — the name the download has always used and the
+    # one its README documents. The binary accepts both (core/payload.cpp).
+    shutil.copytree(payload, stage / "data")
+    arch = payload_arch(payload)
+    os_name = OS_NAME.get(platform.system(), platform.system())
+    stage_readme(stage, os_name, exe.name, arch)
+    archive = _archive(stage, base_name, fmt, out, {exe.name})
+    print(f"  bundle: {base_name}/ ({exe.name} + data/, arch: {arch or 'none'})")
+    return archive
 
 
 def main():
@@ -342,10 +429,17 @@ def main():
     ap.add_argument("--plugin-dir", default=str(DEFAULT_PLUGIN_DIR),
                     help="native fat-plugin folder holding <arch>/%s "
                          "(default: the CMake build output under src/native/build/)" % XPL_NAME)
-    ap.add_argument("--zip", action="store_true", help="also zip the release folder")
+    ap.add_argument("--bundle", action="store_true",
+                    help="also pack the distributable per-platform bundle "
+                         "(<name>/{photon-installer, data/, README.txt} + archive)")
+    ap.add_argument("--format", choices=["auto", "zip", "tgz"], default="auto",
+                    help="archive format (default: auto = tgz on Linux, zip elsewhere)")
+    ap.add_argument("--name", help="override the bundle base name "
+                                   "(default ToLissPhoton-Installer-v<VER>-<OS>)")
     ap.add_argument("--payload-only", action="store_true",
                     help="stage only payload/ (the dev path: stage beside "
-                         "install.py, then run it). Tolerates an unbuilt plugin.")
+                         "the repo root, then point --payload-dir at it). Tolerates "
+                         "an unbuilt plugin.")
     ap.add_argument("--installer-exe",
                     help="the compiled photon-installer to stage (default: the "
                          "CMake output under src/native/build*/)")
@@ -392,22 +486,26 @@ def main():
 
     if args.payload_only:
         print(f"\npayload staged: {payload}\n"
-              f"run the installer with: python install.py")
+              f"run it with: photon-installer --payload-dir {payload}")
         return
 
-    stage_installer(out)
-    # ⚠ BOTH installers ship for one release (§9): the compiled one is primary and
-    # the Python bundle is the fallback, and the release notes say so. This is the
-    # only period in which both exist; the Python half goes one release later.
-    stage_compiled_installer(
+    # ⚠ NO README AT THE STAGING ROOT. It documents `data/` beside the binary, and
+    # this level has `payload/` — a README describing a layout the reader is not
+    # looking at is worse than none. It is written into the bundle instead.
+    exe = stage_compiled_installer(
         out, Path(args.installer_exe) if args.installer_exe else None)
-    stage_readme(out)
 
-    if args.zip:
-        zip_path = make_zip(out)
-        print(f"zipped -> {zip_path}")
+    if args.bundle:
+        os_name = OS_NAME.get(platform.system(), platform.system())
+        base_name = args.name or f"ToLissPhoton-Installer-v{VERSION}-{os_name}"
+        fmt = ("tgz" if platform.system() == "Linux" else "zip") \
+            if args.format == "auto" else args.format
+        archive = build_bundle(out, payload, exe, base_name, fmt)
+        print(f"\nplatform bundle ready: {archive} "
+              f"({archive.stat().st_size / 1e6:.1f} MB)")
+        return
 
-    print(f"\nrelease bundle ready: {out}")
+    print(f"\nrelease staged: {out}")
 
 
 if __name__ == "__main__":

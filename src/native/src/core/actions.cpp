@@ -66,22 +66,51 @@ bool Contains(const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
 
+// What BackupOnce found.
+//
+// ⚠ THE CALLER MUST TELL kAlreadyHave FROM kNoOriginal, which a bool cannot: both
+// mean "no new backup", but only the second makes the file the caller is about to
+// write an ADDED one. Collapsing them is what left a Photon file in the aircraft
+// folder forever when its stock counterpart happened to be missing.
+enum class Backup {
+    kRecorded,      // a new backup was taken (or an on-disk one adopted)
+    kAlreadyHave,   // already in backed_up[] — still restorable, nothing to do
+    kNoOriginal,    // nothing was there to back up
+};
+
 // ⚠ Copy `src`'s CURRENT contents into the backup dir the FIRST TIME ONLY. Never
 // overwrite an existing backup: on a reinstall or upgrade that would clobber the
-// true original with a Photon file. Returns true if a new backup was recorded.
-bool BackupOnce(const fs::path& src, const fs::path& backupDir,
-                manifest::Manifest& m, Log& log, bool dryRun) {
+// true original with a Photon file.
+//
+// `added` is the manifest list to consult and record into when there is no stock
+// original — pass it at a site that then WRITES a payload file over `src`, so
+// uninstall deletes what it cannot restore. ⚠ Pass NULLPTR at a site that PATCHES
+// `src` IN PLACE (the glow meshes): there a missing source means nothing was
+// written, and recording it would make uninstall delete a file that is not ours.
+//
+// ⚠ Consulting `added` is what keeps a REINSTALL idempotent. Second time round the
+// file exists — because we wrote it — so without that check the "back up the
+// original" branch would fire and enshrine OUR file as the stock one, which is
+// precisely the clobber the backup-once rule exists to prevent.
+Backup BackupOnce(const fs::path& src, const fs::path& backupDir,
+                  manifest::Manifest& m, std::vector<std::string>* added,
+                  Log& log, bool dryRun) {
     const std::string rel = fsutil::PathToUtf8(src.filename());
     if (Contains(m.backedUp, rel)) {
         log.Write("backup skipped (already have one): " + rel);
-        return false;
+        return Backup::kAlreadyHave;
+    }
+    if (added != nullptr && Contains(*added, rel)) {
+        log.Write("backup skipped (ours from an earlier install, no stock "
+                  "original): " + rel);
+        return Backup::kNoOriginal;
     }
     const fs::path dest = backupDir / src.filename();
     std::error_code ec;
     if (fs::exists(dest, ec) && !ec) {
         log.Write("backup already present on disk, recording: " + rel, "WARN");
     } else if (fs::exists(src, ec) && !ec) {
-        log.Write("backing up " + fsutil::PathToUtf8(src) + " -> " +
+        log.Write("backing up " + fsutil::PathToUtf8(src) + " → " +
                   fsutil::PathToUtf8(dest));
         if (!dryRun) {
             std::error_code mk;
@@ -89,12 +118,13 @@ bool BackupOnce(const fs::path& src, const fs::path& backupDir,
             WriteOrThrow(dest, CopyBytes(src));
         }
     } else {
-        log.Write("nothing to back up yet (file not present): " +
+        log.Write("nothing to back up (no stock original): " +
                   fsutil::PathToUtf8(src), "WARN");
-        return false;
+        if (added != nullptr && !Contains(*added, rel)) added->push_back(rel);
+        return Backup::kNoOriginal;
     }
     m.backedUp.push_back(rel);
-    return true;
+    return Backup::kRecorded;
 }
 
 void LogLines(Log& log, const char* tag, const std::vector<std::string>& lines) {
@@ -231,12 +261,12 @@ std::vector<std::string> InstallPluginData(const fs::path& pluginRoot, Log& log,
         ++wrote;
         if (!dryRun) WriteOrThrow(dest, CopyBytes(fsutil::PathFromUtf8(kv.second)));
     }
-    log.Write("plugin data -> " + fsutil::PathToUtf8(pluginRoot) + " (" +
+    log.Write("plugin data → " + fsutil::PathToUtf8(pluginRoot) + " (" +
               std::to_string(wrote) + " written, " +
               std::to_string(linked.size()) + " symlinked, " +
               std::to_string(files.size()) + " total)");
     steps.push_back(std::string("Installed Panel FX data (") + kPanelFxFile +
-                    " + overlay images) -> Resources/plugins/" + kPluginFolder);
+                    " + overlay images) → Resources/plugins/" + kPluginFolder);
     for (const std::string& rel : linked) {
         steps.push_back("Kept your symlinked " + rel + " — not overwritten");
     }
@@ -270,7 +300,7 @@ std::vector<std::string> InstallScreens(const fs::path& objects,
     log.Write("writing " + fsutil::PathToUtf8(target) + " (" +
               std::to_string(text.size()) + " bytes)");
     if (!dryRun) WriteOrThrow(target, text);
-    steps.push_back(std::string("Installed ") + kScreensObj + " (display glow) -> " +
+    steps.push_back(std::string("Installed ") + kScreensObj + " (display glow) → " +
                     fsutil::PathToUtf8(objects.filename()));
 
     const auto res = patch_acf_screens::Run(fsutil::PathToUtf8(aircraftDir), false,
@@ -305,8 +335,9 @@ std::vector<std::string> InstallInterior(const Options& opts,
 
     // 1. the OBJ. Inject anchors on POINT_COUNTS, which lights_inn.obj has.
     const fs::path target = objects / kInteriorObj;
-    if (BackupOnce(target, backupDir, m, log, dryRun)) {
-        steps.push_back(std::string("Backed up original ") + kInteriorObj + " -> " +
+    if (BackupOnce(target, backupDir, m, &m.interior.added, log, dryRun) ==
+        Backup::kRecorded) {
+        steps.push_back(std::string("Backed up original ") + kInteriorObj + " → " +
                         fsutil::PathToUtf8(objects.filename()) + "/" +
                         kBackupDirName);
     }
@@ -316,7 +347,7 @@ std::vector<std::string> InstallInterior(const Options& opts,
               std::to_string(text.size()) + " bytes)");
     if (!dryRun) WriteOrThrow(target, text);
     steps.push_back(std::string("Installed ") + kInteriorObj +
-                    " (interior lights, mod by Gus) -> " +
+                    " (interior lights, mod by Gus) → " +
                     fsutil::PathToUtf8(objects.filename()));
 
     // 2. the textures. ⚠ NINE replace a stock file and are restored from backup on
@@ -334,13 +365,17 @@ std::vector<std::string> InstallInterior(const Options& opts,
                 m.interior.added.push_back(kv.first);
             }
         } else {
-            BackupOnce(dest, backupDir, m, log, dryRun);
+            // ⚠ The nine that REPLACE a stock file — but only if that file is
+            // actually there. A ToLiss folder missing one (damaged, or a future
+            // update that dropped it) would otherwise leave our copy behind on
+            // uninstall, since a backup that was never taken cannot restore it.
+            BackupOnce(dest, backupDir, m, &m.interior.added, log, dryRun);
         }
         if (opts.progress) opts.progress(i, total, kv.first, opts.progressUserData);
         if (!dryRun) WriteOrThrow(dest, CopyBytes(fsutil::PathFromUtf8(kv.second)));
     }
     steps.push_back("Installed " + std::to_string(total) +
-                    " interior texture(s) -> " +
+                    " interior texture(s) → " +
                     fsutil::PathToUtf8(objects.filename()));
 
     // 3. the livery scan.
@@ -535,10 +570,10 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
         if (!dryRun) WriteOrThrow(dest, CopyBytes(fsutil::PathFromUtf8(kv.second)));
     }
     if (wrotePlugin) {
-        log.Write("wrote native plugin -> " + fsutil::PathToUtf8(pluginRoot) + " (" +
+        log.Write("wrote native plugin → " + fsutil::PathToUtf8(pluginRoot) + " (" +
                   Join(arches, ", ") + ")");
         steps.push_back("Installed ToLiss Photon plugin [" + Join(arches, ", ") +
-                        "] -> Resources/plugins/" + kPluginFolder);
+                        "] → Resources/plugins/" + kPluginFolder);
     } else {
         log.Write("native plugin already current at " +
                   fsutil::PathToUtf8(pluginRoot) +
@@ -555,13 +590,20 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     }
 
     const fs::path target = objects / af->objName;
-    if (BackupOnce(target, backupDir, m, log, dryRun)) {
-        steps.push_back(std::string("Backed up original ") + af->objName + " -> " +
-                        fsutil::PathToUtf8(objects.filename()) + "/" +
-                        kBackupDirName);
-    } else {
-        steps.push_back(std::string("Original ") + af->objName +
-                        " already backed up — reused");
+    switch (BackupOnce(target, backupDir, m, &m.added, log, dryRun)) {
+        case Backup::kRecorded:
+            steps.push_back(std::string("Backed up original ") + af->objName +
+                            " → " + fsutil::PathToUtf8(objects.filename()) + "/" +
+                            kBackupDirName);
+            break;
+        case Backup::kAlreadyHave:
+            steps.push_back(std::string("Original ") + af->objName +
+                            " already backed up — reused");
+            break;
+        case Backup::kNoOriginal:
+            steps.push_back(std::string("! No original ") + af->objName +
+                            " to back up — ours will be removed on uninstall");
+            break;
     }
 
     const std::string objText =
@@ -571,7 +613,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
               std::to_string(objText.size()) + " bytes)");
     if (!dryRun) WriteOrThrow(target, objText);
     steps.push_back(std::string("Installed ") + af->objName + " (" + opts.wing +
-                    " wing variant) -> " + fsutil::PathToUtf8(objects.filename()));
+                    " wing variant) → " + fsutil::PathToUtf8(objects.filename()));
 
     // Redirect ToLiss's skin-glow LIT-texture regions to Photon's own dataref so the
     // painted skin flashes in lockstep with the LED billboards. Each affected mesh
@@ -581,9 +623,14 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
         for (const std::string& f :
              patch_glow::TargetFiles(objectsUtf8, opts.airframeKey)) {
             const fs::path p = fsutil::PathFromUtf8(f);
-            if (BackupOnce(p, backupDir, m, log, dryRun)) {
+            // ⚠ nullptr: the glow pass PATCHES these meshes in place rather than
+            // writing one of ours over them, so a missing source means nothing
+            // was written — recording it would have uninstall delete a ToLiss
+            // file Photon never created.
+            if (BackupOnce(p, backupDir, m, nullptr, log, dryRun) ==
+                Backup::kRecorded) {
                 steps.push_back("Backed up original " +
-                                fsutil::PathToUtf8(p.filename()) + " -> " +
+                                fsutil::PathToUtf8(p.filename()) + " → " +
                                 fsutil::PathToUtf8(objects.filename()) + "/" +
                                 kBackupDirName);
             }
@@ -728,6 +775,21 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
                   fsutil::PathToUtf8(src));
         if (!dryRun) WriteOrThrow(dest, CopyBytes(src));
         steps.push_back("Restored original " + rel);
+    }
+
+    // ⚠ THE MIRROR OF THE LOOP ABOVE, and normally empty: a file we wrote that had
+    // no stock original is ours alone, so it is DELETED rather than restored.
+    // UNGATED, unlike the interior and screens lists — there is no per-axis flag to
+    // hang it on, and an entry here means an exterior install already happened.
+    for (const std::string& rel : m.added) {
+        const fs::path f = objects / fsutil::PathFromUtf8(rel);
+        std::error_code ec;
+        if (fs::is_regular_file(f, ec) && !ec) {
+            log.Write("removing added file (no stock original): " +
+                      fsutil::PathToUtf8(f));
+            if (!dryRun) fs::remove(f, ec);
+            steps.push_back("Removed added file " + rel);
+        }
     }
 
     if (m.realwingsPatched && !m.realwingsDir.empty()) {

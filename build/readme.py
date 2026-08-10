@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
 """Shared README.txt generator for the release bundles.
 
-One source of truth for the per-bundle READMEs so the four downloads
-(Windows / macOS / Linux frozen bundles + the Python-Universal bundle) stay
-consistent. Reuses the installer's own splash ASCII art (install.LOGO_ART) and
-the project links from installer.constants, so nothing drifts.
+One source of truth for the per-bundle READMEs so the three downloads
+(Windows / macOS / Linux) stay consistent. Reuses the installer's own splash
+ASCII art (lifted from `LogoArt()` in the installer's own screens.cpp) and the
+project links from build/constants.py, so nothing drifts.
+
+⚠ THERE IS ONE INSTALLER AND ONE KIND OF BUNDLE. The "Python" kind is gone with
+the Python-Universal download (docs/installer_cpp_plan.md §10 decision 1), and so
+is the paragraph naming a second executable. Every bundle now holds exactly one
+runnable file, which is the whole point: a README that has to explain which of two
+installers to run is a README describing a choice the user should never have been
+handed.
 
 Kept pure-ASCII on purpose: a README.txt gets opened in Notepad and every other
 editor, so no smart quotes / arrows / dashes that can mojibake.
 
-    render("Windows", exe_name="...-Windows.exe", arch="win_x64")
-    render("Python")
+    render("Windows", exe_name="photon-installer.exe", arch="win_x64")
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
-from installer.constants import GITHUB_URL, VERSION, XPLANE_ORG_URL  # noqa: E402
+if str(REPO / "build") not in sys.path:
+    sys.path.insert(0, str(REPO / "build"))
+from constants import GITHUB_URL, VERSION, XPLANE_ORG_URL  # noqa: E402
+
+# Where the installer's own splash art lives, so the README opens with the banner
+# the user sees on launch.
+#
+# ⚠ IT IS READ OUT OF THE INSTALLER'S SOURCE, NOT COPIED. This used to
+# `import install` and read `install.LOGO_ART`; that file is gone, and pasting the
+# art in here would leave two copies whose only symptom on drifting is a README
+# whose banner is not the program's — invisible to every test.
+SCREENS_CPP = REPO / "src" / "native" / "src" / "installer" / "screens.cpp"
+_ART_LINE = re.compile(r'^\s*R"\((.*)\)",\s*$')
 
 # platform.system() -> the pretty OS name used in filenames and READMEs.
 OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
@@ -29,11 +46,22 @@ AIRCRAFT_OR = "ToLiss A319, A320, A321, or A330-900"
 
 
 def _logo() -> list[str]:
-    """The installer's splash art, so the README opens with the same banner the
-    user sees on launch. Imported (not duplicated) to stay in sync."""
+    """The installer's splash art, lifted from `LogoArt()` in screens.cpp so the
+    README opens with the same banner the program does.
+
+    The art is a run of raw string literals inside one `kArt` initializer; the
+    trailing version line is built in C++ from `kPhotonVersion` and is appended
+    here instead. A parse failure degrades to a plain title rather than raising —
+    a bundle must not fail to build over its README's decoration."""
     try:
-        import install  # repo-root install.py
-        return list(install.LOGO_ART)
+        text = SCREENS_CPP.read_text(encoding="utf-8", errors="replace")
+        start = text.index("LogoArt()")
+        block = text[start:text.index("return kArt;", start)]
+        art = [m.group(1) for m in
+               (_ART_LINE.match(l) for l in block.splitlines()) if m]
+        if not art:
+            raise ValueError("no raw-string art lines found")
+        return art + ["", f" {'=' * 25}  v{VERSION}"]
     except Exception:
         return [f"ToLiss Photon Lighting  -  v{VERSION}"]
 
@@ -80,29 +108,16 @@ def _install_steps(kind: str, exe_name: str) -> list[str]:
             "  3. Follow the on-screen steps (arrow keys / ENTER; ESC goes back).",
             "     It auto-detects X-Plane 12; pick your aircraft and wing variant.",
         ]
-    # Python-Universal
-    return [
-        "HOW TO INSTALL  (requires Python 3.8+ - the only prerequisite)",
-        "  1. Extract this ENTIRE folder. Keep install.py, the installer/ folder,",
-        "     and the payload/ folder together.",
-        "  2. Open a terminal in this folder and run:   python install.py",
-        "       (use  python3 install.py  on macOS/Linux if 'python' is Python 2)",
-        "  3. Follow the on-screen steps (arrow keys / ENTER; ESC goes back).",
-        "     It auto-detects X-Plane 12; pick your aircraft and wing variant.",
-    ]
+    raise ValueError(f"unknown bundle kind {kind!r} - expected Windows/macOS/Linux")
 
 
 def _contents(kind: str, exe_name: str, arch: str | None) -> list[str]:
-    if kind == "Python":
-        return [
-            "WHAT'S INCLUDED",
-            "  install.py, installer/   the installer itself - plain, readable Python",
-            "  payload/                 the files it installs:",
-            "    objs/                  pre-built light objects (wing variants x airframes)",
-            "    textures/              cockpit textures for the interior mod (by Gus)",
-            "    plugin/                the native X-Plane plugin (all OSes: win/mac/linux)",
-            "    dsl/                   small toolchain the live patches need at install",
-        ]
+    """⚠ THIS LIST IS A CONTRACT WITH THE BUNDLE, not prose. It described a
+    `dsl/` folder for one release after that folder stopped being staged (the
+    installer no longer needs the toolchain at install time), which reads to a
+    user as a download missing a piece. It then described a second installer for
+    the length of the C++ transition. Change it in the same commit as
+    make_release.build_bundle whenever the layout moves."""
     return [
         "WHAT'S INCLUDED",
         f"  {exe_name}   the installer (self-contained - no Python needed)",
@@ -110,13 +125,12 @@ def _contents(kind: str, exe_name: str, arch: str | None) -> list[str]:
         "    objs/      pre-built light objects (wing variants x airframes)",
         "    textures/  cockpit textures for the interior mod (by Gus)",
         f"    plugin/    the native X-Plane plugin (this build: {arch or 'this platform'})",
-        "    dsl/       small toolchain the live patches need at install",
+        "    plugindata/  the plugin's own runtime data (panel effects)",
     ]
 
 
 def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -> str:
-    """Full README.txt text for one bundle. `kind` in {Windows, macOS, Linux, Python};
-    exe_name/arch are used only for the three frozen (non-Python) bundles."""
+    """Full README.txt text for one bundle. `kind` in {Windows, macOS, Linux}."""
     exe_name = exe_name or ""
     lines: list[str] = []
     lines += _logo()
@@ -139,13 +153,6 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
         "  (A330-900: exterior only.)",
         "",
     ]
-    if kind == "Python":
-        lines += [
-            "  This is the PYTHON-UNIVERSAL version: the installer is plain Python you",
-            "  can read and inspect before running. It works on Windows, macOS, and",
-            "  Linux, and needs no compiled binary.",
-            "",
-        ]
     lines += _install_steps(kind, exe_name)
     lines += [
         "",
@@ -181,6 +188,6 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
 
 if __name__ == "__main__":  # quick manual preview: python build/readme.py [kind]
     k = sys.argv[1] if len(sys.argv) > 1 else "Windows"
-    txt = render(k, exe_name=f"ToLissPhoton-Installer-v{VERSION}-{k}"
-                 + (".exe" if k == "Windows" else ""), arch="win_x64")
+    txt = render(k, exe_name="photon-installer" + (".exe" if k == "Windows" else ""),
+                 arch="win_x64")
     sys.stdout.buffer.write(txt.encode("utf-8"))

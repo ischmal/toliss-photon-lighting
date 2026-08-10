@@ -179,11 +179,15 @@ class ShapeTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_screen_glow_alpha_goes_through_the_curve(self):
+    def test_the_screen_glow_level_goes_through_the_curve(self):
         """The shipping consumer. Unconditional — there is no dev switch on this
-        side, so the curve IS the shipped look of the spill lights."""
-        m = re.search(r"gScreenAlpha\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
-        self.assertIsNotNone(m, "the screen-glow alpha assignment moved")
+        side, so the curve IS the shipped look of the spill lights.
+
+        It drives SIZE rather than alpha since 2026-08-09 (the DU knob sets a
+        screen's reach, not its opacity); the curve sits in exactly the same
+        place, between the knob and whatever the knob scales."""
+        m = re.search(r"gScreenSizeFactor\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "the screen-glow size-factor assignment moved")
         self.assertIn("BrightnessResponse", m.group(1))
         self.assertIn("kScreenGain", m.group(1))
 
@@ -193,10 +197,11 @@ class WiringTests(unittest.TestCase):
         AFTER or 'never fully off' stops meaning that once the curve has
         flattened the bottom of the knob.
 
-        The normalization lives in FxDriverNorm since the test pin was added, so
-        the order now spans two functions — but it is the same three stages and
-        the same reason, and the split is what keeps the curve editor's live
-        marker reading the number the compositor reads."""
+        The three stages now live in three functions — FxDriverNorm normalizes,
+        FxShapeFactor curves and floors, FxDriverFactor chains them — because a
+        rect needs BOTH the raw knob (for a layer's color ramp) and the shaped
+        factor (for its opacity) out of ONE read. The order and the reason are
+        unchanged."""
         norm = re.search(
             r"static bool FxDriverNorm\(FxDriver& d, float\* out\)\s*\{(.*?)\n\}",
             PLUGIN_CPP, re.S)
@@ -205,6 +210,18 @@ class WiringTests(unittest.TestCase):
                       "lo/hi must normalize before anything else sees the value")
         self.assertNotIn("FxCurveEval", norm.group(1),
                          "the shape is the factor's business, not the reading's")
+        self.assertNotIn("floorF", norm.group(1),
+                         "⚠ the floor is an authored 'never fully off' on the "
+                         "EFFECT, so it must not reach the raw knob position a "
+                         "color ramp interpolates on")
+
+        shape = re.search(
+            r"static float FxShapeFactor\(const FxDriver& d, const FxCurve\* shape,"
+            r"\s*float f\)\s*\{(.*?)\n\}", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(shape, "FxShapeFactor moved")
+        self.assertLess(shape.group(1).index("FxCurveEval"),
+                        shape.group(1).index("d.floorF + f"),
+                        "curve must come before the floor")
 
         m = re.search(
             r"static float FxDriverFactor\(FxDriver& d,\s*const FxCurve\* shape\)"
@@ -212,11 +229,8 @@ class WiringTests(unittest.TestCase):
             PLUGIN_CPP, re.S)
         self.assertIsNotNone(m, "FxDriverFactor moved")
         body = m.group(1)
-        normalize = body.index("FxDriverNorm")
-        curve = body.index("FxCurveEval")
-        floor = body.index("d.floorF + f")
-        self.assertLess(normalize, curve, "curve must come after lo/hi")
-        self.assertLess(curve, floor, "curve must come before the floor")
+        self.assertLess(body.index("FxDriverNorm"), body.index("FxShapeFactor"),
+                        "the shape must come after lo/hi")
 
     def test_the_test_pin_replaces_the_reading_and_not_the_factor(self):
         """⚠ The dev brightness pin sits inside FxDriverNorm, ahead of the curve
@@ -255,7 +269,7 @@ class WiringTests(unittest.TestCase):
     def test_the_fx_curve_switch_does_not_reach_the_screen_lights(self):
         """gFxCurve is a tuning switch on a dev-only feature. If it ever gated
         the spill lights too, a dev session left with it off would ship one."""
-        m = re.search(r"gScreenAlpha\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
+        m = re.search(r"gScreenSizeFactor\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
         self.assertNotIn("gFxCurve", m.group(1))
 
     def test_the_curve_switch_is_persisted(self):
@@ -292,7 +306,7 @@ class WiringTests(unittest.TestCase):
         """Same argument as the gFxCurve test above, one level further in. The
         spill lights are shipping and unswitchable; a layer's curve is a property
         of one painted layer."""
-        m = re.search(r"gScreenAlpha\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
+        m = re.search(r"gScreenSizeFactor\[i\]\s*=(.*?);", PLUGIN_CPP, re.S)
         self.assertNotIn("FxCurveEval", m.group(1))
         self.assertNotIn("FxShapeFor", m.group(1))
 

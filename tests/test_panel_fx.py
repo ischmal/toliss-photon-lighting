@@ -31,6 +31,31 @@ def _generated_overlay_names():
     return sorted(mod.IMAGES)
 
 
+def _loader_keys():
+    """Every key `DeserializeFxStacks` understands, read out of the loader itself.
+
+    ⚠ DERIVED, NEVER LISTED. This was a hand-maintained set, and it went stale the
+    moment `ramp` landed: the guard only fires when the SHIPPED file uses a key, so
+    the omission sat harmless until someone tuned a ramp in-sim and `panelfx.txt`
+    picked one up — at which point a correct file failed a test that was itself the
+    thing out of date. Scraping the loader means adding a key teaches the test, and
+    the only way to fail is the one the test is actually for: a shipped file
+    carrying a key the loader would drop.
+    """
+    start = PLUGIN_CPP.index("static void DeserializeFxStacks")
+    end = PLUGIN_CPP.index("\n}\n", start)      # the first brace back at column 0
+    keys = set(re.findall(r'key\s*==\s*"([a-z]+)"', PLUGIN_CPP[start:end]))
+    # A broken scrape must say so rather than failing every line of the file with a
+    # message about the file. These two anchor the format and cannot disappear.
+    missing = {"target", "layer"} - keys
+    if missing:
+        raise AssertionError(
+            "could not read the loader's key list (missing %s) — "
+            "DeserializeFxStacks moved, or its `key == \"...\"` chain changed shape"
+            % sorted(missing))
+    return keys
+
+
 def _string_array(name):
     """The string literals of a `static const char* <name>[N] = { ... };`."""
     start = PLUGIN_CPP.index("static const char* %s[" % name)
@@ -379,10 +404,10 @@ class AmbientBlendTests(unittest.TestCase):
         self.assertLess(body.index("hasDay"), body.index("FxAmbientNow"),
                         "the hasDay test must come before anything reads ambient")
 
-    def test_the_quad_colour_cannot_be_taken_from_the_layer(self):
-        # ⚠ FxQuadColorFor takes the COLOUR, not the layer, so there is no
+    def test_the_quad_color_cannot_be_taken_from_the_layer(self):
+        # ⚠ FxQuadColorFor takes the COLOR, not the layer, so there is no
         # `layer.color` in scope for it to reach for. Passing the layer would
-        # compile and would draw the night colour at every hour, with only the
+        # compile and would draw the night color at every hour, with only the
         # opacity following the sun — a half-working blend is far harder to spot
         # than one that does nothing.
         m = re.search(r"static FxQuadColor FxQuadColorFor\(([^)]*)\)", PLUGIN_CPP)
@@ -407,7 +432,7 @@ class AmbientBlendTests(unittest.TestCase):
     def test_the_blend_is_smoothed_against_the_wall_clock(self):
         # A per-frame constant would run the fade at a different speed on every
         # machine, and a jump-cut on the raw value makes every screen shift
-        # colour the moment a cloud crosses the sun.
+        # color the moment a cloud crosses the sun.
         body = self._fn("FxSampleAmbient")
         self.assertIn("XPLMGetElapsedTime", body)
         self.assertIn("std::exp(-dt / gFxAmbientTau)", body)
@@ -460,16 +485,29 @@ class PerLayerWireTests(unittest.TestCase):
 
     def test_the_shipped_definition_still_parses_as_the_old_format(self):
         # panelfx.txt is authored by the dev build and shipped to every user. It
-        # must not have grown a key the loader does not know.
-        known = {"enabled", "follow", "curve", "ambient", "ambientref", "target",
-                 "bright", "power", "tfollow", "tcurve", "layer",
-                 "day", "lfollow", "lcurve"}
+        # must not have grown a key the loader does not know — a dropped line is a
+        # layer that silently loses whatever it described, on every machine but the
+        # one it was tuned on.
+        known = _loader_keys()
         for line in PANELFX.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             self.assertIn(line.split()[0], known,
                           "panelfx.txt line the loader would drop: %r" % line)
+
+    def test_the_loader_key_list_tracks_the_loader(self):
+        # ⚠ Guards the guard. The point of scraping is that a key added to the
+        # loader arrives here on its own; `ramp` is the one that proved a listed
+        # set does not, so it is the canary. If this fails while the loader still
+        # handles `ramp`, the scrape has broken — not the format.
+        keys = _loader_keys()
+        for k in ("enabled", "target", "layer", "day", "lcurve", "ramp"):
+            self.assertIn(k, keys, "the loader handles %r but the scrape lost it" % k)
+        # Per-layer extras all live in one `key == "a" || key == "b" || …` arm, and
+        # a scrape that only caught the first branch would look healthy on the
+        # others. Two of the four is the cheapest proof it reads the whole chain.
+        self.assertTrue({"day", "ramp", "lfollow", "lcurve"} <= keys)
 
 
 class LayerCurveTests(unittest.TestCase):
@@ -615,8 +653,8 @@ class LayerCurveTests(unittest.TestCase):
                              "%s must ship — panelfx.txt can carry an lcurve" % symbol)
 
 
-class ColourRampTests(unittest.TestCase):
-    """A layer may carry a START colour for a dark knob (§8k).
+class ColorRampTests(unittest.TestCase):
+    """A layer may carry a START color for a dark knob (§8k).
 
     Every way this goes wrong is a look that is right at one end of the knob, so
     the cockpit reports it as "the ramp does nothing" whichever half is broken.
@@ -645,15 +683,15 @@ class ColourRampTests(unittest.TestCase):
         self.assertLess(body.index("if (!l.hasRamp)"), body.index("out[i] = l.rampColor"),
                         "the early return must come before any interpolation")
 
-    def test_the_ramp_interpolates_toward_the_ambient_resolved_colour(self):
-        """⚠ It takes a COLOUR, not an FxLayer — the same signature rule
+    def test_the_ramp_interpolates_toward_the_ambient_resolved_color(self):
+        """⚠ It takes a COLOR, not an FxLayer — the same signature rule
         FxQuadColorFor has and for the same reason. Reaching into `l.color` here
-        would compile and would pin the top of every ramp to the NIGHT colour, so
+        would compile and would pin the top of every ramp to the NIGHT color, so
         the day half would silently stop moving on any layer with a ramp."""
         m = re.search(r"static void FxLayerColorAtDrive\((.*?)\)\s*\{", PLUGIN_CPP, re.S)
         self.assertIsNotNone(m)
         self.assertIn("const float base[3]", m.group(1))
-        # And the compositor hands it the day-blended colour, never layer.color.
+        # And the compositor hands it the day-blended color, never layer.color.
         # ⚠ Anchored on the DEFINITION. There is a forward declaration of the
         # same signature above the probe, and a lazier pattern matches that and
         # then asserts happily about an empty body.
@@ -664,9 +702,9 @@ class ColourRampTests(unittest.TestCase):
 
     def test_a_ramped_layer_skips_the_full_brightness_fast_path(self):
         """⚠ The fast path used to be `f >= 0.999`, which is TRUE for a layer
-        that does not dim — and a colour correction that stays at full strength
+        that does not dim — and a color correction that stays at full strength
         while powered is the layer most likely to carry a ramp. Taking it there
-        draws the full-knob colour at every knob position: the feature doing
+        draws the full-knob color at every knob position: the feature doing
         nothing in exactly its own primary case."""
         # ⚠ Anchored on the DEFINITION. There is a forward declaration of the
         # same signature above the probe, and a lazier pattern matches that and
@@ -678,10 +716,27 @@ class ColourRampTests(unittest.TestCase):
         m = re.search(r"if \(!ramped && f >= 0\.999f\)", draw)
         self.assertIsNotNone(m, "the fast path must test the ramp as well as f")
 
+    def test_the_ramp_follows_the_RAW_dataref_not_the_effect_intensity(self):
+        """⚠ `driveOut` is the normalized dataref position — after lo/hi, BEFORE
+        the response curve and the floor. Handing it the factor instead (which is
+        what it did until 2026-08-07) makes the ramp an effect intensity: it then
+        moves whenever a curve is edited, puts its midpoint wherever that curve
+        happens to cross 0.5 rather than at half a knob, and never reaches its
+        start color at all on a driver with a floor. A ramp is a statement about
+        the SCREEN, so it follows where the knob is."""
+        m = re.search(r"static float FxRectFactor\(int rectIndex,.*?\n\}",
+                      PLUGIN_CPP, re.S).group(0)
+        self.assertIn("FxDriverNorm(*bright, &norm)", m)
+        self.assertIn("*driveOut = norm;", m)
+        # The factor still gets the curve and the floor — from the SAME read, so
+        # the color and the opacity cannot describe two frames of one knob.
+        self.assertIn("FxShapeFactor(*bright,", m)
+        self.assertNotRegex(m, r"\*driveOut\s*=\s*FxDriverFactor")
+
     def test_the_ramp_is_not_gated_on_follow(self):
         """`follow` answers whether the OPACITY tracks the knob; the ramp answers
-        whether the COLOUR does. Tying them together would make a ramp
-        unavailable on a colour correction, which is what wants one."""
+        whether the COLOR does. Tying them together would make a ramp
+        unavailable on a color correction, which is what wants one."""
         m = re.search(r"static float FxRectFactor\(int rectIndex,.*?\n\}",
                       PLUGIN_CPP, re.S).group(0)
         self.assertRegex(m, r"wantsDrive\s*=\s*follows \|\|.*hasRamp")
@@ -692,7 +747,7 @@ class ColourRampTests(unittest.TestCase):
     def test_the_wire_line_is_its_own_line_and_read_into_a_local(self):
         """The layer line ends with an image NAME read by getline, so nothing can
         follow it there. And ⚠ operator>> zeroes its target on failure: a short
-        line read straight into the layer leaves a BLACK start colour with
+        line read straight into the layer leaves a BLACK start color with
         hasRamp true — a layer that fades to black at a dim knob, which is a
         plausible enough look to survive review."""
         self.assertIn('"ramp %.4f %.4f %.4f\\n"', PLUGIN_CPP)
@@ -711,16 +766,28 @@ class ColourRampTests(unittest.TestCase):
                         PLUGIN_CPP, re.S).group(0)
         self.assertIn("if (l.hasRamp) {", ser)
 
-    def test_the_shipped_definition_carries_no_ramp_yet(self):
-        """Nothing has been authored with one. When the first does, this becomes
-        the place to check it is three parseable floats — the reader FALLS BACK
-        on a bad line and logs one sentence nobody reads."""
+    def test_every_shipped_ramp_line_is_three_parseable_floats(self):
+        """⚠ ONE SHIPS NOW, so this stopped being hypothetical: `ramp` went from a
+        dev-only capability to a line every user's `panelfx.txt` carries.
+
+        A malformed line does not fail loudly — the reader FALLS BACK to one color
+        across the knob and logs a sentence nobody reads, so the layer quietly
+        stops ramping in a release while looking fine on the machine it was tuned
+        on."""
+        found = 0
         for raw in PANELFX.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
             if line.startswith("#") or not line.startswith("ramp "):
                 continue
+            found += 1
             self.assertEqual(len(line.split()), 4,
                              "a shipped ramp line is `ramp <r> <g> <b>`: %r" % line)
+            for v in line.split()[1:]:
+                self.assertGreaterEqual(float(v), 0.0, line)
+                self.assertLessEqual(float(v), 1.0, line)
+        self.assertGreater(found, 0,
+                           "no ramp line ships any more — if that is deliberate, "
+                           "retire this test rather than weakening it")
 
 
 class BrightnessPinTests(unittest.TestCase):
@@ -856,7 +923,7 @@ class ShippingBuildTests(unittest.TestCase):
 
     def test_the_ambient_blend_ships(self):
         """It is part of the LOOK, not an instrument. Left behind the guard, a
-        release would draw every layer's night colour at noon — and it would be
+        release would draw every layer's night color at noon — and it would be
         perfect on the dev machine."""
         for symbol in ("static void FxSampleAmbient()",
                        "static float FxAmbientNow()",
@@ -864,9 +931,9 @@ class ShippingBuildTests(unittest.TestCase):
             self.assertFalse(self._guarded(symbol),
                              "%s must not be behind #if PHOTON_DEV" % symbol)
 
-    def test_the_colour_ramp_ships(self):
+    def test_the_color_ramp_ships(self):
         """It is part of the LOOK. Behind the guard, every ramped layer would
-        draw its full-brightness colour at every knob position in a release —
+        draw its full-brightness color at every knob position in a release —
         and would be perfect on the dev machine."""
         self.assertFalse(self._guarded("static void FxLayerColorAtDrive("))
 

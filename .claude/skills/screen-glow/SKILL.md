@@ -1,6 +1,6 @@
 ---
 name: screen-glow
-description: The six LIGHT_SPILL_CUSTOM screen-glow lights (target `screens`, objects/lights_screens.obj) and their .acf attachment, now part of the base A3xx install. Load before touching the screens DSL fixtures, patch_acf_screens.py, kScreenCount/kScreenDU/kSpillScreenPrefix, or kScreenGain.
+description: The six LIGHT_SPILL_CUSTOM screen-glow lights (target `screens`, objects/lights_screens.obj) and their .acf attachment, now part of the base A3xx install. Load before touching the screens DSL fixtures, core/patch_acf_screens.cpp, kScreenCount/kScreenDU/kSpillScreenPrefix, or kScreenGain.
 ---
 
 # The six screen-glow lights
@@ -15,7 +15,9 @@ the glow is visible is a runtime choice on the plugin's Displays tab. Much of
 
 **Optionality is still structural, and that is what makes the install reversible.** ToLiss
 neither ships nor references this OBJ, so it is inert on disk until
-`build/patch_acf_screens.py` adds it to the `.acf` `_obja/*` table.
+`core/patch_acf_screens.cpp` adds it to the `.acf` `_obja/*` table, as part of the
+installer's base install on A3xx — or on its own via
+`photon-installer screens --aircraft <dir> [--detach]`.
 
 - **The OBJ goes in the manifest's `screens.added[]`, never `backed_up[]`** — no stock
   counterpart, so uninstall must DELETE it. ⚠ Uninstall DETACHES BEFORE DELETING: an `.acf`
@@ -25,9 +27,23 @@ neither ships nor references this OBJ, so it is inert on disk until
   installable. On a dev machine that is the normal state of the file in the sim.
 - ⚠ **A ToLiss aircraft update reverts the attachment** (seen on A320 1.3.2 → 1.3.3).
   Reinstalling restores it; nothing special to remember, since the attach is base install.
+- ⚠ **THE DU KNOB DRIVES SIZE, NOT ALPHA** (2026-08-09). A screen is an area source: up
+  spreads its wash further, it does not make a fixed pool more opaque. So the plugin writes
+  slot **4** (`kSpillSizeSlot`) and `alpha:` in the DSL is a CONSTANT it never touches — the
+  authored intensity, drawn identically plugin-present or absent. `size:` is the reach at a
+  screen turned fully up. Slots 3 and 4 are both index-stable across the two custom-light
+  orderings, which is what makes driving either safe; the map spot (`ReadSpillMap`) still
+  drives ALPHA, and swapping the two looks plausible in a screenshot and wrong in motion.
+- **The authored size is CAPTURED from the pre-filled buffer on first read**
+  (`gScreenBakedSize`), then assigned — never multiplied in place (it would compound to zero
+  if X-Plane fed our output back) and never duplicated as a constant (the .phdsl stays the
+  only place a size is written). ⚠ **The capture is dropped on aircraft load**, or a rebuilt
+  OBJ is scaled against the previous build's reach.
 - **The user's own multiplier is `gDisplays.spill`/`spillGain`**, applied AFTER
-  `BrightnessResponse` and after `kScreenGain`. Off writes 0 into `gScreenAlpha` rather than
-  skipping the loop — a stale alpha would leave the lights lit at whatever they last were.
+  `BrightnessResponse` and after `kScreenGain`. Off writes 0 into `gScreenSizeFactor` rather
+  than skipping the loop — a stale factor would leave the lights lit at whatever they last were.
+- **The dev tuner drives `source: "du"` lights on size too**, so a tuning pass on a debug OBJ
+  judges the look the release produces. Isolate/Blink stay on alpha for every light.
 
 - **The attachment row is COPIED from the aircraft's own `lights_inn.obj` row**, never
   written from constants — that row carries the OBJ origin in feet against a per-airframe
@@ -37,27 +53,36 @@ neither ships nor references this OBJ, so it is inert on disk until
   looks installed to a grep and draws nothing.
 - **Detach renumbers rows above ours down**, never leaving a hole.
 - **Detection is by our FILENAME**, never index, never a hash.
-- **No light here is gated on a LOOK** — there is one look, so nothing to switch, and
-  brightness rides the spill alpha.
+- **No light here is gated on a LOOK** — there is one look, so nothing to switch, and the
+  per-frame level rides the spill dataref's SIZE slot.
 - ⚠ **But the whole OBJ sits inside ONE master `ANIM_hide`** (2026-08-04) on
   `ToLissPhoton/screens/disabled`, from `TARGET_MASTER_GATE` in `build_objs.py`. With
   *backlight illumination* off the renderer skips the block instead of setting up six spill
-  lights and calling six 9-float accessors: alpha 0 made them invisible, never free. The
+  lights and calling six 9-float accessors: a zero driven slot made them invisible, never
+  free. The
   dataref is **derived** from `DisplayFeatureOn(gDisplays.spill)`, never stored. ⚠ It is
   named for the **OFF** state because a missing dataref reads 0 forever, so 0 must mean
   *draw* — `.../enabled` would make an older plugin look like a failed `.acf` attach. ⚠
-  **Both gates stay**: the block answers the user's switch, the per-frame alpha follows the
-  DU knobs and the DC bus. Not emitted in a `--debug` build.
+  **Both gates stay**: the block answers the user's switch, the per-frame size factor follows
+  the DU knobs and the DC bus. Not emitted in a `--debug` build.
 - **Three places must agree** or a light binds the wrong screen, invisibly: the six
   `spill_dref:`/`index:` pairs in the DSL, `kScreenCount`/`kSpillScreenPrefix`/`kScreenDU`
   in `plugin.cpp`, and `source: "du"` in the dev plugin. The two numbers per fixture are
   **different**: `spill_dref` is the light's own slot, `index:` its `DUBrightness` element.
 - **`AirbusFBW/DUBrightness` is NOT left-to-right.** Settled in-sim 2026-07-29: it is the
   Airbus DU numbering, so `kScreenDU = {0, 1, 4, 5, 3, 2}`.
-- **`kScreenGain` is 1.0, not a headroom knob** — the dev tool's Alpha row is the same
-  multiplier, so 0.85 shipped an approved tuning 15% dim. Tone down with `size` or palette.
-- **`DUBrightness` reaches alpha through `BrightnessResponse`, not linearly** — the shared
-  `kBrightnessCurve` (see the `panel-fx` skill), unconditionally on this side.
-- **Baked `alpha` stays low (0.15)** — with the plugin absent X-Plane draws the baked params
-  unmodified, so the degraded state must be a faint glow, never a glare.
-- **Only one debug OBJ at a time** — both `.debug.json` files number slots from 0.
+- **`kScreenGain` is 1.0, not a headroom knob** — the dev tool drives the same multiplier,
+  so 0.85 shipped an approved tuning 15% short. Tone down with `size`, `alpha` or palette.
+- **`DUBrightness` reaches the driven slot through `BrightnessResponse`, not linearly** —
+  the shared `kBrightnessCurve` (see the `panel-fx` skill), unconditionally on this side.
+- **Baked `alpha` is `1` and is the SHIPPING intensity** (retuned 2026-08-10). It was 0.15
+  while alpha was the driven slot and that number was only ever the degraded, plugin-absent
+  fallback; once size took over the dimming, 0.15 became the intensity at every knob
+  position and shipped the approved look ~85% dim. ⚠ It still must never be 0 — an
+  invisible light reads in-sim as a failed `.acf` attachment. With the plugin absent the
+  glow is now full-intensity at full reach and ignores the knobs, which is loud but
+  unmistakably *installed*.
+- **Both debug OBJs can be live at once** (2026-08-09) — slots come from per-target
+  bases (`DEBUG_SLOT_BASE`: interior 0, screens 48..53), the native Lights tab merges
+  both manifests, and `deploy.ps1 -Dev -DebugObjs` installs them in one command. The
+  Python dev tool still drives one manifest at a time (newest wins there).

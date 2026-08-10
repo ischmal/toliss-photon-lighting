@@ -1,4 +1,20 @@
-"""Apply the RealWings wingtip patch from PRECOMPUTED data.
+"""Apply the RealWings wingtip patch from PRECOMPUTED data — THE DEV-SIDE APPLIER.
+
+⚠ THIS IS NO LONGER THE SHIPPED ONE. It was `installer/realwings.py` until
+2026-08-09, when the Python installer was deleted; installs now go through
+`core/patch_realwings.cpp`, which reads the same `realwings_patch.json` out of the
+bundle. This copy survives for ONE reason: the DSL dev loop
+(`build_objs.py build --wing realwings --write`, `watch.py`, `deploy.ps1
+-Wing realwings`) resolves the patch structure from `.phdsl` IN MEMORY and applies
+it immediately, with no bundle step in between. The compiled installer cannot do
+that — it has no DSL parser, deliberately — so a `.phdsl` edit would otherwise take
+a full `make_release` to see in the sim.
+
+⚠ SO THE TWO MUST STAY BYTE-COMPATIBLE, and there is no longer a parity harness
+watching. `core_tests.cpp`'s `realwings:` cases pin the C++ side against the same
+fixtures; if you change the line format here, change it there in the same commit
+and check both. Better still: change neither, and put the tuning in the DSL, which
+is the only place it belongs.
 
 RealWings replaces the ToLiss wing objects and bakes its own wingtip lights into
 MainNEO/SecondaryNEO/Main OBJs, using X-Plane's *sizeable* named lights
@@ -196,7 +212,7 @@ def _read_obj(path: Path) -> str:
     either), which is why it survived: the only visible symptom is that a diff
     against the mod's own `.bak` shows every line changed.
 
-    Found by `tests/test_parity.py` (2026-08-07); the `.acf` patchers already
+    Found by the (since-deleted) parity harness (2026-08-07); the `.acf` patchers already
     followed this rule."""
     return Path(path).read_text(encoding="utf-8", errors="replace", newline="")
 

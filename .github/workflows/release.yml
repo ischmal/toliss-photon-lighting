@@ -1,17 +1,29 @@
 name: Build installers
 
 # Builds every distributable form of the ToLiss Photon installer:
-#   * a per-platform bundle (installer binary + its own-arch plugin + README),
+#   * a per-platform bundle (photon-installer + its own-arch plugin + README),
 #     one each for Windows / macOS / Linux
-#   * a Python-Universal bundle (readable .py, runs on any OS, fat plugin)
-#   * an all-platforms zip bundling the four above into one download
+#   * an all-platforms zip bundling the three above into one download
 #
-# The C++ plugin and PyInstaller both cannot cross-compile, so each per-OS
-# `build` job compiles its own .xpl AND freezes its own installer on its own
-# runner. The only cross-job hand-off is the compiled .xpl (uploaded as a short-
-# lived xpl-<arch> artifact) which the `universal` job merges into a fat plugin.
+# ⚠ ONE INSTALLER SHIPS, AND EACH BUNDLE CARRIES EXACTLY ONE EXECUTABLE. The
+# frozen Python installer, the PyInstaller step that built it and the
+# Python-Universal job that shipped it are all gone (docs/installer_cpp_plan.md
+# §9/§10 decision 1), and so are `install.py`, `installer/` and the parity harness
+# (deleted 2026-08-09). The install/uninstall/detect coverage they carried lives in
+# `photoncore_tests` now — see src/native/tests/install_tests.cpp.
 #
-# Push a v* tag to also cut a GitHub Release with the four bundles attached; run
+# The C++ toolchain cannot cross-compile, so each per-OS `build` job compiles its
+# own .xpl and packs its own bundle on its own runner, and there is no longer any
+# cross-job hand-off: the transient xpl-<arch> artifact existed only to let the
+# `universal` job merge three arches into one fat plugin, and no bundle is fat any
+# more. Every download carries the one arch its own runner built.
+#
+# The per-OS job is also where the TESTS run: photoncore_tests (C++), which now
+# carries the install/uninstall/detect coverage, and the Python suite, which carries
+# the DSL and the build tooling. Both are required steps — between them they are
+# the whole net.
+#
+# Push a v* tag to also cut a GitHub Release with the three bundles attached; run
 # manually (workflow_dispatch) to just produce the artifacts without releasing.
 
 on:
@@ -78,18 +90,53 @@ jobs:
           fi
           test -f "build/ToLissPhoton/${{ matrix.arch }}/ToLissPhoton.xpl"
 
+      # One `cmake --build` already produced all four targets — the .xpl, the
+      # photoncore static lib, photoncore_tests and photon-installer. This step
+      # only locates the two executables (multi-config VS puts them under
+      # Release/, single-config does not) and REFUSES TO CONTINUE if either is
+      # missing.
+      #
+      # ⚠ THAT REFUSAL IS THE POINT. Everything downstream — the tests AND the
+      # bundle — needs these two binaries, and a job that quietly carried on would
+      # either skip the suite or publish a download with nothing to run in it.
+      - name: Locate the compiled installer + core tests
+        id: native
+        shell: bash
+        working-directory: src/native
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            exe="$PWD/build/Release/photon-installer.exe"
+            tests="$PWD/build/Release/photoncore_tests.exe"
+          else
+            exe="$PWD/build/photon-installer"
+            tests="$PWD/build/photoncore_tests"
+          fi
+          test -x "$exe"   || { echo "::error::photon-installer was not built at $exe"; exit 1; }
+          test -x "$tests" || { echo "::error::photoncore_tests was not built at $tests"; exit 1; }
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
+      - name: Run photoncore tests (C++)
+        shell: bash
+        run: "${{ steps.native.outputs.tests }}"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pyinstaller
 
-      # Build the payload with THIS platform's arch only, then freeze the loose
-      # installer and pack the platform bundle (make_exe picks zip/tar.gz per OS).
-      - name: Build platform payload (own arch)
-        run: python build/make_release.py --plugin-dir src/native/build/ToLissPhoton
-      - name: Build platform bundle
-        run: python build/make_exe.py --skip-release
+      # The stdlib-unittest suite: the DSL, the OBJ emitter, the plugin's source
+      # contracts and the build tooling. The installer's own coverage is in
+      # photoncore_tests above, which is why THAT step is not optional either.
+      - name: Run the Python suite (DSL, emitter, build tooling)
+        shell: bash
+        run: python -m unittest discover -s tests
+
+      # Build the payload with THIS platform's arch only and pack the bundle, in
+      # one step: --bundle stages photon-installer + data/ + README.txt and picks
+      # zip/tar.gz per OS. Python is here for the BUILD TOOLING (the DSL emits the
+      # OBJs) — it is not a runtime or install-time dependency of what ships.
+      - name: Build platform bundle (own arch)
+        run: python build/make_release.py --plugin-dir src/native/build/ToLissPhoton --bundle
 
       - name: Upload platform bundle
         uses: actions/upload-artifact@v4
@@ -100,18 +147,8 @@ jobs:
             release/ToLissPhoton-Installer-v*-${{ matrix.os_name }}.tar.gz
           if-no-files-found: error
 
-      # Short-lived hand-off: the compiled .xpl, so the universal job can merge
-      # all three arches into one fat plugin. Not a deliverable — expires fast.
-      - name: Upload compiled plugin (transient)
-        uses: actions/upload-artifact@v4
-        with:
-          name: xpl-${{ matrix.arch }}
-          path: src/native/build/ToLissPhoton # -> <arch>/ToLissPhoton.xpl
-          retention-days: 1
-          if-no-files-found: error
-
-  # ── the Python-Universal bundle (fat plugin, all arches; build once) ──────────
-  universal:
+  # ── the all-platforms zip: the three bundles in one download ──────────────────
+  collect:
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -119,30 +156,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Download + merge compiled plugins (all arches)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: xpl-*
-          merge-multiple: true
-          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
-      - name: Build Python-Universal bundle
-        run: python build/make_release.py --plugin-dir plugin --zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bundle-Python-Universal
-          path: release/ToLissPhoton-Installer-v*-Python-Universal.zip
-          if-no-files-found: error
-
-  # ── the all-platforms zip: the four bundles in one download ───────────────────
-  collect:
-    needs: [build, universal]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Download the four platform bundles
+      - name: Download the three platform bundles
         uses: actions/download-artifact@v4
         with:
           pattern: bundle-*
@@ -156,13 +170,13 @@ jobs:
           path: release/ToLissPhoton-Installer-v*-All-Platforms.zip
           if-no-files-found: error
 
-  # ── attach the four bundles to a GitHub Release (tag pushes only) ─────────────
+  # ── attach the three bundles to a GitHub Release (tag pushes only) ────────────
   release:
     needs: collect
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Download the four platform bundles
+      - name: Download the three platform bundles
         uses: actions/download-artifact@v4
         with:
           pattern: bundle-*

@@ -41,8 +41,10 @@ public:
     explicit PayloadError(const std::string& what) : std::runtime_error(what) {}
 };
 
-// Where the bundle lives. Defaults to `<dir of argv[0]>/payload`; `SetPayloadDir`
-// exists so tests can point it at a fixture.
+// Where the bundle lives: `<dir of the executable>/payload`, falling back to
+// `<dir of the executable>/data` — the name the shipped per-platform bundle uses,
+// so one binary runs both out of a checkout and out of a download.
+// `SetPayloadDir` exists so tests can point it at a fixture.
 void InitFromExecutable(const std::string& exePathUtf8);
 void SetPayloadDir(const std::string& dirUtf8);
 std::string PayloadDir();

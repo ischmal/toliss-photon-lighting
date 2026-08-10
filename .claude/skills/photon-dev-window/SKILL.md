@@ -28,7 +28,10 @@ Displays tab. The Dev window's first four tabs call **the same builders** —
 `BuildConfigTab(kExtAxis)`, `BuildConfigTab(kIntAxis)`, `BuildDisplaysTab`,
 `BuildPerfTab(true)` — deliberately, so a tuning pass never has to wonder whether a
 duplicated copy has drifted. Add a control to the shipping pane and it appears in both; add
-one *here* and it will not.
+one *here* and it will not. The Dev Cockpit tab appends one dev-only section AFTER the
+shared builder — `BuildDevCockpitTuning()`, the **simplified-flood intensity multiplier**
+(`gDbgFloodBoost`, the live `optimize: boost <f>`) — deliberately outside
+`BuildCockpitPerformance`, which the shipping window also builds.
 
 ⚠ **Every Dev tab goes through `DevTab(label, body)`**, which opens the `#23282e` panel
 (`UiBeginPanel`) the content sits on. `ImGuiCol_WindowBg` is transparent — a tab that calls
@@ -63,3 +66,37 @@ are. See the `panel-fx` skill.
   hypothesis that turned out to be wrong, since a four-slot rotation is not an axis
   permutation. `tests/test_light_editor.py` pins the constants the two share;
   `test_dev_light_debug.py` pins the Python stand-down.
+- **The Lights tab MERGES both debug manifests** (2026-08-09): the two targets live on
+  disjoint slot windows (`DEBUG_SLOT_BASE` — interior 0, screens 48..53), so cockpit and
+  screens lights tune side by side. Per-manifest facts (`pos_tunable`, `boost`) are
+  per-LIGHT fields on `DbgLight` now, not globals. The Python tool still drives one
+  manifest at a time and translates its slot base at the dataref boundary
+  (`dbgSlotBase`).
+- **"Edit all screens together"** (`gDbgScreensLink`, default on): with a screens light
+  selected, every shared attribute — v[0..8] plus pitch/yaw, i.e. everything but
+  position — is copied onto the other five AFTER the frame's widgets run. Untick to
+  tune one screen alone.
+- **Save tuning** (Lights tab toolbar + the Cockpit dev section) writes every light
+  whose values differ from its baked seeds, in .phdsl shape, plus the `boost:` factor,
+  to `<repo>/.scratch/light_tuning.txt` (repo path from the Build tab, which
+  `deploy.ps1 -Dev` seeds once; falls back to
+  `Output/preferences/ToLissPhoton_tuning.txt`). `Log DSL` remains the one-light form.
+- ⚠ **THE TUNING FILE IS ALSO AUTO-SAVED AND READ BACK** (2026-08-09). Until then a
+  session lived only in memory, and closing X-Plane, reloading the aircraft or
+  deploying a new build discarded it with no file, no log line and nothing in git —
+  which is exactly how an afternoon of screen-glow color work was lost. So:
+  `DbgAutoSaveTuning()` runs from `XPluginDisable` **and** from the aircraft-load path
+  **before** `DbgLoadManifest()` reseeds the lights; `DbgLoadTuning()` runs at the END
+  of `DbgLoadManifest` (a saved session is EDITS, so the baked values must be in place
+  as its seeds first). `TuningPersistenceTests` pins every one of those orderings.
+  - **Records are keyed on FIXTURE + NAME, never the slot.** Slots shift when the DSL
+    gains or loses a light, and the names repeat (`int_panelflood#a` is two lamps).
+  - **Each record carries `from:`, the seed it was tuned against, and a restore SKIPS
+    any light whose OBJ no longer bakes that seed** (same for `boost_from:`). Without
+    it, editing the .phdsl and rebuilding would appear to do nothing — the saved
+    session would keep overwriting the new authored values.
+  - **Auto-save writes nothing when nothing was touched**, so loading an aircraft
+    cannot blank a previous session's file.
+  - The Lights tab shows the resolved path and a **Forget saved** button; delete the
+    file once a session has been transcribed into the .phdsl, or it keeps being
+    restored over a rebuild.

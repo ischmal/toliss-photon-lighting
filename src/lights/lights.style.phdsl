@@ -53,12 +53,16 @@ palette int_old { white: 1 0.37 0.16;   warm: 1 0.89 0.81; }
 palette int_new { white: 0.8 0.55 0.3;  warm: 1 0.89 0.81; }
 palette int_led { white: 0.82 0.82 1;   warm: 1 0.89 0.81; }
 
-// -- DISPLAY GLOW palette (EXPERIMENTAL, docs/screens_plan.md) --
+// -- DISPLAY GLOW palette (docs/screens_plan.md) --
 // The wash an A320 DU throws into a dark cockpit — NOT a lamp color, but the
-// average of a lit screen, so it is desaturated. Tuned in-sim 2026-07-29; all
-// six settled on ONE color, hence the single entry, reached through a fixture's
-// `profile: screen;` rather than a category.
-palette screen { glow: 0.55 0.66 1; }
+// average of a lit screen. Tuned in-sim 2026-07-29, retuned 2026-08-10 (was
+// 0.55 0.66 1) once the DU knob drove SIZE rather than alpha and the glow could
+// be judged at full intensity: bluer and less washed out. All six settled on ONE
+// color, hence the single entry, reached through a fixture's `profile: screen;`
+// rather than a category.
+// Written at 3 dp because that is what the emitter rounds to — the tuner offered
+// 0.3544 0.6486 1, which would ship as these numbers anyway.
+palette screen { glow: 0.354 0.649 1; }
 
 // -- CATEGORIES: which palette the dataref=0 (original) branch uses --
 // ONE value is the two-way exterior form and still means "<palette> led".
@@ -436,30 +440,49 @@ light int_spot3 {          // was _spot*/2 — ckpt/lights/map, the map light kn
 // into the cockpit. Target `screens` -> objects/lights_screens.obj, an OBJ
 // ToLiss does not ship: nothing draws it until patch_acf_screens.py attaches it.
 //
-// LIGHT_SPILL_CUSTOM for the same reason int_spot3 is: brightness comes from
+// LIGHT_SPILL_CUSTOM for the same reason int_spot3 is: the level comes from
 // AirbusFBW/DUBrightness[<du>], which no rheostat INDEX can express. Each
 // fixture overrides `spill_dref` with its own slot; the plugin writes ONLY the
-// alpha, so color, aim, spread and size all stay here in the DSL.
+// SIZE (2026-08-09 — the knob sets reach, not opacity), so color, alpha, aim
+// and spread all stay here in the DSL, and `size:` here is the reach at a
+// screen turned fully up.
 //
 // ⚠ ONE LOOK, so the fixtures use `profile: screen;` and are NOT gated. Do not
 // "fix" this by inventing a category: a category whose branches render
 // identically is a dead menu row, which has already shipped twice on the
-// interior. What is switchable here is per-frame brightness, and alpha carries it.
+// interior. What is switchable here is the per-frame level, and size carries it.
 light screen_glow {
   color: glow;
-  // ⚠ NOT the in-sim brightness (the plugin overwrites it every frame from
-  //   DUBrightness via kScreenGain), and NOT the dev tuner's Alpha row, which is
-  //   its own stand-in multiplier — a session ending at A=1 means "full DU", not
-  //   "bake 1 here". This is only what X-Plane draws with the plugin ABSENT.
+  // ⚠ THIS IS THE IN-SIM INTENSITY, at every knob position (2026-08-09). The
+  //   plugin used to overwrite alpha every frame from DUBrightness; it now
+  //   drives SIZE instead and never touches this, so what you author here is
+  //   what draws — with the plugin loaded or absent, dimmed or full.
   //   ⚠ Zero is NOT the safe default it looks like: an invisible light reads
   //   in-sim as "the OBJ never attached" and sends the next person after the
   //   wrong bug. Faint beats nothing.
-  alpha: 0.15;
-  // Tuned in-sim 2026-07-29. A screen is a broad, soft, close-range source, not
-  // a lamp: it lights the glareshield and the pilot's face from ~0.5 m.
-  size: 0.9;
-  spread: 80;
+  //   1 since the 2026-08-10 retune (was 0.15). 0.15 was chosen while this was
+  //   the DEGRADED, plugin-absent value and the plugin overwrote it every frame;
+  //   as a constant it left the glow ~85% dimmer than the look that had been
+  //   signed off. The size below is what now carries "dim".
+  alpha: 1;
+  // ⚠ THE DRIVEN SLOT: this is the reach at a screen turned FULLY UP, which the
+  // DU knob scales down to 0 (via BrightnessResponse, kScreenGain and the
+  // Displays tab's strength). A screen is an area source — turning it up
+  // spreads its wash further rather than making a fixed pool more opaque.
+  // Tuned in-sim 2026-07-29, retuned 2026-08-10 (was 0.9) against the new
+  // full-intensity alpha. A screen is a broad, soft, close-range source, not a
+  // lamp: it lights the glareshield and the pilot's face from ~0.5 m.
+  size: 0.498;
+  // Near-hemispherical, retuned 2026-08-10 (was 80). ⚠ 89.5 is the dev tuner's
+  // slider CEILING, not a value it converged on from both sides — if the wash
+  // still wants to be wider, the DSL can say so and the slider is what has to
+  // move (`spread` is stored as cos(half-angle), so 90 is a flat hemisphere).
+  spread: 89.5;
   // Straight aft out of the panel face, toward the pilots.
   // >>> If the glow looks like it comes from behind the seats, set yaw to 0.
+  // ⚠ UNCHANGED by the 2026-08-10 pass. The tuning file reports 13.01 because a
+  // manifest stores the DIRECTION rounded to 3 dp and 13 -> vector -> angle
+  // comes back as 13.01. Transcribing that would bake rounding noise into
+  // source, so it stays 13.
   aim: 13 180;
 }

@@ -59,6 +59,14 @@ struct Manifest {
     std::string wing;
     std::string installedAt;      // ISO 8601, seconds
     std::vector<std::string> backedUp;
+    // ⚠ The counterpart of `backedUp` for files we WROTE that had no stock
+    // original — DELETED on uninstall. Normally empty: every file an exterior
+    // install writes into the aircraft replaces a ToLiss one. It fills only when
+    // a target was ABSENT at install time (a damaged folder, or a ToLiss update
+    // that dropped a file), where recording nothing would orphan our copy in the
+    // aircraft forever. `interior.added` and `screens.added` are the same idea
+    // per-axis; this is the top-level one, so it is not gated on a flag.
+    std::vector<std::string> added;
 
     bool realwingsPatched = false;
     std::string realwingsDir;

@@ -264,13 +264,13 @@ optionally a **daytime** one, and the compositor interpolates between them.
   is judged. **Smoothed** (`tau` 2.5 s) against the **wall clock**, because the raw value
   jumps when a cloud crosses the sun; the **first sample snaps**, or every noon departure
   fades up from night.
-- **Only colour and opacity vary** — never the blend mode or the image (there is no defined
+- **Only color and opacity vary** — never the blend mode or the image (there is no defined
   midpoint between `GL_MIN` and additive). ⚠ **That costs nothing**: `dayOpacity` 0 is a
   night-only layer and `opacity` 0 with a `dayOpacity` above it is a **day-only** one, so
   two eras with different blend modes are **two layers, not two stacks** — and they still
   composite in the authored order while both are partly present at dusk.
-- ⚠ **`FxQuadColorFor` takes a blend mode and a COLOUR, never an `FxLayer`.** Passing the
-  layer compiles and draws the night colour at every hour with only the opacity moving.
+- ⚠ **`FxQuadColorFor` takes a blend mode and a COLOR, never an `FxLayer`.** Passing the
+  layer compiles and draws the night color at every hour with only the opacity moving.
 - ⚠ **`DrawFxLayer` tests the DAY-BLENDED opacity.** Testing `layer.opacity` means a
   day-only layer never draws — the feature failing in exactly its own use case.
 - ⚠ **`if (!l.hasDay) return n;`** is the backward-compatibility guarantee. Every layer in
@@ -281,29 +281,36 @@ optionally a **daytime** one, and the compositor interpolates between them.
   `ambient <lo> <hi> <tau>` and optional `ambientref`. Lazily resolved → **no `AutoLoop`
   retry line**; the sim's own refs are *not* dropped by `FxForgetDrivers`, the override is.
 
-**A layer's colour ramp** (§8k, 2026-08-07): `FxLayer::rampColor` is the colour at a
-**dark** knob and `FxLayer::color` the colour at a **full** one, interpolated on the same
-drive value the dimming reads (`FxLayerColorAtDrive`). A dim LCD is not the authored colour
+**A layer's color ramp** (§8k, 2026-08-07): `FxLayer::rampColor` is the color at a
+**dark** knob and `FxLayer::color` the color at a **full** one, interpolated on the same
+RAW dataref position (`FxLayerColorAtDrive`). A dim LCD is not the authored color
 more faintly — it goes warm and its black stops being lifted — which is why opacity cannot
 express it.
 
-- ⚠ **NOT gated on `follow`.** That switch is about OPACITY; this is about COLOUR. A colour
+- ⚠ **The RAW knob, NOT the effect intensity** (corrected 2026-08-07): `FxDriverNorm`'s
+  value, after `lo`/`hi` and **before** the curve and the floor. Fed the factor, a ramp
+  moves whenever a target's curve is edited, puts its midpoint wherever that curve crosses
+  0.5 instead of at half a knob, and never reaches its start color at all on a driver with
+  a floor. A ramp describes the SCREEN; the factor describes the EFFECT.
+  ⚠ **One read produces both** — `FxDriverNorm` → `FxShapeFactor` → `FxRectFactor` — so a
+  quad's color and its opacity can never describe two frames of a moving knob.
+- ⚠ **NOT gated on `follow`.** That switch is about OPACITY; this is about COLOR. A color
   correction is by definition the layer set to stay at full strength while powered (§8f)
   and is the layer most likely to want a ramp, so tying the two together would remove the
   feature from its own primary case. `FxRectFactor` gained a `driveOut` and reads the knob
   when **either** question wants it (`wantsDrive`); a layer with neither pays nothing.
 - ⚠ **`DrawFxRect`'s fast path tests the ramp, not just `f >= 0.999f`.** A ramped layer
   with `follow` off sits at `f == 1` at a quarter knob; the old path would draw the
-  full-brightness colour and the ramp would look inert.
-- ⚠ **`FxLayerColorAtDrive` takes a COLOUR, not an `FxLayer`** — same rule as
-  `FxQuadColorFor`, and it interpolates toward the **ambient-resolved** colour so the day
+  full-brightness color and the ramp would look inert.
+- ⚠ **`FxLayerColorAtDrive` takes a COLOR, not an `FxLayer`** — same rule as
+  `FxQuadColorFor`, and it interpolates toward the **ambient-resolved** color so the day
   half still moves the top of the ramp.
-- The master switch still outranks it (drive 1 = the authored colour) and the gates still
-  come first. **No daylight half and no opacity of its own** on the start colour — two eras
+- The master switch still outranks it (drive 1 = the authored color) and the gates still
+  come first. **No daylight half and no opacity of its own** on the start color — two eras
   is two layers, and a third opacity would make a dim layer unattributable.
 - Wire **`ramp <r> <g> <b>`**, own line, written only when set. ⚠ Read into a local: a
-  short line read straight into the layer leaves a BLACK start colour with `hasRamp` true.
-- `ColourRampTests` in `tests/test_panel_fx.py`.
+  short line read straight into the layer leaves a BLACK start color with `hasRamp` true.
+- `ColorRampTests` in `tests/test_panel_fx.py`.
 
 **The held brightness pin** (§8l, dev only, Panel FX ▸ *Brightness knob override*). While
 the mouse is down inside the slider it does **two** things, neither redundant:
@@ -344,7 +351,7 @@ screen stayed lit".
 
 **Per-layer dimming** (§8f): `follow` exists at **three** levels — master, target, layer —
 each Inherit deferring to the next one out (`FxLayerFollows` → `FxStackFollows` → master).
-A **colour correction** is a property of the glass and should stay put while powered; a
+A **color correction** is a property of the glass and should stay put while powered; a
 **bleed or wash** is the screen's own light and must track the knob. ⚠ Off still never
 escapes the power/bus/breaker gates. Wire key `lfollow`, own line, written only when
 not Inherit.
@@ -402,7 +409,7 @@ most expensive call in the file for a feature nobody enables is the wrong trade.
   does not exist for the probe's sake: nothing in this compositor has any business
   changing the panel's alpha, additive would saturate it and Darken would floor it. Do
   not "clean it up".
-- ⚠ **If either is wanted back, the two expensive traps are:** a colour-channel mask must
+- ⚠ **If either is wanted back, the two expensive traps are:** a color-channel mask must
   be built at the TOP of the pass or it measures our own paint and latches open a frame at
   a time; and alpha testing must go through `XPLMSetGraphicsState` (parameter four), never
   `glEnable` — X-Plane caches all seven, so enabling behind the cache leaks an alpha test

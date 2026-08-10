@@ -115,12 +115,19 @@ class SlotOrderTests(unittest.TestCase):
         # same light aims two different ways depending on which one is driving.
         self.assertEqual(cpp_int_array("kDbgWireOrder"), py_tuple("DebugDataRefOrder"))
 
-    def test_alpha_is_index_three_in_both_orderings(self):
+    def test_alpha_and_size_are_index_stable_in_both_orderings(self):
         # This is why the SHIPPING lights were never affected by the rotation, and
         # why plugin.cpp's kSpillAlphaSlot is correct. If it ever stops being
         # true, every spill light in the project needs re-checking.
         order = cpp_int_array("kDbgWireOrder")
         self.assertEqual(order[3], 3)
+        # ⚠ Slot 4 matters for the same reason since 2026-08-09: the screen glow
+        # is driven on SIZE, not alpha. The rotation is confined to the trailing
+        # four (cone, then dx/dy/dz), so 0..4 are fixed points — which is what
+        # makes driving either 3 or 4 safe without a translation.
+        self.assertEqual(order[4], 4)
+        self.assertEqual(cpp_int("kSpillAlphaSlot"), 3)
+        self.assertEqual(cpp_int("kSpillSizeSlot"), 4)
 
     def test_the_param_count_is_the_nine_a_custom_light_takes(self):
         self.assertEqual(cpp_int("kDbgParamCount"), 9)
@@ -146,6 +153,102 @@ class OwnershipTests(unittest.TestCase):
         start = PLUGIN_CPP.index("static void StartPanelPass() {")
         end = PLUGIN_CPP.index("\n}", start)
         self.assertIn("RegisterDbgLightRefs();", PLUGIN_CPP[start:end])
+
+
+class TuningPersistenceTests(unittest.TestCase):
+    """⚠ A tuning session must survive the sim closing.
+
+    It did not, once, and the cost was an afternoon of screen-glow color work
+    that existed only in the plugin's memory: no file, no log line, nothing in
+    git, and no way to recover it. Every assertion here is one of the paths that
+    would have saved it.
+    """
+
+    def _fn(self, name):
+        """The body of a function DEFINITION.
+
+        ⚠ Not `index("static void NAME(")` — several of these are forward-declared
+        hundreds of lines above the definition (they have to be: the aircraft-load
+        path calls them long before the tuning file's own section), and matching
+        the declaration slices whatever function happens to follow it. That
+        silently tests the wrong code."""
+        m = re.search(r"static void %s\([^)]*\)\s*\{" % name, PLUGIN_CPP)
+        assert m, "%s definition not found in plugin.cpp" % name
+        return PLUGIN_CPP[m.start():PLUGIN_CPP.index("\n}", m.start())]
+
+    def test_the_session_is_saved_when_the_aircraft_reloads(self):
+        # DbgLoadManifest reseeds every light from the manifest, so it is the
+        # moment a session's edits are dropped. The save must come BEFORE it.
+        start = PLUGIN_CPP.index("static void UpdateMenuVisibility() {")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
+        self.assertIn("DbgAutoSaveTuning();", body)
+        self.assertLess(body.index("DbgAutoSaveTuning();"),
+                        body.index("DbgLoadManifest();"),
+                        "the auto-save must run before the manifest reseeds the lights")
+
+    def test_the_session_is_saved_when_the_plugin_shuts_down(self):
+        # The ordinary way a tuning session ends: the user quits X-Plane.
+        start = PLUGIN_CPP.index("PLUGIN_API void XPluginDisable(void) {")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
+        self.assertIn("DbgAutoSaveTuning();", body)
+        self.assertLess(body.index("DbgAutoSaveTuning();"), body.index("StopPanelPass();"),
+                        "save before StopPanelPass tears the light pool down")
+
+    def test_the_saved_session_is_read_back_after_the_manifest_loads(self):
+        # A saved session is EDITS on top of the baked values, so the restore has
+        # to run last - the manifest's numbers are the seeds it is checked against.
+        body = self._fn("DbgLoadManifest")
+        self.assertIn("DbgLoadTuning();", body)
+        self.assertGreater(body.index("DbgLoadTuning();"), body.rindex("gDbgLights.push_back"),
+                           "the restore must come after the lights are seeded")
+
+    def test_an_untouched_session_cannot_blank_an_existing_file(self):
+        # Auto-save fires on every aircraft load. Without this guard, loading an
+        # aircraft and touching nothing would overwrite a previous session's file
+        # with an empty one - the same loss, by a different route.
+        body = self._fn("DbgAutoSaveTuning")
+        self.assertIn("DbgTuningDirty()", body)
+        self.assertIn("return;", body)
+
+    def test_a_record_is_skipped_when_the_obj_has_moved_past_it(self):
+        """Otherwise editing the .phdsl and rebuilding would appear to do
+        nothing: the saved session would keep overwriting the new authored
+        values, and the only symptom is a number that will not change."""
+        body = self._fn("DbgApplyTuningRecord")
+        self.assertIn("DbgTuningSeed", body)
+        self.assertIn("++stale", body)
+        # ...and the boost factor gets the same treatment, in the reader.
+        reader = self._fn("DbgLoadTuning")
+        self.assertIn("boost_from", reader)
+        self.assertIn("gDbgFloodBoostSeed", reader)
+
+    def test_records_are_keyed_on_fixture_and_name_not_on_slot(self):
+        """Slots shift whenever the DSL gains or loses a light, and the cockpit
+        NAMES repeat - `int_panelflood#a` is two different lamps. Only the pair
+        is unique, so only the pair can be the key."""
+        body = self._fn("DbgApplyTuningRecord")
+        self.assertIn("l.name == r.name && l.fixture == r.fixture", body)
+        # The writer has to emit the other half of that key.
+        writer = self._fn("DbgSaveTuning")
+        self.assertIn('"  fixture: "', writer)
+
+    def test_the_manifest_key_really_is_unique(self):
+        """The assumption the whole file format rests on, checked against the
+        generator rather than assumed: names alone are NOT unique."""
+        cfg = B.load_config(wing="stock")
+        rows = []
+        for target in ("interior", "screens"):
+            em = B.Emitter(cfg, "a320", "stock", target=target, debug=True)
+            em.emit()
+            rows += em.debug_lights
+        names = [r["name"] for r in rows]
+        keys = [(r["fixture"], r["name"]) for r in rows]
+        self.assertLess(len(set(names)), len(names),
+                        "names became unique - the comment explaining why the key "
+                        "is a pair is now misleading, even if nothing is broken")
+        self.assertEqual(len(set(keys)), len(keys),
+                         "fixture+name is no longer unique, so a restored tuning "
+                         "would land on the wrong light")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import build_objs as B  # noqa: E402
-from installer import constants as K  # noqa: E402
+import constants as K  # noqa: E402  (build/constants.py — pinned to core/constants.cpp)
 
 GUS = REPO / "reference" / "gus"
 
@@ -36,7 +36,7 @@ def interior_records(airframe="a320"):
 #: OBJ carries. `optimized` is not a category — it selects between Gus's authored
 #: light stack (0) and the reduced one-light-per-position set (1) — so the helpers
 #: below have to tell the two apart rather than treating every interior gate as a
-#: category. They did not, once, and the symptom was a KeyError in a colour test.
+#: category. They did not, once, and the symptom was a KeyError in a color test.
 INT_CATEGORY_KEYS = ("dome", "map", "mainpnl", "pedestal", "console")
 OPTIMIZE_DREF = "ToLissPhoton/interior/optimized"
 
@@ -967,7 +967,7 @@ class OptimizedLightCountTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 full = colors_by_category(self.recs, profile, optimized=0)
                 lean = colors_by_category(self.recs, profile, optimized=1)
-                self.assertEqual(full, lean)      # colour is untouched either way
+                self.assertEqual(full, lean)      # color is untouched either way
                 for cat in INT_VALUES:
                     a = Counter(r for r in branch_records(self.recs, profile, 0))
                     b = Counter(r for r in branch_records(self.recs, profile, 1))
@@ -1014,8 +1014,8 @@ class OptimizedLightCountTests(unittest.TestCase):
 
     def test_the_survivor_is_boosted_and_nothing_else_is(self):
         """`boost` scales slot 8 — SIZE on an airplane_panel_sp, the only
-        magnitude such a light has (colour is the palette's and brightness is the
-        rheostat's). It must not touch colour, aim or cone: this is meant to
+        magnitude such a light has (color is the palette's and brightness is the
+        rheostat's). It must not touch color, aim or cone: this is meant to
         stand in for the missing lights, not to become a different lamp."""
         full = branch_records(self.recs, 0, optimized=0)
         lean = branch_records(self.recs, 0, optimized=1)
@@ -1041,13 +1041,42 @@ class OptimizedLightCountTests(unittest.TestCase):
         self.assertIn(f'"{OPTIMIZE_DREF}"', cpp)
         self.assertEqual(B.OPTIMIZE_DREF.format(target="interior"), OPTIMIZE_DREF)
 
-    def test_a_debug_build_carries_no_optimize_gate(self):
-        """The dev tuner owns every parameter of every light in a debug OBJ and
-        gives each its own slot; a gate there could only hide the light being
-        tuned, and a boosted duplicate would spend a second slot on it."""
+    def test_a_debug_build_keeps_the_optimize_gate_and_marks_the_copies(self):
+        """A debug build emits BOTH flood sets as tunable lights (2026-08-09; it
+        used to skip `optimize:` entirely, which left the simplified floods
+        untunable) and keeps the ToLissPhoton/interior/optimized gate between
+        them — the Cockpit tab's "Use simplified lighting" checkbox picks which
+        set draws, exactly as on a shipping OBJ. Each simplified copy's manifest
+        row records the authored (unboosted) size plus the factor under `boost`,
+        which is what lets the Dev window drive the factor as ONE live
+        multiplier; its baked seed is size*boost so a plugin-absent load still
+        shows the authored optimized look."""
         cfg = B.load_config(wing="stock")
-        text = B.Emitter(cfg, "a320", "stock", target="interior", debug=True).emit()
-        self.assertNotIn(OPTIMIZE_DREF, _code(text))
+        em = B.Emitter(cfg, "a320", "stock", target="interior", debug=True)
+        text = em.emit()
+        self.assertIn(OPTIMIZE_DREF, _code(text))
+        plain = B.Emitter(cfg, "a320", "stock", target="interior")
+        plain.emit()
+        boosted = [d for d in em.debug_lights if "boost" in d]
+        # one simplified copy per flood fixture, same count as the shipping OBJ's
+        # lean set (branch_records over optimized=1 counts the four floods)
+        self.assertEqual(len(boosted), 4)
+        for d in boosted:
+            self.assertGreater(d["boost"], 1.0)
+            self.assertIn("(simplified)", d["name"])
+            # the manifest size is the AUTHORED one; the OBJ line bakes the
+            # boosted seed for the plugin-absent case
+            self.assertAlmostEqual(
+                d["size"], cfg["lightTypes"]["int_panelflood"]["size"], places=6)
+        for line in _code(text).splitlines():
+            line = line.strip()
+            if not line.startswith("LIGHT_SPILL_CUSTOM"):
+                continue
+            for d in boosted:
+                if line.endswith(f"{B.DEBUG_LIGHT_DREF}/{d['n']}"):
+                    baked_size = float(line.split()[8])
+                    self.assertAlmostEqual(baked_size, d["size"] * d["boost"],
+                                           places=2)
 
     def test_optimize_on_the_exterior_is_refused(self):
         """It would fail OPEN and silently — the plugin registers no
@@ -1150,23 +1179,16 @@ class TrapTests(unittest.TestCase):
         for wing in K.WINGS:
             self.assertFalse((out / "objs" / wing / K.INTERIOR_OBJ).exists())
 
-    def test_trap3_interior_status_is_a_second_axis(self):
-        """⚠ TRAP 3 — detect._obj_marker scans only the EXTERIOR OBJs, so an
-        aircraft with the interior installed and the exterior reverted would
-        report as 'not installed at all' and hide a live modification."""
-        from installer import detect
-        objects = Path(tempfile.mkdtemp(prefix="photon_test_status_"))
-        self.addCleanup(shutil.rmtree, objects, ignore_errors=True)
-        (objects / K.INTERIOR_OBJ).write_text(
-            "I\n800\nOBJ\n\nTEXTURE\t\nPOINT_COUNTS\t0 0 1 0\n"
-            "# ToLissPhoton version: 9.9 wing: interior\n", encoding="utf-8")
-        # the exterior axis correctly reports nothing...
-        self.assertEqual(detect.photon_status(objects), (None, None, False))
-        # ...but the interior axis must NOT, or the install is invisible
-        ver, installed, stale = detect.interior_status(objects)
-        self.assertTrue(installed)
-        self.assertEqual(ver, "9.9")
-        self.assertFalse(stale)
+    # ⚠ TRAP 3 — interior status is a SECOND, INDEPENDENT axis. `PhotonStatus`
+    # scans only the EXTERIOR OBJs, so an aircraft with the interior installed and
+    # the exterior reverted would report as "not installed at all" and hide a live
+    # modification from the user.
+    #
+    # MOVED TO C++ (2026-08-09): the detection code is `core/detect.cpp` and there
+    # is no Python installer left to test. The case lives on as
+    # `detect: the interior is a SECOND, INDEPENDENT status axis` in
+    # src/native/tests/install_tests.cpp. It is named here because the trap is an
+    # INTERIOR trap and this is the file someone editing the interior reads.
 
 
 class TextureSetTests(unittest.TestCase):
@@ -1259,13 +1281,18 @@ class DebugLightBuildTests(unittest.TestCase):
         self.assertEqual(sorted(shown_at[0]), sorted(shown_at[1]))
 
     def test_debug_build_has_no_category_gating(self):
-        """One branch, no gate: the dev plugin owns color while a debug OBJ is
-        installed, so a gate could only hide the light being looked at. The banner
-        says so — one left installed by accident looks like a broken Cockpit menu."""
+        """One branch, no CATEGORY gate: the dev plugin owns color while a debug
+        OBJ is installed, so a gate could only hide the light being looked at.
+        The banner says so — one left installed by accident looks like a broken
+        Cockpit menu. The one interior gate a debug build KEEPS is the
+        simplified-lighting switch (.../optimized): both flood sets are emitted
+        as tunable lights, so both must stay switchable."""
         em, text = self._debug()
         gates = [line for line in text.splitlines()
                  if "ANIM_hide" in line and "ToLissPhoton/interior/" in line]
-        self.assertEqual(gates, [])
+        category_gates = [g for g in gates if "/optimized" not in g]
+        self.assertEqual(category_gates, [])
+        self.assertNotEqual([g for g in gates if "/optimized" in g], [])
         self.assertIn("NOT INSTALLABLE", text)
 
     def test_manifest_carries_the_brightness_source_of_each_light(self):

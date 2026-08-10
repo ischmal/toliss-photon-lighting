@@ -200,14 +200,14 @@ note: 6 light type(s) have a non-unit `dir:`. ...
     int_panelflood   dir 0 -0.15 -0.1   |d| 0.180   unit: 0 -0.832 -0.555
 ```
 
-**It reports rather than rewrites, deliberately.** Normalising should be a visible,
+**It reports rather than rewrites, deliberately.** Normalizing should be a visible,
 reviewable edit to the `.phdsl`, not something a build does behind your back.
 `dir: 0 0 0` is omnidirectional and is never reported.
 
-The **whole interior was normalised on 2026-07-29** (interior deviation #5) after the
+The **whole interior was normalized on 2026-07-29** (interior deviation #5) after the
 maths turned out to explain two standing bugs — Gus's outer panel floods are 0.180 and
 0.258 long against cones of 0.819 and 0.906, i.e. effective thresholds of 4.5 and 3.5,
-which nothing can satisfy. `GusFidelityTests` compares aims with length canonicalised
+which nothing can satisfy. `GusFidelityTests` compares aims with length canonicalized
 out, so a real change of *direction* still fails loudly.
 
 The **exterior is deliberately left alone**. `landing_mid` (1.031) and `landing_wide`
@@ -276,6 +276,51 @@ that dataref — a plugin may modify them in place — and draws them unmodified
 the dataref isn't found, so bake `alpha` at the value you want in the
 plugin-absent case. Used for exactly one light (the interior map spot, whose
 brightness source is a ToLiss dataref rather than a rheostat `index`).
+
+### `optimize:` — a cheaper alternative for a stack of lights
+
+A light may declare how it behaves when the user asks for fewer lights:
+
+```
+int_panelflood#a { cone: 0.819;  optimize: boost 1.5; }   // the reduced set
+int_panelflood#b { cone: 0.906;  optimize: drop; }        // stack only
+```
+
+`drop` means "not in the reduced set"; `boost <f>` means "this light IS the
+reduced set, at `<f>`× its slot-8 magnitude" (`size:` here, `intensity:` on an
+exterior class) to stand in for the ones that went away. A light declaring
+**neither** is emitted once and unconditioned, so a group with no `optimize:`
+anywhere — which is everything but the four main panel floods — is byte-identical
+to what it was before the feature existed.
+
+Where both appear, the emitter writes the group twice, gated against each other
+on `ToLissPhoton/<target>/optimized`:
+
+```
+ANIM_begin
+  ANIM_hide 1 1 ToLissPhoton/interior/optimized     # the authored stack
+  ... every drop + boost light, at its authored size ...
+ANIM_end
+ANIM_begin
+  ANIM_hide 0 0 ToLissPhoton/interior/optimized     # the reduced set
+  ... the boost lights only, scaled ...
+ANIM_end
+```
+
+⚠ **0 is the authored look, and that is not arbitrary.** An `ANIM_hide` whose
+dataref does not exist reads 0 forever, so with the plugin absent — or older than
+the OBJ — you get what the DSL authored, never a reduced set nobody chose.
+
+⚠ **Exterior lights may not declare it.** No `ToLissPhoton/exterior/optimized`
+exists, so it would fail open and silently while breaking the frozen goldens;
+`build` refuses it instead. A malformed value is refused too, rather than falling
+through as "no optimize" — which would put the whole stack in the reduced set and
+read in-sim as the switch doing nothing.
+
+**Which light to keep** is a judgement, not a rule the builder can apply: for the
+panel floods it is the widest cone of each stack (cone is a cosine, so the
+*smallest* number), because that is the one that sets where the pool reaches.
+`tests/test_interior.py::OptimizedLightCountTests` pins that per fixture.
 
 ### The interior profile axis
 
@@ -414,7 +459,7 @@ offset: 0 0 0;                          // stock/durantula: no shift
 these fixtures (they're omitted for RealWings) and no other property conditions on
 `@fence`/`@sharklet`, so nothing else expands over it. `patch_realwings.py` picks
 the value by the mod OBJ's filename (`…NEO.obj → sharklet`, else `fence`) and, per
-airframe, honours a319/a321 `extends` overrides of the offset (appearance is
+airframe, honors a319/a321 `extends` overrides of the offset (appearance is
 inherited unchanged, so only placement varies). Don't confuse the `@fence`/
 `@sharklet` *conditions* with the `group fence`/`group sharklet` blocks in the same
 fixtures — same words, unrelated: the groups are the (omitted) stock lights, the
@@ -455,7 +500,7 @@ block inside an extends airframe *replaces* the inherited fixture.
   per wing mod, the `offset` above. The boundary is empirical: what you have to
   tune lives in the DSL, what you copy from ToLiss and freeze lives in a
   snippet. A per-variant snippet whose only difference from stock is its
-  placement should be deleted in favour of an `offset`.
+  placement should be deleted in favor of an `offset`.
 - `reference/legacy/lights.poc.jsonc` is **superseded** but kept as a frozen
   record of the migration source; `load_config()` only falls back to it if the
   DSL pair is missing. Don't edit it.

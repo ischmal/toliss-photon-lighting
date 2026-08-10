@@ -50,7 +50,24 @@ void InitFromExecutable(const std::string& exePathUtf8) {
     std::error_code ec;
     fs::path exe = fs::weakly_canonical(fsutil::PathFromUtf8(exePathUtf8), ec);
     if (ec) exe = fsutil::PathFromUtf8(exePathUtf8);
-    gPayloadDir = fsutil::PathToUtf8(exe.parent_path() / "payload");
+    const fs::path dir = exe.parent_path();
+
+    // ⚠ TWO NAMES, ONE BINARY. `payload/` is what `make_release.py` stages in a
+    // checkout and the canonical name. `data/` is what the shipped per-platform
+    // bundle calls it — the plainer end-user name, documented in its README — and
+    // this same executable has to run out of both: a dev restages `payload/` and
+    // reruns, a user downloads `data/`. Renaming either would break the other for
+    // no gain; a second accepted name is one line.
+    //
+    // Order matters: `payload/` wins, so a repo checkout that has staged one is
+    // never shadowed by a stale `data/` left over from a bundle build.
+    gPayloadDir = fsutil::PathToUtf8(dir / "payload");
+    if (!Available()) {
+        const std::string alt = fsutil::PathToUtf8(dir / "data");
+        const std::string canonical = gPayloadDir;
+        gPayloadDir = alt;
+        if (!Available()) gPayloadDir = canonical;   // report the canonical name
+    }
 }
 
 void SetPayloadDir(const std::string& dirUtf8) { gPayloadDir = dirUtf8; }

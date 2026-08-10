@@ -249,7 +249,7 @@ class BundleTimeResolutionTests(unittest.TestCase):
     def test_json_round_trip_patches_byte_for_byte(self):
         import json
 
-        from installer import realwings as RW
+        import realwings_apply as RW
 
         data = P.resolve_patch_data(self.cfg)
         reloaded = json.loads(json.dumps(data))
@@ -300,7 +300,7 @@ class BundleTimeResolutionTests(unittest.TestCase):
     def test_an_unknown_airframe_falls_back_to_the_source_airframe(self):
         """`patch-realwings --root` without `--airframe` passes "?"; the applier
         must resolve it the way the DSL resolver did, not KeyError."""
-        from installer import realwings as RW
+        import realwings_apply as RW
 
         data = P.resolve_patch_data(self.cfg)
         rec = RW.record_for(data, "?", "airplane_nav_left_size", "fence", "port")

@@ -17,7 +17,7 @@ namespace fs = std::filesystem;
 // The keys this build understands. Anything else in the file is carried through
 // untouched, so an older installer cannot silently drop a newer one's bookkeeping.
 const char* const kKnownTopLevel[] = {
-    "version", "wing", "installed_at", "backed_up",
+    "version", "wing", "installed_at", "backed_up", "added",
     "realwings_patched", "realwings_dir", "interior", "screens",
 };
 
@@ -71,6 +71,7 @@ Manifest Parse(const std::string& text) {
     m.wing = StringOr(root, "wing", "");
     m.installedAt = StringOr(root, "installed_at", "");
     m.backedUp = StringArray(root, "backed_up");
+    m.added = StringArray(root, "added");
     m.realwingsPatched = BoolOr(root, "realwings_patched", false);
     m.realwingsDir = StringOr(root, "realwings_dir", "");
 
@@ -137,6 +138,11 @@ std::string Serialize(const Manifest& m) {
     root["installed_at"] =
         m.installedAt.empty() ? json(nullptr) : json(m.installedAt);
     PutStrings(root, "backed_up", m.backedUp);
+
+    // ⚠ Written ONLY when non-empty, on the `realwings_patched` precedent: the
+    // case that fills it is rare, so an ordinary install's manifest stays byte
+    // for byte what every prior version wrote.
+    if (!m.added.empty()) PutStrings(root, "added", m.added);
 
     // ⚠ Written ONLY when true, matching the Python side: an install that never
     // touched RealWings leaves no key at all, so an older installer reading this

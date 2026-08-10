@@ -7,10 +7,15 @@ files beside it, which is exactly the report you get from a half-finished instal
 
 The C++ port's answer is `src/native/src/core/version.h` and
 `src/native/src/core/constants.h` — ONE definition that `plugin.cpp`,
-`photon-installer` and `photoncore_tests` all read. What is left on the Python side
-is the transitional second copy in `installer/constants.py` (which dies with the
-Python installer, docs/installer_cpp_plan.md §8c) plus the build tooling that
-reads the version to name a bundle. Those are what this pins.
+`photon-installer` and `photoncore_tests` all read.
+
+⚠ WHAT IS LEFT ON THE PYTHON SIDE IS `build/constants.py`, AND IT IS THE ONLY
+MIRROR. The Python installer is gone (2026-08-09), so the old
+`installer/constants.py` copy went with it; what remains is the handful of facts a
+BUILD script or a DSL test genuinely needs, and this file is the pin that keeps
+that handful honest. The version itself is NOT mirrored — `build/version.py`
+regexes it out of `core/version.h` — because a copied version is precisely the
+one that drifted.
 
 Read by regex rather than by compiling: the point is to fail on a machine with no
 C++ toolchain, which is where the drift would otherwise be invisible.
@@ -30,9 +35,10 @@ CONSTANTS_H = (CORE / "constants.h").read_text(encoding="utf-8", errors="replace
 CONSTANTS_CPP = (CORE / "constants.cpp").read_text(encoding="utf-8", errors="replace")
 
 
-def _installer_constants():
+def _build_constants():
+    """`build/constants.py` — the Python-side mirror this file exists to pin."""
     spec = importlib.util.spec_from_file_location(
-        "photon_installer_constants", REPO / "installer" / "constants.py")
+        "photon_build_constants", REPO / "build" / "constants.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -54,12 +60,30 @@ def _core_version():
 
 
 class VersionTests(unittest.TestCase):
-    def test_core_version_h_and_the_installer_report_the_same_version(self):
-        self.assertEqual(
-            _core_version(), _installer_constants().VERSION,
-            "kPhotonVersion in src/native/src/core/version.h and VERSION in "
-            "installer/constants.py are the same release and must be bumped "
-            "together")
+    def test_the_build_tooling_reads_the_version_rather_than_copying_it(self):
+        """⚠ NOT A TAUTOLOGY — it pins the READER. `build/version.py` regexes
+        `core/version.h`, and its first draft matched the EXAMPLE spelled out in
+        that header's own comment block, reporting the placeholder as the release.
+        This asserts the reader still finds the real definition."""
+        self.assertEqual(_core_version(), _build_constants().VERSION)
+
+    def test_no_build_script_hard_codes_a_second_version(self):
+        """⚠ THE REGRESSION GUARD, Python side. A `VERSION = "0.9"` reappearing
+        in a build script would recreate the exact drift the header exists to end,
+        and nothing would look wrong until the About tab disagreed with the
+        bundle's own filename."""
+        pattern = re.compile(r"""^\s*VERSION\s*=\s*["']""")
+        offenders = []
+        for py in sorted((REPO / "build").glob("*.py")):
+            if py.name == "version.py":     # the one legitimate definition-reader
+                continue
+            text = py.read_text(encoding="utf-8", errors="replace")
+            for n, line in enumerate(text.splitlines(), 1):
+                if pattern.match(line):
+                    offenders.append(f"{py.name}:{n}: {line.strip()}")
+        self.assertEqual(offenders, [],
+                         "these hard-code a version instead of importing it from "
+                         "build/version.py, which reads core/version.h")
 
     def test_the_version_is_a_dotted_number(self):
         # It reaches a filename and the OBJ marker line, so a stray space or a
@@ -87,7 +111,7 @@ class SharedConstantTests(unittest.TestCase):
         detection scan, and the installer's. A mismatch shows up in-sim as the
         Cockpit submenu simply not appearing — i.e. exactly like the mod not
         being installed."""
-        c = _installer_constants()
+        c = _build_constants()
         self.assertIn(f'kInteriorObj[] = "{c.INTERIOR_OBJ}"', CONSTANTS_H)
         # the needle is what the OBJ actually binds, so check the DSL emits it
         layout = (REPO / "src" / "lights" / "lights.layout.phdsl").read_text(
@@ -103,34 +127,47 @@ class SharedConstantTests(unittest.TestCase):
         self.assertIn("photon::kInteriorObj", PLUGIN_CPP)
         self.assertIn("photon::kInteriorObjNeedle", PLUGIN_CPP)
 
-    def test_the_glow_redirect_table_is_shared_with_the_patcher(self):
-        """⚠ A redirected index Photon does NOT drive goes DARK — our array reads
-        0 where we never write. GlowMapForIcao and the installer's patcher used to
-        each own a copy of the index list; they now read one table, and this pins
-        that plugin.cpp really does read it rather than having quietly grown its
-        own literals back."""
-        from installer.patch_glow import REDIRECT
+    def test_the_glow_redirect_table_is_read_not_copied(self):
+        """⚠ A redirected index Photon does NOT drive goes DARK — our array
+        reads 0 where we never write.
 
-        for airframe, indices in REDIRECT.items():
-            joined = ", ".join(str(i) for i in indices)
-            self.assertIn(f'{{"{airframe}", {{{joined}}}}}', CONSTANTS_CPP,
-                          f"core/constants.cpp's GlowRedirect() disagrees with "
-                          f"installer/patch_glow.REDIRECT for {airframe}")
+        This used to compare THREE copies of the index list: GlowMapForIcao, the
+        Python patcher's REDIRECT, and the installer's airframe gate. Two of them
+        are gone — `core/constants.cpp` holds the one table and both the plugin
+        and the patcher read it. So what is left to pin is that they still READ
+        it rather than having quietly grown their own literals back, which is now
+        the only way this drift can return."""
         self.assertIn("photon::GlowIndicesFor", PLUGIN_CPP,
                       "GlowMapForIcao no longer reads the shared table")
+        patch_glow = (CORE / "patch_glow.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn("GlowIndicesFor", patch_glow,
+                      "the glow patcher no longer reads the shared table")
+        self.assertIn("GlowRedirect()", CONSTANTS_CPP)
 
-    def test_the_shared_airframe_table_matches_the_python_one(self):
-        c = _installer_constants()
+    def test_the_shared_airframe_table_matches_the_python_mirror(self):
+        """Only the fields build/constants.py actually mirrors are compared — the
+        SkunkCrafts cfg ids stayed C++-only, because nothing on this side needs
+        them and a mirror nobody reads is drift waiting to happen."""
+        c = _build_constants()
         for key, (glob, folder, obj, pretty) in c.AIRFRAMES.items():
-            ids = c.AIRFRAME_CFG_IDS[key]
             row = (f'{{"{key}", "{glob}", "{folder}", "{obj}",\n'
-                   f'         "{pretty}", "{ids["module"]}", "{ids["name"]}"}}')
+                   f'         "{pretty}"')
             self.assertIn(row, CONSTANTS_CPP,
                           f"core/constants.cpp's Airframes() row for {key} does "
-                          f"not match installer/constants.AIRFRAMES")
+                          f"not match build/constants.AIRFRAMES")
+        # ⚠ Both directions. Matching every mirrored row only catches a Python
+        # entry that drifted; an airframe added in C++ and never mirrored would
+        # pass a one-way check and then surprise whichever build script iterates
+        # AIRFRAMES. The row shape `{"aNNN", "ToLiss…` is unique to Airframes() —
+        # the interior/screens/glow tables list bare keys.
+        cpp_keys = set(re.findall(r'\{"(a\d{3})",\s*"ToLiss', CONSTANTS_CPP))
+        self.assertEqual(set(c.AIRFRAMES), cpp_keys,
+                         "build/constants.AIRFRAMES and core/constants.cpp's "
+                         "Airframes() list different airframes")
 
     def test_the_interior_texture_list_matches(self):
-        c = _installer_constants()
+        c = _build_constants()
         for name in c.INTERIOR_TEXTURES:
             self.assertIn(f'"{name}"', CONSTANTS_CPP)
         # ⚠ and the two with no stock counterpart, which uninstall must DELETE

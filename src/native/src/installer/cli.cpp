@@ -10,6 +10,7 @@
 #include "core/detect.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
+#include "core/patch_acf_screens.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/version.h"
@@ -23,7 +24,7 @@ using nlohmann::json;
 
 const std::set<std::string>& Subcommands() {
     static const std::set<std::string> kCmds = {
-        "detect", "status", "install", "uninstall", "version", "help",
+        "detect", "status", "install", "uninstall", "screens", "version", "help",
     };
     return kCmds;
 }
@@ -44,7 +45,7 @@ struct Args {
 // argument (or the text after `=`).
 const std::set<std::string>& ValuelessFlags() {
     static const std::set<std::string> kFlags = {
-        "json", "dry-run", "interior", "remove-plugin", "force", "help",
+        "json", "dry-run", "interior", "remove-plugin", "force", "help", "detach",
     };
     return kFlags;
 }
@@ -266,6 +267,93 @@ int CmdStatus(const Args& a) {
     return Emit(out, asJson, true);
 }
 
+// `screens` — attach or detach the display-glow OBJ in the aircraft's `.acf`
+// files, and nothing else.
+//
+// ⚠ THIS IS A DEV/REPAIR TOOL, NOT PART OF THE INSTALL FLOW. The attachment is
+// already part of the base install on A3xx; this exists because the reverse is
+// otherwise only reachable by uninstalling everything, and because the `.acf` is
+// the one thing `deploy.ps1` cannot write — it ships OBJs and the plugin, so after
+// a deploy the display-glow OBJ is on disk with nothing referencing it. It
+// replaces `build/patch_acf_screens.py`, deleted with the Python installer.
+//
+// ⚠ IT TOUCHES NO MANIFEST. `.acf` reversal writes stock values back rather than
+// restoring a snapshot, so attach/detach compose with whatever else edited the
+// table — but a hand-detached aircraft whose manifest still claims `screens` will
+// have its uninstall report a detach that changes nothing, which is correct and
+// harmless. Recording it here instead would mean a second writer of a file the
+// install owns.
+int CmdScreens(const Args& a) {
+    const bool asJson = a.Has("json");
+    const bool detach = a.Has("detach");
+    const bool dryRun = a.Has("dry-run");
+    json out = json::object();
+    const std::string aircraft = a.Get("aircraft");
+    if (aircraft.empty()) {
+        out["ok"] = false;
+        out["error"] = "--aircraft is required";
+        return Emit(out, asJson, false);
+    }
+    const std::string airframe = detect::IdentifyAirframe(aircraft);
+    out["aircraft"] = aircraft;
+    out["airframe"] = airframe;
+    out["detach"] = detach;
+    out["dry_run"] = dryRun;
+
+    // ⚠ AN UNIDENTIFIED FOLDER IS A REFUSAL, NOT A FREE PASS. This gate read
+    // `!airframe.empty() && !AirframeHasScreens(...)`, which let any unrecognized
+    // directory through — and `AcfFiles` walks for anything with an attachment
+    // table, so pointing the flag one level too high found a stray `.acf` and
+    // patched it, reporting success. Detection is content-based and finds a ToLiss
+    // folder however it has been renamed, so failing to identify one means it is
+    // not one.
+    if (airframe.empty()) {
+        out["ok"] = false;
+        out["error"] = "not a ToLiss aircraft folder: " + aircraft +
+                       " — point --aircraft at the folder holding the .acf files";
+        return Emit(out, asJson, false);
+    }
+    // ⚠ And gated on WHICH airframe, like the install is. The six positions are the
+    // A3xx flight deck's; attaching this to an A339 would name an OBJ whose lights
+    // sit in someone else's cockpit, and X-Plane would draw them there.
+    if (!AirframeHasScreens(airframe)) {
+        out["ok"] = false;
+        out["error"] = "the display-glow OBJ is not supported on " + airframe +
+                       " — its six positions are the A3xx flight deck's";
+        return Emit(out, asJson, false);
+    }
+
+    patch_acf_screens::RunResult res;
+    try {
+        res = patch_acf_screens::Run(aircraft, detach, dryRun);
+    } catch (const std::exception& e) {
+        out["ok"] = false;
+        out["error"] = e.what();
+        return Emit(out, asJson, false);
+    }
+    out["files"] = res.touched;
+    out["log"] = res.log;
+    // ⚠ No file with a spot block is a FAILURE, not a quiet success. It means the
+    // path is not a ToLiss aircraft folder (or is the wrong one), and reporting
+    // "done" over that is how someone attaches nothing and believes otherwise.
+    if (res.touched.empty()) {
+        out["ok"] = false;
+        out["error"] = "no .acf with an attachment table found under " + aircraft;
+        return Emit(out, asJson, false);
+    }
+    std::vector<std::string> steps;
+    steps.push_back((detach ? "Detached " : "Attached ") + std::string(kScreensObj) +
+                    " in " + std::to_string(res.touched.size()) + " .acf file(s)" +
+                    (dryRun ? " (dry run — nothing written)" : ""));
+    if (!detach && !dryRun) {
+        steps.push_back("The OBJ itself must be in objects/ for this to draw — "
+                        "the installer puts it there; deploy.ps1 does not.");
+    }
+    out["steps"] = steps;
+    out["ok"] = true;
+    return Emit(out, asJson, true);
+}
+
 int CmdInstall(const Args& a) {
     const bool asJson = a.Has("json");
     json out = json::object();
@@ -398,7 +486,8 @@ std::string UsageText() {
     return
         "ToLiss Photon Lighting installer\n"
         "\n"
-        "  photon-installer                        the interactive installer\n"
+        "  photon-installer         [--dry-run] [--xplane-root P]\n"
+        "                                          the interactive installer\n"
         "  photon-installer detect  [--xplane-root P] [--json]\n"
         "  photon-installer status  --aircraft P [--json]\n"
         "  photon-installer install --aircraft P [--wing stock|durantula|realwings]\n"
@@ -406,11 +495,25 @@ std::string UsageText() {
         "                           [--force] [--json]\n"
         "  photon-installer uninstall --aircraft P [--remove-plugin] [--dry-run]\n"
         "                           [--xplane-root P] [--force] [--json]\n"
+        "  photon-installer screens --aircraft P [--detach] [--dry-run] [--json]\n"
+        "                                          attach/detach the display-glow\n"
+        "                                          OBJ in the aircraft's .acf only\n"
         "  photon-installer version [--json]\n"
+        "\n"
+        "`screens` is a repair/dev tool: the attachment is already part of a normal\n"
+        "install on the A319/A320/A321. Use it when a ToLiss update has reverted the\n"
+        ".acf and you do not want to reinstall, or after `deploy.ps1`, which writes\n"
+        "the OBJ but cannot touch the .acf. It edits no manifest.\n"
         "\n"
         "--json prints a machine-readable result on stdout; the exit code is 0 or 1.\n"
         "There are no prompts: missing required input is an error, and a running\n"
-        "X-Plane is a refusal unless --force.\n";
+        "X-Plane is a refusal unless --force.\n"
+        "\n"
+        "--payload-dir P   read the installable files from P instead of the\n"
+        "                  payload/ (or data/) folder beside this binary. Accepted\n"
+        "                  by every mode above. Mainly for development: it is what\n"
+        "                  lets a freshly built binary run against an already-staged\n"
+        "                  bundle without restaging it.\n";
 }
 
 bool IsCliInvocation(const std::vector<std::string>& args) {
@@ -447,6 +550,7 @@ int RunCli(const std::vector<std::string>& argv) {
     if (a.command == "status") return CmdStatus(a);
     if (a.command == "install") return CmdInstall(a);
     if (a.command == "uninstall") return CmdUninstall(a);
+    if (a.command == "screens") return CmdScreens(a);
     if (a.command == "version") return CmdVersion(a);
 
     std::cerr << "unknown subcommand: " << a.command << "\n\n" << UsageText();

@@ -60,7 +60,7 @@ OBJ_FOLDER = {"a319": "A319", "a320": "A320", "a321": "A321", "a339": "A339"}
 #
 # "screens" is the EXPERIMENTAL display-glow target (docs/screens_plan.md). Unlike
 # the other two it is an OBJ ToLiss does not ship and does not reference: nothing
-# draws it until build/patch_acf_screens.py adds it to the .acf attachment table.
+# draws it until the installer adds it to the .acf attachment table.
 # That is what makes it optional — an install that never runs the patcher carries
 # no trace of it. A339 is out for the same reason it is out of the interior: a
 # different cockpit model, so its screen positions are simply not these.
@@ -139,15 +139,23 @@ DEBUG_TARGETS = ("interior", "screens")
 # no rebuild. One branch per fixture and NO category gate — the plugin owns color —
 # so a debug OBJ is not installable. See docs/dev-tools.md.
 DEBUG_LIGHT_DREF = "ToLissPhoton/debug/light"
-# One manifest per debug-capable target, named after its OBJ. Both start their slot
-# numbering at 0, so only ONE debug OBJ can be driven at a time; the dev plugin
-# picks the most recently built manifest and says which in its window. Keep in step
-# with DebugManifests in src/plugin/PI_PhotonDevReload.py.
+# One manifest per debug-capable target, named after its OBJ. Each target's slots
+# start at its DEBUG_SLOT_BASE (below), so BOTH debug OBJs can be installed and
+# driven at once — the native Dev window's Lights tab merges every manifest it
+# finds. Keep in step with DebugManifests in src/plugin/PI_PhotonDevReload.py
+# (the Python tool still drives ONE manifest at a time, the most recently built —
+# it predates the slot bases and only matters when a non-dev .xpl is deployed).
 DEBUG_MANIFESTS = {
     "interior": "lights_inn.debug.json",
     "screens": "lights_screens.debug.json",
 }
 DEBUG_MANIFEST = DEBUG_MANIFESTS["interior"]   # back-compat alias
+# Where each target's dataref slots begin, out of the DEBUG_MAX_LIGHTS pool.
+# Bases exist so two debug OBJs never fight over a slot (2026-08-09; before this,
+# both numbered from 0 and only one could be driven at a time). The interior
+# grows upward from 0 and must stay below the screens base — debug_line enforces
+# it; the screens are exactly six lights at 48..53.
+DEBUG_SLOT_BASE = {"interior": 0, "screens": 48}
 # Position needs a separate mechanism: LIGHT_SPILL_CUSTOM keeps x/y/z in the OBJ and
 # passes only `r g b a size dx dy dz cone` through the dataref, so each debug light is
 # wrapped in three ANIM_trans blocks keyed on ∓DEBUG_POS_RANGE — the dataref then reads
@@ -226,9 +234,10 @@ DEBUG_BANNER = """\
 # ############################################################################
 # Every light below is a LIGHT_SPILL_CUSTOM driven by ToLissPhoton/debug/light/N
 # and there is NO category gating at all, so the Cockpit profile menu does
-# nothing while this file is installed. Color comes from PI_PhotonDevReload.py
-# (XPPython3, dev only); without that plugin loaded these draw at their seed
-# colors and ignore every rheostat.
+# nothing while this file is installed. Color comes from the dev plugin;
+# without one loaded these draw at their seed colors and ignore every rheostat.
+# The one gate that STAYS is ToLissPhoton/interior/optimized: the full and
+# simplified flood sets remain switchable so both are tunable.
 #
 # Put the real file back with:  python build/build_objs.py build --target interior --write"""
 
@@ -295,8 +304,8 @@ SCREENS_CREDIT = """# ToLiss Photon Lighting — display (LCD screen) glow  [EXP
 # that is off or dimmed contributes nothing.
 #
 # THIS OBJ IS NOT REFERENCED BY A STOCK ToLiss AIRCRAFT. It draws only after
-# build/patch_acf_screens.py adds it to the .acf attachment table, and
-# `patch_acf_screens.py --reverse` removes it again.
+# the installer adds it to the .acf attachment table as part of the base install
+# on A3xx (`photon-installer install --aircraft <dir>`), and `uninstall` removes it.
 #
 # There is one LOOK and so no menu row of looks; brightness comes from the alpha
 # slot. The whole file is wrapped in ONE ANIM_hide reading
@@ -563,7 +572,7 @@ class Emitter:
         return f"ToLissPhoton/{self.target}/{category}"
 
     def debug_line(self, merged, *, original, cls, pos, d, cone, rgb, index, size,
-                   category, fixture_name, mount):
+                   category, fixture_name, mount, boost=None):
         """One light, re-expressed as a tunable LIGHT_SPILL_CUSTOM, plus the
         manifest row the dev plugin needs to drive it.
 
@@ -573,13 +582,24 @@ class Emitter:
 
         Alpha is baked at 1 and the plugin multiplies in the rheostat named by the
         manifest's `source`/`index` — LIGHT_SPILL_CUSTOM has no INDEX slot, so a
-        debug light would otherwise ignore the knob it is identified by."""
-        n = len(self.debug_lights)
-        if n >= DEBUG_MAX_LIGHTS:
+        debug light would otherwise ignore the knob it is identified by.
+
+        `boost` marks the SIMPLIFIED (`optimize: boost <f>`) copy of a light: the
+        manifest keeps the authored (unboosted) `size` plus the factor under
+        `boost`, so the Dev window can drive the factor as one live multiplier
+        across every simplified flood; the baked seed is size*boost so a
+        plugin-absent load still shows the authored optimized look."""
+        base = DEBUG_SLOT_BASE[self.target]
+        # This target's slots end where the next base begins (or at the pool end).
+        above = [b for b in DEBUG_SLOT_BASE.values() if b > base]
+        limit = min(above) if above else DEBUG_MAX_LIGHTS
+        n = base + len(self.debug_lights)
+        if n >= limit:
             raise SystemExit(
-                f"debug build needs more than {DEBUG_MAX_LIGHTS} light slots; "
-                f"raise DEBUG_MAX_LIGHTS here and DebugMaxLights in "
-                f"src/plugin/PI_PhotonDevReload.py together")
+                f"debug build: the {self.target!r} target ran past its slot window "
+                f"[{base}, {limit}) — move the bases apart in DEBUG_SLOT_BASE (and "
+                f"raise DEBUG_MAX_LIGHTS / kDbgMaxLights / DebugMaxLights together "
+                f"if the pool itself is full)")
         if self.target == "screens":
             # Every screens light is on a display, never a rheostat, so this is
             # decided by TARGET rather than by probing the light — a screen light
@@ -602,9 +622,12 @@ class Emitter:
         else:
             source, idx = "panel", index
         label = merged.get("label")
-        self.debug_lights.append({
+        name = merged.get("_type", "?") + (f"#{label}" if label else "")
+        if boost is not None:
+            name += " (simplified)"
+        row = {
             "n": n,
-            "name": merged.get("_type", "?") + (f"#{label}" if label else ""),
+            "name": name,
             "fixture": fixture_name,
             "category": category,
             "class": cls or "LIGHT_SPILL_CUSTOM",
@@ -616,8 +639,11 @@ class Emitter:
             "size": size,
             "dir": d,
             "cone": cone,
-        })
-        nums = pos + rgb + [1, size] + d + [cone]
+        }
+        if boost is not None:
+            row["boost"] = boost
+        self.debug_lights.append(row)
+        nums = pos + rgb + [1, size * (boost if boost is not None else 1.0)] + d + [cone]
         light = ("LIGHT_SPILL_CUSTOM\t" + " ".join(fmt(x) for x in nums)
                  + f" {DEBUG_LIGHT_DREF}/{n}")
 
@@ -707,7 +733,8 @@ class Emitter:
             self.nonunit_dirs[(type_name, tuple(d))] = length
 
     def light_line(self, light, *, profile, side, group, fixture, mirror,
-                   fixture_name="", category="", mount=None, boost=1.0):
+                   fixture_name="", category="", mount=None, boost=1.0,
+                   optimized=False):
         # appearance from the light type; placement (position/dir) from the light
         tpl = self.types[light["type"]] if "type" in light else {}
         merged = {**tpl, **{k: v for k, v in light.items() if k != "type"}}
@@ -780,12 +807,15 @@ class Emitter:
             original = f"\tLIGHT_PARAM\t{cls} " + " ".join(fields)
 
         # Built last, from the fully resolved values above, so the debug copy is the
-        # same light made adjustable rather than a different one.
+        # same light made adjustable rather than a different one. `optimized` marks
+        # the simplified copy: its manifest row records the boost factor and the
+        # UNBOOSTED size, so the Dev window can drive the factor live.
         if self.debug:
             return self.debug_line(
                 merged, original=original, cls=cls, pos=pos, d=d, cone=cone, rgb=rgb,
                 index=index, size=self.field(merged.get("size", 1), profile, side),
-                category=category, fixture_name=fixture_name, mount=mount)
+                category=category, fixture_name=fixture_name, mount=mount,
+                boost=boost if optimized else None)
         return original
 
     def groups_of(self, fixture):
@@ -924,28 +954,41 @@ class Emitter:
 
             # A debug light is a multi-line block, so split rather than assume one
             # line. reindent() recomputes depth from ANIM nesting later.
-            def render(light, into, boost=1.0):
+            def render(light, into, boost=1.0, optimized=False):
                 emitted = self.light_line(
                     light, profile=profile, side=side,
                     group=g, fixture=fixture, mirror=mirror,
                     fixture_name=name, category=category or "", mount=mount,
-                    boost=boost)
+                    boost=boost, optimized=optimized)
                 for sub in emitted.split("\n"):
                     into.append(gi + "\t" + sub.lstrip("\t"))
 
+            # `optimize:` is resolved in DEBUG builds too (2026-08-09; they used
+            # to skip it, which left the simplified floods untunable): the full
+            # and simplified sets are emitted as debug lights on their own slots,
+            # still gated on ToLissPhoton/interior/optimized — the Cockpit tab's
+            # "Use simplified lighting" checkbox picks which set draws, exactly
+            # as it does on a shipping OBJ. Only the CATEGORY gate is dropped in
+            # debug (see emit_branch's note above).
             for li_idx, light in enumerate(g["lights"]):
-                opt = None if self.debug else self.optimize_of(
+                opt = self.optimize_of(
                     light, f"{self.airframe} {name} {light.get('type', '?')}")
                 dest = body if opt is None else full
                 if self.annotate:
                     dest.append(f"{gi}\t# @{name}|{gi_idx}|{li_idx}|{side or 'c'}")
                 render(light, dest)
-                # The boosted light appears TWICE — once at its authored size in
-                # the stack, once scaled in the reduced set — because the two sets
-                # are alternatives, not layers. A `drop` light appears once, in
-                # the stack only.
+            # The boosted light appears TWICE — once at its authored size in the
+            # stack, once scaled in the reduced set — because the two sets are
+            # alternatives, not layers. A `drop` light appears once, in the stack
+            # only. A SECOND pass rather than inline in the loop above, so a
+            # debug build's slot numbers run in text order (the stack first, then
+            # its simplified copy) — the manifest is emitted in slot order and
+            # the position/marker arrays index by slot.
+            for light in g["lights"]:
+                opt = self.optimize_of(
+                    light, f"{self.airframe} {name} {light.get('type', '?')}")
                 if opt and opt[0] == "boost":
-                    render(light, lean, boost=opt[1])
+                    render(light, lean, boost=opt[1], optimized=True)
             if full:
                 body.append(f"{gi}\tANIM_begin")
                 body.append(f"{gi}\t\t{self.optimize_gate(False)}")
@@ -1059,6 +1102,21 @@ class Emitter:
             head.append("")
         if self.debug:
             head.append(DEBUG_BANNER)
+            # ⚠ Says so IN THE FILE, because "why is this always on?" is a real
+            # question a debug OBJ raises and nothing else in it answers. A
+            # target whose shipping form is wrapped in a master gate (the
+            # screens) draws unconditionally here, and the comments carried down
+            # from the DSL fixtures still describe the gated form.
+            master = TARGET_MASTER_GATE.get(self.target)
+            if master:
+                head.append(
+                    f"# ⚠ NO MASTER GATE IN THIS BUILD. The shipping {self.target} OBJ "
+                    f"wraps every\n#   light in ONE ANIM_hide reading {master}, so the "
+                    f"user's switch can\n#   skip the whole block. A debug build omits "
+                    f"it — a gate could only hide the\n#   light being tuned — so these "
+                    f"draw whenever the aircraft is loaded, whatever\n#   that switch, "
+                    f"the DC bus or the Displays tab say. Any fixture comment below\n"
+                    f"#   describing that gate is talking about the shipping file.")
             # State which half this file has: "the X/Y/Z knobs do nothing" and "the
             # tool is broken" look identical from the cockpit.
             head.append(
@@ -1339,6 +1397,31 @@ def _write_live(airframe, src: Path):
     return True
 
 
+def _remove_manifest(path: Path):
+    """Delete a stale `<obj>.debug.json`, quietly if it was not there.
+
+    Paired with the manifest write in cmd_build: a target built WITHOUT --debug
+    has to clear the manifest a previous --debug build left, or the dev Lights
+    tab drives datarefs the installed OBJ no longer binds."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:                     # locked, read-only, gone mid-call
+        print(f"  ! could not remove stale {path.name}: {exc}")
+        return False
+    print(f"removed stale {_rel(path)} (this build is not a --debug one)")
+    return True
+
+
+def _remove_live_manifest(airframe, name):
+    """The same, in the installed aircraft's objects/ folder."""
+    objects, reason = _find_aircraft_dir(airframe)
+    if objects is None:
+        return False
+    return _remove_manifest(objects / name)
+
+
 def _patch_realwings_after_build(targets, deploying):
     """After a `--wing realwings` build, patch each built airframe's installed
     RealWings mod OBJs in place so their baked wingtip lights obey the Photon
@@ -1432,6 +1515,18 @@ def cmd_build(args):
                 print(f"wrote {_rel(mdest)} ({len(em.debug_lights)} lights)")
                 if args.write:
                     _write_live(af, mdest)
+            elif tgt in DEBUG_MANIFESTS:
+                # ⚠ A PLAIN BUILD MUST TAKE THE OLD MANIFEST WITH IT. The manifest
+                # is what the Lights tab reads; the OBJ it describes has just been
+                # replaced by one whose lights bind their real datarefs instead of
+                # ToLissPhoton/debug/light/*. Left behind, the tab lists every
+                # light as usual and not one knob moves anything — which reads as
+                # the light editor being broken rather than as "you are no longer
+                # running a debug OBJ". Deleting it is also what makes the tab's
+                # "no debug OBJ installed" line true.
+                _remove_manifest(dest.with_name(DEBUG_MANIFESTS[tgt]))
+                if args.write:
+                    _remove_live_manifest(af, DEBUG_MANIFESTS[tgt])
     if nonunit:
         print(f"note: {len(nonunit)} light type(s) have a non-unit `dir:`. X-Plane "
               f"compares `cone` against a\n  DOT PRODUCT with that vector, so aim and "

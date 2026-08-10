@@ -225,14 +225,27 @@ static const int kIntPrefsSchema = 3;
 static const char* kSpillMapDataRef = "ToLissPhoton/interior/spill/map";
 static const char* kMapRheostatRef  = "ckpt/lights/map";
 static const int   kSpillParamCount = 9;   // r g b a s dx dy dz semi
-static const int   kSpillAlphaSlot  = 3;   // the ONLY slot we drive
+static const int   kSpillAlphaSlot  = 3;   // the map spot's one driven slot
+// The screen glow drives SIZE instead (2026-08-09) — see kScreenSizeSlot below.
+// ⚠ Both 3 and 4 are index-stable across the two custom-light orderings (the
+// rotation is confined to the trailing four: cone, then dx/dy/dz), which is what
+// makes driving either one safe. A test pins it.
+static const int   kSpillSizeSlot   = 4;
 
 // ─── display (screen) glow — EXPERIMENTAL, docs/screens_plan.md ──────────────
 // Six spill lights, one per main display unit, washing each screen's own light
 // back into the cockpit. Same mechanism as the map spot above and for the same
-// reason: brightness comes from a per-screen ToLiss dataref, which no rheostat
+// reason: the level comes from a per-screen ToLiss dataref, which no rheostat
 // INDEX can express, so each light is a LIGHT_SPILL_CUSTOM on a 9-float dataref
-// we own and whose ALPHA SLOT ALONE we drive.
+// we own and whose SIZE SLOT ALONE we drive.
+//
+// ⚠ THE DU KNOB DRIVES SIZE, NOT ALPHA (2026-08-09). A screen is an area
+// source: turning it up spreads its wash further across the glareshield rather
+// than making a fixed pool more intense, and a pool that only ever changed
+// opacity read as a decal fading in and out. So `alpha:` in the DSL is now a
+// CONSTANT that this plugin never overwrites — the authored intensity, drawn
+// identically whether or not we are loaded — and `size:` is the reach at a
+// screen turned fully up, which the knob scales down to 0.
 //
 // ⚠ THREE PLACES MUST AGREE, or a light silently binds the wrong screen:
 //   * these six ToLissPhoton/screens/spill/<n> names,
@@ -250,8 +263,8 @@ static const int   kScreenCount       = 6;
 
 // The whole-OBJ master gate. lights_screens.obj wraps all six lights in ONE
 // ANIM_hide block reading this, so with "backlight illumination" switched off
-// the renderer skips the block instead of drawing six spill lights at alpha 0.
-// Writing 0 into the alpha slot always made them invisible; it never made them
+// the renderer skips the block instead of drawing six spill lights at size 0.
+// Writing 0 into the driven slot always made them invisible; it never made them
 // free, and free is the point of the switch.
 //
 // ⚠ NAMED FOR THE OFF STATE, and that is not a style choice: a dataref an OBJ
@@ -278,14 +291,14 @@ static const char* kScreensDisabledRef = "ToLissPhoton/screens/disabled";
 // test compares the two. A wrong entry is invisible until the dimming test.
 static const int kScreenDU[kScreenCount] = { 0, 1, 4, 5, 3, 2 };
 
-// How much of a screen's brightness becomes spill. A DU at full brightness is a
-// dim source next to a floodlamp, and the OBJ's own `size` already sets the
-// reach, so this only trims the top end.
+// How much of a screen's brightness becomes spill — now a fraction of the OBJ's
+// authored `size`, which is the reach at a screen turned fully up. This only
+// trims the top end.
 //
-// 1.0 since 2026-07-29, was 0.85. The dev tool's Alpha row is the same multiplier
-// this is, so the look signed off in-sim at Alpha 1 is what gain 1 reproduces —
-// 0.85 would have shipped the approved tuning 15% dim. Trim `size` or the palette
-// if it wants toning down, not this.
+// 1.0 since 2026-07-29, was 0.85. The dev tool drives the same multiplier this
+// is, so the look signed off in-sim at full is what gain 1 reproduces — 0.85
+// would have shipped the approved tuning 15% short. Trim `size`, `alpha` or the
+// palette if it wants toning down, not this.
 static const float kScreenGain = 1.0f;
 
 // ─── the DC bus behind the displays ──────────────────────────────────────────
@@ -1148,8 +1161,23 @@ static int gAutoExtResolved = PROFILE_CLASSIC;
 static int gAutoIntResolved = INT_PROFILE_OLD;
 // Live alpha for the map spill light, refreshed each frame from ckpt/lights/map.
 static float gMapSpillAlpha = 0.0f;
-// Live alpha per screen-glow light, refreshed each frame from AirbusFBW/DUBrightness.
-static float gScreenAlpha[kScreenCount] = {0.0f};
+// Live SIZE FACTOR per screen-glow light (0..1 of the OBJ's authored size),
+// refreshed each frame from AirbusFBW/DUBrightness. Not an alpha: the DU knob
+// drives how far a screen's wash reaches, not how opaque it is.
+static float gScreenSizeFactor[kScreenCount] = {0.0f};
+// The OBJ's authored `size:` per screen light, captured from the pre-filled
+// parameter buffer the FIRST time X-Plane asks for that slot, and reset on every
+// aircraft load (a rebuilt OBJ may bake a different one).
+//
+// ⚠ Captured rather than multiplied in place, and rather than duplicated as a
+// constant here. Multiplying would compound to zero if X-Plane ever fed our own
+// output back in — an assumption this project has not measured — and a constant
+// would put the authored size in two files, which is exactly the drift
+// kScreenDU already has to be tested against. Reading once and assigning
+// thereafter is correct under either behavior, and keeps the .phdsl the only
+// place a size is written.
+static float gScreenBakedSize[kScreenCount] = {0.0f};
+static bool  gScreenBakedSeen[kScreenCount] = {false};
 
 static XPLMDataRef gCategoryRefs[NCAT] = {nullptr};
 static XPLMDataRef gIntCategoryRefs[NINT] = {nullptr};
@@ -1195,7 +1223,6 @@ static int        gProfileItemIndex[NPROFILE];
 static int        gIntProfileItemIndex[NINTPROFILE];
 static int        gExtCustomItemIndex = -1;   // "Custom..." at the foot of each submenu
 static int        gIntCustomItemIndex = -1;
-static int        gIntOptimizedItemIndex = -1;  // the Cockpit submenu's light-count toggle
 
 // waveform engine
 static XPLMFlightLoopID gEngineLoopID = nullptr;
@@ -1287,19 +1314,35 @@ static int ReadSpillMap(void* /*refcon*/, float* out, int offset, int max) {
 // The six screen-glow lights' 9-float custom-light datarefs — one accessor shared
 // by all of them, the light's slot arriving as the refcon.
 //
-// Identical contract to ReadSpillMap above: X-Plane pre-fills the buffer with the
-// OBJ's baked parameters and we modify it IN PLACE, so only alpha is touched and
-// color/aim/cone/size keep coming from the DSL. With this plugin absent the
-// dataref is simply not found and the baked parameters are drawn unmodified —
-// which is why lights.style.phdsl bakes alpha low: the degraded state is a faint
-// glow that ignores the DU knobs, never a glare in a dark cockpit.
+// Same modify-in-place contract as ReadSpillMap above — X-Plane pre-fills the
+// buffer with the OBJ's baked parameters — but the driven slot is SIZE, not
+// alpha: the DU knob sets how far a screen's wash reaches, and `alpha:` in the
+// DSL is a constant nothing here overwrites. With this plugin absent the dataref
+// is simply not found and every baked parameter is drawn unmodified, so the
+// degraded state is a faint glow at full reach that ignores the DU knobs, never
+// nothing at all.
+//
+// ⚠ The authored size is CAPTURED on the first read of that slot, then assigned
+// from thereafter (see gScreenBakedSize). Until it has been captured the slot is
+// left alone rather than written: an uncaptured size would otherwise multiply
+// out to 0 and make six lights vanish, which reads in-sim as a failed .acf
+// attachment — the one wrong answer this whole feature keeps having to design
+// against.
 static int ReadSpillScreen(void* refcon, float* out, int offset, int max) {
     if (!out) return kSpillParamCount;          // size query
     if (offset < 0) offset = 0;
     const int slot = (int)(intptr_t)refcon;
+    if (slot < 0 || slot >= kScreenCount) return 0;
     int n = 0;
     for (int i = 0; i < max && offset + i < kSpillParamCount; ++i) {
-        if (offset + i == kSpillAlphaSlot) out[i] = gScreenAlpha[slot];
+        if (offset + i == kSpillSizeSlot) {
+            if (!gScreenBakedSeen[slot] && out[i] > 0.0f) {
+                gScreenBakedSize[slot] = out[i];
+                gScreenBakedSeen[slot] = true;
+            }
+            if (gScreenBakedSeen[slot])
+                out[i] = gScreenBakedSize[slot] * gScreenSizeFactor[slot];
+        }
         ++n;                                     // every other slot passes through
     }
     return n;
@@ -2418,14 +2461,10 @@ static void BuildCockpitPerformance() {
     ImGui::SeparatorText("Performance");
     ImGui::Spacing();
     bool on = gCockpit.optimized;
-    if (ImGui::Checkbox("Reduced light count", &on)) SetCockpitOptimized(on);
+    if (ImGui::Checkbox("Use simplified lighting", &on)) SetCockpitOptimized(on);
     UiItemTooltip(
-        "The main panel floods are drawn as a stack of two or three overlapping "
-        "lights each, which is what gives them their soft edge. This replaces "
-        "each stack with a single wider, brighter light - the same colours and "
-        "the same knobs, six fewer lights for the renderer. Turn it on if the "
-        "cockpit costs you frames; the difference is most visible at night on "
-        "the main panel.");
+        "Lowers lighting fidelity for slightly better GPU performance. "
+        "Results may vary.");
     ImGui::PopID();
 }
 
@@ -2806,9 +2845,6 @@ static void SelectIntProfile(int profile) {
 // sentinel is well clear of any real index, so a stray refcon can't select a
 // profile by accident.
 static const intptr_t kMenuCustom = 1000;
-// The Cockpit submenu's second non-profile item: a CHECKABLE toggle, not a
-// profile, so it gets its own sentinel rather than an index.
-static const intptr_t kMenuOptimized = 1001;
 
 static void ExteriorMenuHandler(void*, void* itemRef) {
     intptr_t i = (intptr_t)itemRef;
@@ -2820,7 +2856,6 @@ static void ExteriorMenuHandler(void*, void* itemRef) {
 static void InteriorMenuHandler(void*, void* itemRef) {
     intptr_t i = (intptr_t)itemRef;
     if (i == kMenuCustom)    { ShowMainWindow(kTabCockpit); return; }
-    if (i == kMenuOptimized) { SetCockpitOptimized(!gCockpit.optimized); return; }
     if (i < 0 || i >= NINTPROFILE) return;
     SelectIntProfile(kIntProfileItems[i].value);
 }
@@ -2857,13 +2892,6 @@ static void UpdateChecks() {
             XPLMCheckMenuItem(gIntMenuID, gIntCustomItemIndex,
                               gIntProfile == INT_PROFILE_CUSTOM ? xplm_Menu_Checked
                                                                 : xplm_Menu_Unchecked);
-        // The light-count toggle carries a real check mark rather than a state in
-        // its label: it is the one item in this submenu that is not a choice of
-        // look, and a tick is how a menu says "this is on".
-        if (gIntOptimizedItemIndex >= 0)
-            XPLMCheckMenuItem(gIntMenuID, gIntOptimizedItemIndex,
-                              gCockpit.optimized ? xplm_Menu_Checked
-                                                 : xplm_Menu_Unchecked);
     }
     // the Custom windows read gValues/gIntValues live each frame — nothing to sync
 }
@@ -2879,8 +2907,6 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     //                         |            Old Halogen / New Halogen / LED
     //                         |            ─────────
     //                         |            Custom...
-    //                         |            ─────────
-    //                         |            [x] Reduced light count
     //                         > Displays...
     //                         ─────────
     //                         > About...
@@ -2932,13 +2958,9 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
         XPLMAppendMenuSeparator(gIntMenuID);
         gIntCustomItemIndex = XPLMAppendMenuItem(gIntMenuID, "Custom...",
                                                  (void*)kMenuCustom, 0);
-        // Below Custom..., under its own separator: it is not a look, it is how
-        // many lights the looks above are allowed to cost. Same wording as the
-        // Cockpit tab's checkbox, which is the other way to reach it.
-        XPLMAppendMenuSeparator(gIntMenuID);
-        gIntOptimizedItemIndex = XPLMAppendMenuItem(gIntMenuID,
-                                                    "Reduced light count",
-                                                    (void*)kMenuOptimized, 0);
+        // The simplified-lighting toggle is NOT here: it lives on the Cockpit
+        // tab's Performance section only (2026-08-09). A checkable row below
+        // Custom... read as a sixth profile nobody had heard of.
     }
 
     // Both go to MenuHandler, whose refcon IS the tab index.
@@ -2973,7 +2995,7 @@ static void DestroyPhotonMenu() {   // not DestroyMenu: collides with the Win32 
     DestroyDebugMenu();
     if (gMenuID) { XPLMDestroyMenu(gMenuID); gMenuID = nullptr; }
     // stale indices must not be re-checked
-    gExtCustomItemIndex = gIntCustomItemIndex = gIntOptimizedItemIndex = -1;
+    gExtCustomItemIndex = gIntCustomItemIndex = -1;
     if (gPluginsMenuItem >= 0) {
         XPLMRemoveMenuItem(XPLMFindPluginsMenu(), gPluginsMenuItem);
         gPluginsMenuItem = -1;
@@ -3043,6 +3065,11 @@ static bool        gDisplayFallbackLogged = false;
 static void ResolveDisplayFallback();
 #if PHOTON_DEV
 static void DbgLoadManifest();
+// Defined with the rest of the tuning file, far below the two places that must
+// call it: the aircraft load (which reseeds every light and would otherwise
+// discard the session) and XPluginDisable.
+static void DbgAutoSaveTuning();
+static void DbgLoadTuning();
 #endif
 
 static void UpdateMenuVisibility() {
@@ -3058,6 +3085,12 @@ static void UpdateMenuVisibility() {
         // detection false negative from "no menu" into "the map spot is black".
         ResolveMapRheostat();  // cache ckpt/lights/map off the per-frame path
         ResolveDUBrightness(); // and AirbusFBW/DUBrightness, for the screen glow
+        // ⚠ The screen glow's authored sizes are captured from the OBJ that is
+        // being replaced right now, so they have to go with it: a rebuilt
+        // lights_screens.obj may bake a different `size:`, and a stale capture
+        // would scale every screen against the previous build's reach with
+        // nothing to show for it but a glow that is quietly the wrong size.
+        for (int i = 0; i < kScreenCount; ++i) gScreenBakedSeen[i] = false;
         // Each aircraft gets one line about the bus, so clear the sticky flag
         // before resolving rather than after: the 1 Hz retry below shares it.
         gDcBusLogged = false;
@@ -3078,6 +3111,10 @@ static void UpdateMenuVisibility() {
         // registration, not merely a stale read.
         BindDcduCommands();
 #if PHOTON_DEV
+        // ⚠ BEFORE the reload below, which reseeds every light from the manifest
+        // and is therefore the moment a session's edits would vanish. Writes
+        // nothing when nothing was touched, so it cannot blank an earlier file.
+        DbgAutoSaveTuning();
         // The debug-light manifest belongs to the aircraft that just loaded, and
         // its OBJ starts reading those datarefs immediately — with the Dev window
         // shut. Loading it lazily when the Lights tab opens would leave every
@@ -3190,9 +3227,9 @@ static float EngineLoop(float, float, int, void*) {
     // reason the map read is — the screens OBJ is an independent opt-in and this
     // plugin cannot tell whether it is attached, so gating on a detection flag
     // would turn a false negative into six dark lights instead of nothing at all.
-    // With the OBJ absent nobody reads gScreenAlpha and this is a wasted array
-    // fetch; with it present and the array missing, every screen reads 0 (dark),
-    // which is the honest answer rather than a guess.
+    // With the OBJ absent nobody reads gScreenSizeFactor and this is a wasted
+    // array fetch; with it present and the array missing, every screen reads 0
+    // (no reach, i.e. dark), which is the honest answer rather than a guess.
     {
         float du[16] = {0.0f};
         int got = 0;
@@ -3206,9 +3243,9 @@ static float EngineLoop(float, float, int, void*) {
         // what a screen actually does and what the FX tint follows too.
         // The user's own switch is the LAST multiplier, applied after the curve —
         // it scales the finished look rather than reshaping the response, so
-        // turning it down dims the glow without moving where the knob's dead zone
-        // ends. Off writes 0 rather than skipping the loop: a stale alpha left in
-        // the array would keep the lights lit at whatever they last were.
+        // turning it down pulls the glow in without moving where the knob's dead
+        // zone ends. Off writes 0 rather than skipping the loop: a stale factor
+        // left in the array would keep the lights lit at whatever they last were.
         const float userGain = DisplayFeatureOn(gDisplays.spill) ? gDisplays.spillGain : 0.0f;
         // ⚠ THE BUS GATE IS NOT A MULTIPLIER, it is a hard zero, and it is read
         // ONCE for all six rather than per light — every one of them is on the
@@ -3218,7 +3255,10 @@ static float EngineLoop(float, float, int, void*) {
         const bool busLive = DcBusLive();
         for (int i = 0; i < kScreenCount; ++i) {
             const int idx = kScreenDU[i];
-            gScreenAlpha[i] = (busLive && idx >= 0 && idx < got)
+            // A FRACTION OF THE AUTHORED SIZE, not an alpha (2026-08-09). Zero is
+            // a pool of no radius, i.e. the light contributes nothing — the same
+            // "off" a zero alpha used to mean.
+            gScreenSizeFactor[i] = (busLive && idx >= 0 && idx < got)
                 ? BrightnessResponse((float)ClampBrightness(du[idx])) * kScreenGain * userGain
                 : 0.0f;
         }
@@ -4102,7 +4142,7 @@ struct PanelQuadBatch {
 // and the second is not an optimization:
 //
 //  * A target is usually a GROUP: "Main displays" is six quads that differ only in
-//    colour, and glColor4f is legal BETWEEN glBegin and glEnd (it sets the current
+//    color, and glColor4f is legal BETWEEN glBegin and glEnd (it sets the current
 //    vertex attribute). Six begin/end pairs were paying six state transitions to
 //    emit twenty-four vertices.
 //  * glGetIntegerv is NOT legal inside a begin/end block. Keeping the query here
@@ -4990,7 +5030,7 @@ struct FxLayer {
     // midnight, which is what every layer authored before the ambient blend
     // existed does — so an old panelfx.txt keeps its look exactly.
     //
-    // ⚠ Only the COLOUR and the OPACITY vary. The blend mode and the image do
+    // ⚠ Only the COLOR and the OPACITY vary. The blend mode and the image do
     // not, and that is a deliberate limit rather than an unfinished corner:
     // interpolating between two modes is not defined (what is halfway between
     // GL_MIN and additive?), and cross-fading two textures would need a second
@@ -5006,33 +5046,42 @@ struct FxLayer {
     float dayColor[3] = { 1.00f, 1.00f, 1.00f };
     float dayOpacity  = 0.00f;
 
-    // ---- the COLOUR RAMP: what this layer looks like at a DIM knob ----------
-    // Absent (`hasRamp` false) means one colour at every knob position, which is
+    // ---- the COLOR RAMP: what this layer looks like at a DIM knob ----------
+    // Absent (`hasRamp` false) means one color at every knob position, which is
     // what every layer authored before this existed does.
     //
-    // `rampColor` is the colour at brightness 0 and the layer's own `color` is
-    // the colour at 1 — so the END of the ramp is the colour that was already
+    // `rampColor` is the color at brightness 0 and the layer's own `color` is
+    // the color at 1 — so the END of the ramp is the color that was already
     // there, and ticking the box on an existing layer cannot change what full
     // brightness looks like. That asymmetry is the whole point: a look is
     // authored at the top of the knob and the ramp says where it CAME from.
     //
     // It is a different question from opacity, and the two do not substitute for
-    // each other. A dim LCD is not the same colour more faintly — it is warmer,
+    // each other. A dim LCD is not the same color more faintly — it is warmer,
     // its backlight is redder, and its black is less lifted. Fading the authored
-    // colour toward nothing (which is all `follow` can do) never produces that.
+    // color toward nothing (which is all `follow` can do) never produces that.
     //
-    // ⚠ It reads the SAME driver value the dimming does, but it is NOT gated on
-    // `follow`: `follow` answers "does the opacity track the knob", this answers
-    // "does the colour". A colour correction that must stay at full strength
-    // while powered (§8f) is exactly the layer most likely to want a ramp, so
-    // tying the two together would make the feature unavailable in its own
-    // primary case. The master switch still outranks both — with it off, every
-    // layer draws at drive 1, which is the colour it was authored as.
+    // ⚠ It interpolates on the RAW dataref position — 0..1 after the driver's
+    // lo/hi and BEFORE the response curve and the floor — not on the factor the
+    // opacity is scaled by. Those are different quantities: the factor is an
+    // EFFECT INTENSITY carrying our model of the backlight and an authored
+    // "never fully off", while a ramp is a statement about the SCREEN, which
+    // reads warmer at a quarter knob whatever we have decided to paint there.
+    // On the factor, the ramp also moved whenever a curve was edited and put its
+    // midpoint wherever that curve crossed 0.5 rather than at half a turn.
     //
-    // ⚠ The start colour has NO daylight half, the same deliberate limit the
+    // ⚠ And it is NOT gated on `follow`: `follow` answers "does the opacity
+    // track the knob", this answers "does the color". A color correction that
+    // must stay at full strength while powered (§8f) is exactly the layer most
+    // likely to want a ramp, so tying the two together would make the feature
+    // unavailable in its own primary case. The master switch still outranks
+    // both — with it off, every layer draws at knob 1, which is the color it was
+    // authored as.
+    //
+    // ⚠ The start color has NO daylight half, the same deliberate limit the
     // blend mode and the image have (§8e): the ramp interpolates toward the
-    // ambient-resolved colour, so the day/night blend still moves the END. Two
-    // eras of ramp is two layers with opposite day opacities, not four colours
+    // ambient-resolved color, so the day/night blend still moves the END. Two
+    // eras of ramp is two layers with opposite day opacities, not four colors
     // on one layer.
     bool  hasRamp      = false;
     float rampColor[3] = { 1.00f, 1.00f, 1.00f };
@@ -5043,9 +5092,9 @@ struct FxLayer {
     //
     // It exists because the two things a layer does are not the same kind of
     // thing. A bleed or a backlight wash IS the screen's light and has to track
-    // the knob. A colour correction — "this LCD is greener than the texture
+    // the knob. A color correction — "this LCD is greener than the texture
     // says" — is a property of the GLASS, and dimming it toward nothing as the
-    // knob comes down means the readout drifts back to the untinted colour
+    // knob comes down means the readout drifts back to the untinted color
     // exactly where the tint is most visible. Before this, one setting had to
     // cover both and the stack was tuned to whichever mattered more.
     //
@@ -5353,11 +5402,22 @@ static bool FxDriverNorm(FxDriver& d, float* out) {
     return true;
 }
 
+// The factor a NORMALIZED reading produces: the shape, then the floor.
+//
+// Split out of FxDriverFactor so that one rect can get BOTH things it needs from
+// a single read of the knob — the opacity's factor, which is shaped, and the
+// color ramp's position, which is not. Reading twice would be cheap (the pass
+// caches), but it would also be two chances for the two to describe different
+// frames of a knob being turned.
+static float FxShapeFactor(const FxDriver& d, const FxCurve* shape, float f) {
+    if (shape) f = FxCurveEval(*shape, f);
+    return d.floorF + f * (1.0f - d.floorF);
+}
+
 static float FxDriverFactor(FxDriver& d, const FxCurve* shape) {
     float f = 0.0f;
     if (!FxDriverNorm(d, &f)) return 1.0f;
-    if (shape) f = FxCurveEval(*shape, f);
-    return d.floorF + f * (1.0f - d.floorF);
+    return FxShapeFactor(d, shape, f);
 }
 
 // Power is a threshold, not a ramp: floorF carries the value it must exceed.
@@ -5400,7 +5460,7 @@ static std::string FxDriverState(FxDriver& d, bool isPower, const FxCurve* shape
 // washes out, its contrast collapses, and the glass in front of it starts
 // reflecting the cockpit rather than glowing.
 //
-// So a layer can carry a SECOND colour and opacity for full daylight, and this
+// So a layer can carry a SECOND color and opacity for full daylight, and this
 // is the number the compositor blends between them with: 0 = night, 1 = day.
 //
 // ⚠ THIS IS AN INTERPOLATION, NOT A SWITCH, and that is the whole point. Dusk is
@@ -5451,7 +5511,7 @@ static float gFxAmbientHi = 0.70f;
 // Seconds to close ~63% of a step. ⚠ NOT cosmetic. The raw value moves the
 // instant the camera passes into a shadow, a cloud crosses the sun, or the
 // aircraft banks — and an un-smoothed blend makes every screen in the cockpit
-// shift colour with it. Slow enough that nothing pops, fast enough that a
+// shift color with it. Slow enough that nothing pops, fast enough that a
 // sunrise is not still catching up at cruise.
 static float gFxAmbientTau = 2.5f;
 
@@ -5972,14 +6032,14 @@ static float FxDisplayUserFactor(int rectIndex) {
 
 // `driveOut`, when asked for, receives the brightness value this rect resolves
 // to — 0..1, through whatever shape is in force, and 1 when nothing readable
-// drives it. It is what the layer's colour RAMP interpolates on, and it is a
+// drives it. It is what the layer's color RAMP interpolates on, and it is a
 // second output rather than a second function because it comes from the same
-// four-line lookup: computing it separately would mean the colour and the
+// four-line lookup: computing it separately would mean the color and the
 // opacity could end up reading two different frames of the same knob.
 //
 // ⚠ It is NOT the return value scaled back up. The returned factor folds in the
 // Displays-tab gain and is zero whenever a gate fails; the drive is the knob
-// alone, which is the only thing a colour ramp can sensibly follow.
+// alone, which is the only thing a color ramp can sensibly follow.
 static float FxRectFactor(int rectIndex, float* driveOut = nullptr) {
     // Set up front so every early return below leaves it defined at the "nothing
     // is dimming this" value. A ramp on a gated rect is moot — the rect draws
@@ -6013,23 +6073,38 @@ static float FxRectFactor(int rectIndex, float* driveOut = nullptr) {
         if (gRectBus[rectIndex].set() && !FxDriverPowered(gRectBus[rectIndex])) return 0.0f;
         if (gRectCb[rectIndex].set()  && !FxDriverPowered(gRectCb[rectIndex]))  return 0.0f;
     }
-    // ⚠ Per LAYER, not per stack. A colour correction that should stay put while
+    // ⚠ Per LAYER, not per stack. A color correction that should stay put while
     // the knob comes down and a backlight wash that must follow it are two layers
     // of the same target, and this is the line that lets them differ.
     const bool follows = FxLayerFollows(gFxDrawLayer, gFxDrawStack);
 
-    // ⚠ Read the knob when EITHER question wants it — dimming, or a colour ramp.
+    // ⚠ Read the knob when EITHER question wants it — dimming, or a color ramp.
     // A layer that does not follow but does ramp still needs the value, which is
     // the case §8k exists for; a layer that does neither must not pay for a read
     // it will not use, which is what this condition buys back.
     const bool wantsDrive = follows || (gFxDrawLayer && gFxDrawLayer->hasRamp);
-    float drive = 1.0f;
+    float norm     = 1.0f;
+    bool  haveNorm = false;
     if (wantsDrive && bright && bright->set())
-        drive = FxDriverFactor(*bright, FxShapeFor(gFxDrawLayer, gFxDrawStack));
-    if (driveOut) *driveOut = drive;
+        haveNorm = FxDriverNorm(*bright, &norm);
+    if (!haveNorm) norm = 1.0f;               // no readable knob = full brightness
+
+    // ⚠ `driveOut` is the RAW dataref position, 0..1 after lo/hi and BEFORE the
+    // response curve and the floor — deliberately not the factor returned below.
+    //
+    // The two are different quantities and the ramp wants this one. The factor
+    // is an EFFECT INTENSITY: it carries the curve, which is Photon's model of
+    // how a backlight responds, and the floor, which is an authored "never fully
+    // off". A color ramp is a statement about the SCREEN — this display reads
+    // warmer at a quarter knob than at full — so it has to follow where the knob
+    // is, not how strongly we have decided to paint there. Feeding it the factor
+    // also made the ramp move whenever a curve was edited, and put its midpoint
+    // wherever the curve happened to cross 0.5 rather than at half a turn.
+    if (driveOut) *driveOut = norm;
 
     if (!follows) return user;
-    return user * drive;
+    if (!haveNorm) return user;
+    return user * FxShapeFactor(*bright, FxShapeFor(gFxDrawLayer, gFxDrawStack), norm);
 }
 
 // The lit pass. Not a knob: pass 1 puts down nothing visible on these faces and
@@ -6097,7 +6172,7 @@ static bool SetFxBlend(GLenum src, GLenum dst, GLenum eq) {
 struct FxQuadColor { float r, g, b, a; GLenum src, dst, eq; };
 
 // ---- a layer as it looks RIGHT NOW ------------------------------------------
-// The authored colour and opacity are the NIGHT half. What the compositor draws
+// The authored color and opacity are the NIGHT half. What the compositor draws
 // is that lerped toward the day half by the ambient blend, so this is the one
 // place the two halves are combined and everything below it works in terms of
 // the result.
@@ -6116,14 +6191,14 @@ static FxLayerNow FxLayerAtAmbient(const FxLayer& l) {
     return n;
 }
 
-// The colour to paint at one rect's brightness. `base` is the ambient-resolved
-// colour — the END of the ramp, i.e. the layer as authored at a full knob — and
-// `drive` walks it back toward the start colour as the knob comes down.
+// The color to paint at one rect's brightness. `base` is the ambient-resolved
+// color — the END of the ramp, i.e. the layer as authored at a full knob — and
+// `drive` walks it back toward the start color as the knob comes down.
 //
-// ⚠ It takes a COLOUR rather than an FxLayerNow for the same reason
+// ⚠ It takes a COLOR rather than an FxLayerNow for the same reason
 // FxQuadColorFor does: the only correct base is the day-blended one, and a
 // signature that accepted the layer would let `l.color` be passed by reflex and
-// silently pin the ramp's top end to the night colour at noon.
+// silently pin the ramp's top end to the night color at noon.
 //
 // ⚠ Shared with the editor's preview swatches. Two implementations of one
 // interpolation is how a preview starts lying about the cockpit.
@@ -6140,11 +6215,11 @@ static void FxLayerColorAtDrive(const FxLayer& l, const float base[3],
         out[i] = l.rampColor[i] + (base[i] - l.rampColor[i]) * t;
 }
 
-// ⚠ Takes the blend mode and the colour SEPARATELY rather than the layer, because
-// the colour it must use is the ambient-blended one and not the layer's own.
+// ⚠ Takes the blend mode and the color SEPARATELY rather than the layer, because
+// the color it must use is the ambient-blended one and not the layer's own.
 // Passing the layer and reaching into `.color` here is the mistake this signature
 // exists to make impossible: it would compile, and it would render the night
-// colour at every hour with only the opacity following the sun.
+// color at every hour with only the opacity following the sun.
 static FxQuadColor FxQuadColorFor(int blend, const float color[3], float o) {
     float r = color[0], g = color[1], b = color[2];
     GLenum src = GL_ONE, dst = GL_ZERO, eq = GL_FUNC_ADD;
@@ -6230,8 +6305,8 @@ static void DrawFxRect(const PanelRect& r, int rectIndex, float cr, float cg, fl
     if (f <= 0.0f) return;                 // dark screen: draw nothing at all
 
     // ⚠ The fast path is now "nothing to recompute", not "f is 1". A layer with
-    // a colour ramp and `follow` off sits at f == 1 with the knob at a quarter —
-    // taking the precomputed quad there would draw the full-brightness colour and
+    // a color ramp and `follow` off sits at f == 1 with the knob at a quarter —
+    // taking the precomputed quad there would draw the full-brightness color and
     // the ramp would look like it does nothing on exactly the layers §8k is for.
     const bool ramped = gFxDrawLayer && gFxDrawLayer->hasRamp && drive < 0.999f;
     if (!ramped && f >= 0.999f) {
@@ -6623,8 +6698,8 @@ static const PerfLever kLevers[kLeverCount] = {
      "them.", true},
     {"Cockpit flood light stacks",
      "The main panel floods as authored - two or three overlapping lights each, "
-     "ten in all. Off is the Cockpit tab's 'Reduced light count': four, one per "
-     "lamp. Real lights again, so this is the renderer's cost, not ours.\n"
+     "ten in all. Off is the Cockpit tab's 'Use simplified lighting': four, one "
+     "per lamp. Real lights again, so this is the renderer's cost, not ours.\n"
      "Dev-only because the A/B run does not move it - it is a cockpit setting "
      "rather than a display effect, and it is measured by the sweep.", true},
 };
@@ -7258,6 +7333,14 @@ struct DbgLight {
     int         n = 0;
     std::string name, fixture, category, cls, source;
     int         index = 0;
+    // >0 marks the SIMPLIFIED (`optimize: boost <f>`) copy of a main panel
+    // flood: v[4] holds the authored UNBOOSTED size and the live size is
+    // v[4] x gDbgFloodBoost, so one knob drives every simplified flood at once.
+    float       boost = 0.0f;
+    // Whether THIS light's OBJ baked the ANIM_trans position wrappers. Per
+    // light rather than global because two debug OBJs are merged now and only
+    // one of them may have been built with them.
+    bool        posTunable = false;
     float       pos[3]  = { 0.0f, 0.0f, 0.0f };     // baked, for display only
     float       v[kDbgParamCount]    = { 0.0f };
     float       base[kDbgParamCount] = { 0.0f };
@@ -7289,6 +7372,16 @@ static int   gDbgCompare   = 1;          // 1 = tunable copies, 0 = the original
 static float gDbgMarkerReach = 0.6f;
 static float gDbgMarkerSize  = 0.05f;
 static bool  gDbgOwnsRefs  = false;      // false = someone else registered them
+// The simplified-flood intensity multiplier (the live form of the DSL's
+// `optimize: boost <f>`), and the authored factor the manifest seeded it from.
+// Edited on the Dev window's Cockpit tab, applied in DbgParams to every light
+// whose manifest row carries `boost`.
+static float gDbgFloodBoost     = 1.0f;
+static float gDbgFloodBoostSeed = 1.0f;
+// Edit the six screen-glow lights as ONE light: while set, every shared
+// attribute (color/brightness/size/aim/spread — everything but position) of the
+// selected screens light is copied onto the other five each frame.
+static bool  gDbgScreensLink = true;
 
 static XPLMDataRef gDbgLightRefs[kDbgMaxLights] = { nullptr };
 static std::string gDbgLightNames[kDbgMaxLights];      // must outlive registration
@@ -7453,11 +7546,22 @@ static void DbgParams(int n, float out[kDbgParamCount]) {
     if (!lp) return;                                      // empty slot: draws nothing
     const DbgLight& l = *lp;
     for (int i = 0; i < kDbgParamCount; ++i) out[i] = l.v[i];
+    // The simplified floods carry their authored size in v[4]; the shared
+    // multiplier is applied here, at the wire, so the knob moves all of them.
+    if (l.boost > 0.0f) out[4] *= gDbgFloodBoost;
 
     const bool selected = (n == gDbgSel);
     if (gDbgMark && selected) { out[0] = 1.0f; out[1] = 0.0f; out[2] = 1.0f; }
 
-    float alpha = out[3] * DbgRheostat(l);
+    // ⚠ A SCREEN-GLOW LIGHT IS DRIVEN ON SIZE, every other light on alpha
+    // (2026-08-09) — the shipping plugin scales the DU knob into reach rather
+    // than opacity, and the tuner has to do the same or a tuning pass judges a
+    // look the release will not produce. Isolate and Blink stay on alpha for
+    // both kinds: they are identification aids, not part of the look.
+    const float rheo = DbgRheostat(l);
+    const bool sizeDriven = (l.source == "du");
+    if (sizeDriven) out[4] *= rheo;
+    float alpha = sizeDriven ? out[3] : out[3] * rheo;
     if (gDbgIsolate && !selected) alpha = 0.0f;
     if (gDbgBlink && selected) {
         // A square wave, not a fade: a hard on/off is easier to pick out of a
@@ -7619,11 +7723,12 @@ static void  WriteDbgCompareInt(void*, int v)      { gDbgCompare = v ? 1 : 0; }
 static void  WriteDbgCompareFloat(void*, float v)  { gDbgCompare = v >= 0.5f ? 1 : 0; }
 
 // --- the manifest ------------------------------------------------------------
-// One per debug-capable target, and BOTH number their slots from 0 — so driving
-// two at once would have every screen light fighting a cockpit light for the same
-// dataref. The most recently WRITTEN manifest wins (that is the build just run)
-// and its name goes in the window, so "why is the list full of the wrong lights"
-// is never a puzzle.
+// One per debug-capable target. Slots come from per-target bases
+// (DEBUG_SLOT_BASE in build_objs.py: interior from 0, screens from 48), so BOTH
+// debug OBJs can be installed and driven at once — every manifest found is
+// merged into one list (2026-08-09; before the bases, both numbered from 0 and
+// the newest manifest won). A per-slot collision can now only come from a stale
+// pre-base OBJ; the duplicate-slot log below still catches it.
 static void DbgLoadManifest() {
     gDbgLights.clear();
     gDbgManifest.clear();
@@ -7633,6 +7738,7 @@ static void DbgLoadManifest() {
     gDbgMarkStride = kDbgMarkDots;
     gDbgSel = -1;
     gDbgScanned = true;
+    gDbgFloodBoost = gDbgFloodBoostSeed = 1.0f;
     for (int i = 0; i < kDbgMaxLights; ++i) gDbgSlotToIndex[i] = -1;
     // The aircraft may have changed, and ToLiss's datarefs go with its plugin.
     gDbgRheoTried = false;
@@ -7648,40 +7754,81 @@ static void DbgLoadManifest() {
         { "cockpit", "lights_inn.debug.json" },
         { "screens", "lights_screens.debug.json" },
     };
-    fs::path best;
-    fs::file_time_type bestTime{};
-    int found = 0;
-    for (int i = 0; i < 2; ++i) {
-        const fs::path p = objs / kCandidates[i].file;
+    for (int c = 0; c < 2; ++c) {
+        const fs::path p = objs / kCandidates[c].file;
         std::error_code ec;
         if (!fs::exists(p, ec)) continue;
-        ++found;
-        const fs::file_time_type t = fs::last_write_time(p, ec);
-        if (ec) continue;
-        if (best.empty() || t > bestTime) { best = p; bestTime = t; gDbgTarget = kCandidates[i].label; }
+        std::ifstream f(p, std::ios::binary);
+        if (!f) { Log("light editor: manifest unreadable: " + p.string()); continue; }
+        std::stringstream ss; ss << f.rdbuf();
+        json::Value root;
+        json::Parser parser(ss.str());
+        if (!parser.value(root) || root.type != json::Value::Obj) {
+            Log("light editor: could not parse " + p.string());
+            continue;
+        }
+        if (!gDbgManifest.empty()) gDbgManifest += " + ";
+        gDbgManifest += p.filename().string();
+        if (!gDbgTarget.empty()) gDbgTarget += "+";
+        gDbgTarget += kCandidates[c].label;
+
+        bool posTunable = false;
+        if (const json::Value* v = root.find("pos_tunable")) posTunable = v->i != 0;
+        gDbgPosTunable = gDbgPosTunable || posTunable;
+        int markerDots = 0;
+        if (const json::Value* v = root.find("marker_dots")) markerDots = (int)v->i;
+        if (markerDots > 0) {
+            if (gDbgMarkerDots == 0) gDbgMarkerDots = markerDots;
+            else if (gDbgMarkerDots != markerDots)
+                Log("light editor: the two manifests disagree on marker_dots ("
+                    + std::to_string(gDbgMarkerDots) + " vs "
+                    + std::to_string(markerDots) + ") - the marker array is strided "
+                    "by the first, so the other OBJ's markers land on the wrong "
+                    "lights. Rebuild both debug OBJs from one tree.");
+        }
+
+        const json::Value* lights = root.find("lights");
+        if (!lights || lights->type != json::Value::Arr) continue;
+        for (size_t i = 0; i < lights->arr.size(); ++i) {
+            const json::Value& e = lights->arr[i];
+            if (e.type != json::Value::Obj) continue;
+            DbgLight l;
+            l.n = (int)gDbgLights.size();
+            l.posTunable = posTunable;
+            if (const json::Value* v = e.find("n"))        l.n = (int)v->i;
+            if (const json::Value* v = e.find("name"))     l.name = v->s;
+            if (const json::Value* v = e.find("fixture"))  l.fixture = v->s;
+            if (const json::Value* v = e.find("category")) l.category = v->s;
+            if (const json::Value* v = e.find("class"))    l.cls = v->s;
+            if (const json::Value* v = e.find("source"))   l.source = v->s;
+            if (const json::Value* v = e.find("index"))    l.index = (int)v->i;
+            if (const json::Value* v = e.find("boost"))    l.boost = (float)v->num();
+            if (l.boost > 0.0f) gDbgFloodBoostSeed = l.boost;
+            if (const json::Value* v = e.find("pos"))
+                for (int k = 0; k < 3; ++k)
+                    if (const json::Value* c = v->at((size_t)k)) l.pos[k] = (float)c->num();
+            if (const json::Value* v = e.find("rgb"))
+                for (int k = 0; k < 3; ++k)
+                    if (const json::Value* c = v->at((size_t)k)) l.v[k] = (float)c->num();
+            l.v[3] = 1.0f;                                // alpha: the rheostat scales it
+            if (const json::Value* v = e.find("size")) l.v[4] = (float)v->num(1.0);
+            if (const json::Value* v = e.find("dir"))
+                for (int k = 0; k < 3; ++k)
+                    if (const json::Value* c = v->at((size_t)k)) l.v[5 + k] = (float)c->num();
+            l.v[8] = 1.0f;
+            if (const json::Value* v = e.find("cone")) l.v[8] = (float)v->num(1.0);
+
+            DbgDirToAim(&l.v[5], &l.pitch, &l.yaw);
+            l.basePitch = l.pitch; l.baseYaw = l.yaw;
+            for (int k = 0; k < kDbgParamCount; ++k) l.base[k] = l.v[k];
+            gDbgLights.push_back(l);
+        }
     }
-    if (best.empty()) {
+    if (gDbgManifest.empty()) {
         gDbgNote = "no debug OBJ installed";
         return;
     }
-    if (found > 1)
-        Log("light editor: two debug OBJs are installed and they share these dataref "
-            "slots - driving the newest (" + gDbgTarget + "). Rebuild the other "
-            "WITHOUT --debug.");
-
-    std::ifstream f(best, std::ios::binary);
-    if (!f) { gDbgNote = "manifest unreadable"; return; }
-    std::stringstream ss; ss << f.rdbuf();
-    json::Value root;
-    json::Parser parser(ss.str());
-    if (!parser.value(root) || root.type != json::Value::Obj) {
-        gDbgNote = "manifest parse failed";
-        Log("light editor: could not parse " + best.string());
-        return;
-    }
-    gDbgManifest = best.filename().string();
-    if (const json::Value* v = root.find("pos_tunable")) gDbgPosTunable = v->i != 0;
-    if (const json::Value* v = root.find("marker_dots"))  gDbgMarkerDots = (int)v->i;
+    gDbgFloodBoost = gDbgFloodBoostSeed;
     if (gDbgMarkerDots > 0 && gDbgMarkerDots != kDbgMarkDots) {
         Log("light editor: the installed OBJ bakes " + std::to_string(gDbgMarkerDots)
             + " marker dots per light but this build assumes "
@@ -7692,40 +7839,6 @@ static void DbgLoadManifest() {
     }
     gDbgMarkStride = (gDbgMarkerDots > 0 && gDbgMarkerDots <= kDbgMarkDots)
                    ? gDbgMarkerDots : kDbgMarkDots;
-
-    const json::Value* lights = root.find("lights");
-    if (!lights || lights->type != json::Value::Arr) { gDbgNote = "manifest has no lights"; return; }
-    for (size_t i = 0; i < lights->arr.size(); ++i) {
-        const json::Value& e = lights->arr[i];
-        if (e.type != json::Value::Obj) continue;
-        DbgLight l;
-        l.n = (int)i;
-        if (const json::Value* v = e.find("n"))        l.n = (int)v->i;
-        if (const json::Value* v = e.find("name"))     l.name = v->s;
-        if (const json::Value* v = e.find("fixture"))  l.fixture = v->s;
-        if (const json::Value* v = e.find("category")) l.category = v->s;
-        if (const json::Value* v = e.find("class"))    l.cls = v->s;
-        if (const json::Value* v = e.find("source"))   l.source = v->s;
-        if (const json::Value* v = e.find("index"))    l.index = (int)v->i;
-        if (const json::Value* v = e.find("pos"))
-            for (int k = 0; k < 3; ++k)
-                if (const json::Value* c = v->at((size_t)k)) l.pos[k] = (float)c->num();
-        if (const json::Value* v = e.find("rgb"))
-            for (int k = 0; k < 3; ++k)
-                if (const json::Value* c = v->at((size_t)k)) l.v[k] = (float)c->num();
-        l.v[3] = 1.0f;                                    // alpha: the rheostat scales it
-        if (const json::Value* v = e.find("size")) l.v[4] = (float)v->num(1.0);
-        if (const json::Value* v = e.find("dir"))
-            for (int k = 0; k < 3; ++k)
-                if (const json::Value* c = v->at((size_t)k)) l.v[5 + k] = (float)c->num();
-        l.v[8] = 1.0f;
-        if (const json::Value* v = e.find("cone")) l.v[8] = (float)v->num(1.0);
-
-        DbgDirToAim(&l.v[5], &l.pitch, &l.yaw);
-        l.basePitch = l.pitch; l.baseYaw = l.yaw;
-        for (int k = 0; k < kDbgParamCount; ++k) l.base[k] = l.v[k];
-        gDbgLights.push_back(l);
-    }
     if (gDbgLights.size() > (size_t)kDbgMaxLights) {
         Log("light editor: manifest holds " + std::to_string(gDbgLights.size())
             + " lights but only " + std::to_string(kDbgMaxLights)
@@ -7744,6 +7857,12 @@ static void DbgLoadManifest() {
     if (!gDbgLights.empty()) gDbgSel = gDbgLights[0].n;
     gDbgNote = std::to_string(gDbgLights.size()) + " lights from " + gDbgManifest;
     Log("light editor: " + gDbgNote + (gDbgPosTunable ? " (position tunable)" : ""));
+    // ⚠ LAST, and only here. A saved session is a set of EDITS, so every light
+    // has to be seeded from the manifest first — those baked values are what the
+    // records are checked against before being applied. It also overwrites
+    // gDbgNote, deliberately: "restored 6 tuned lights" is the more surprising
+    // half of what just happened.
+    DbgLoadTuning();
 }
 
 // Registered at XPluginStart, before any OBJ loads: an OBJ binds dataref NAMES at
@@ -8457,7 +8576,7 @@ static std::string SerializeFxStacks() {
                               l.dayOpacity);
                 out += buf;
             }
-            // ⚠ THREE floats, not four. The ramp's start colour has no opacity
+            // ⚠ THREE floats, not four. The ramp's start color has no opacity
             // of its own — opacity across the knob is what `lfollow` and the
             // curve already answer, and a second opacity here would be a third
             // control multiplying into the same number with no way to tell from
@@ -8549,7 +8668,7 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
                 // ⚠ Into a local, then adopted — the same rule the tile field
                 // learned. operator>> zeroes its target on failure, so a short
                 // line read straight into the layer would leave a BLACK start
-                // colour and hasRamp true: a layer that fades to black at a dim
+                // color and hasRamp true: a layer that fades to black at a dim
                 // knob, which is a plausible enough look that nobody would read
                 // it as a truncated line.
                 float c[3] = { 0.0f, 0.0f, 0.0f };
@@ -8558,7 +8677,7 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
                     l.hasRamp = true;
                 } else {
                     Log("panel fx: ramp line needs three floats - the layer keeps "
-                        "one colour across the knob");
+                        "one color across the knob");
                 }
             } else if (key == "lcurve") {
                 // ⚠ All or nothing. A table read into the layer as the stream
@@ -8663,9 +8782,9 @@ static void SavePanelFx() {
     f << "# tfollow 0|1  /  tcurve 0|1   (optional, per target; absent = inherit)\n";
     f << "# layer <blend> <enabled> <r> <g> <b> <opacity> <tile> <image|->\n";
     f << "#   day <r> <g> <b> <opacity>  (optional, per LAYER: the daylight half)\n";
-    f << "#   ramp <r> <g> <b>           (optional, per LAYER: the colour at a\n";
-    f << "#                               dark knob; the layer's own colour is\n";
-    f << "#                               the colour at a full one)\n";
+    f << "#   ramp <r> <g> <b>           (optional, per LAYER: the color at a\n";
+    f << "#                               dark knob; the layer's own color is\n";
+    f << "#                               the color at a full one)\n";
     f << "#   lfollow 0|1                (optional, per LAYER; absent = inherit)\n";
     f << "#   lcurve <n> <x0> <y0> ...   (optional, per LAYER: its own response\n";
     f << "#                               curve, overriding tcurve for that layer)\n";
@@ -9002,7 +9121,7 @@ static void LogPanelFx() {
                 char rbuf[128];
                 std::snprintf(rbuf, sizeof(rbuf),
                               "panel fx:     ramp from %.4f %.4f %.4f at a dark "
-                              "knob to the colour above at a full one",
+                              "knob to the color above at a full one",
                               l.rampColor[0], l.rampColor[1], l.rampColor[2]);
                 Log(rbuf);
             }
@@ -9770,36 +9889,6 @@ static bool FxCurveLiveX(FxStack& stack, float* outX, const char** outRect) {
     return true;
 }
 
-// ---- what the colour ramp is doing right now --------------------------------
-// The drive value one member rect resolves to FOR THIS LAYER, taken from
-// FxRectFactor itself rather than recomputed — the layer's own curve, its
-// follow setting and the test pin all feed into it, and a preview that
-// reimplemented any of the three would be wrong in exactly the configuration
-// the ramp was added for.
-//
-// Same caveat as FxCurveLiveX: a group follows one knob per member, so this is
-// the FIRST member's and the pane names it.
-static bool FxLayerLiveDrive(FxStack& stack, const FxLayer& layer,
-                             float* outDrive, const char** outRect) {
-    if (!gRectDriversBuilt) BuildRectDrivers();
-    const PanelMask mask = PanelTargetMask(stack.target);
-    for (int i = 0; i < kPanelRectCount; ++i) {
-        if (!((mask >> i) & 1)) continue;
-        float drive = 1.0f;
-        // The compositor reads both of these; set and cleared around the one
-        // call, exactly as the source pane's factor column does.
-        gFxDrawStack = &stack;
-        gFxDrawLayer = &layer;
-        FxRectFactor(i, &drive);
-        gFxDrawStack = nullptr;
-        gFxDrawLayer = nullptr;
-        *outDrive = drive;
-        *outRect  = kPanelRectsHi[i].name;
-        return true;
-    }
-    return false;
-}
-
 // ---- the curve editor --------------------------------------------------------
 // A knot table typed as numbers is a shape nobody can see, and the whole reason
 // a layer wants its own curve is that the default one is the wrong SHAPE for it.
@@ -10031,7 +10120,7 @@ static bool FxCurveEditor(const char* id, FxCurve& curve,
         curve.built = false;
         changed = true;
     }
-    UiItemTooltip("Up almost at once and then nearly flat - for a colour "
+    UiItemTooltip("Up almost at once and then nearly flat - for a color "
                   "correction that should be fully there as soon as the screen "
                   "is readable at all.");
 
@@ -10068,10 +10157,10 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
                    "brightness driver, like the target does.\n"
                    "Steady when powered: it does not dim at all - but it is still "
                    "switched off completely by the power, bus and breaker "
-                   "gates. This is the setting for a colour CORRECTION, which is a "
+                   "gates. This is the setting for a color CORRECTION, which is a "
                    "property of the glass rather than of the backlight: fading it "
                    "out as the knob comes down lets the readout drift back to its "
-                   "untinted colour exactly where the correction is most visible.\n"
+                   "untinted color exactly where the correction is most visible.\n"
                    "A backlight wash or a bleed wants the opposite - those ARE the "
                    "screen's light.\n"
                    "Inherit takes the target's setting, which in turn takes the "
@@ -10086,7 +10175,7 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
         layer.hasDay = has;
         // Seed the day half FROM the night half rather than from the struct's
         // defaults. Ticking the box must not change what is on screen right now —
-        // otherwise the first thing it does is throw away the colour being tuned,
+        // otherwise the first thing it does is throw away the color being tuned,
         // and the box reads as a reset button.
         if (has) {
             for (int c = 0; c < 3; ++c) layer.dayColor[c] = layer.color[c];
@@ -10095,7 +10184,7 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
         *dirty = true; *what = has ? "add daylight variant" : "drop daylight variant";
     }
     UiItemTooltip(
-        "A second colour and opacity for full daylight. The compositor blends "
+        "A second color and opacity for full daylight. The compositor blends "
         "between the two on how much light is in the cockpit, so this is a fade "
         "through dusk rather than a switch.\n\n"
         "Set the daylight opacity to 0 for a layer that should only exist after "
@@ -10107,9 +10196,9 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
         ImGui::SameLine();
         if (ImGui::ColorEdit3("##daycol", layer.dayColor,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
-            *dirty = true; *what = "change daylight colour";
+            *dirty = true; *what = "change daylight color";
         }
-        UiItemTooltip("The colour at full daylight.");
+        UiItemTooltip("The color at full daylight.");
 
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
@@ -10131,31 +10220,31 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
                       "Ambient pane to author either end.");
     }
 
-    // ---- the colour ramp ----------------------------------------------------
+    // ---- the color ramp ----------------------------------------------------
     // ⚠ Its own line, not appended to the daylight row: that row already carries
     // four widgets when the box is ticked, and these two questions are asked at
     // different times — the daylight half is about the hour, this is about the
     // knob.
     bool ramp = layer.hasRamp;
-    if (ImGui::Checkbox("colour ramp", &ramp)) {
+    if (ImGui::Checkbox("color ramp", &ramp)) {
         layer.hasRamp = ramp;
-        // Seeded FROM the layer's own colour, like the daylight box above and
+        // Seeded FROM the layer's own color, like the daylight box above and
         // for the identical reason: ticking it must not change what is on
         // screen. Start == end is a ramp that does nothing, which is the only
         // honest starting point for one.
         if (ramp) for (int c = 0; c < 3; ++c) layer.rampColor[c] = layer.color[c];
-        *dirty = true; *what = ramp ? "add colour ramp" : "drop colour ramp";
+        *dirty = true; *what = ramp ? "add color ramp" : "drop color ramp";
     }
     UiItemTooltip(
-        "A second colour for a DIM screen. The compositor interpolates between "
-        "it and the layer's own colour on the brightness driver, so the swatch "
-        "above becomes the colour at a full knob and this one the colour at a "
+        "A second color for a DIM screen. The compositor interpolates between "
+        "it and the layer's own color on the brightness driver, so the swatch "
+        "above becomes the color at a full knob and this one the color at a "
         "dark one.\n\n"
         "This is what a dim LCD actually does - it goes warm, its backlight "
         "reddens, its black stops being lifted - and none of that is the "
-        "authored colour more faintly, which is all dimming can produce.\n\n"
+        "authored color more faintly, which is all dimming can produce.\n\n"
         "It does NOT need \"Follow the knob\": that switch is about opacity, "
-        "this is about colour, and a correction meant to stay at full strength "
+        "this is about color, and a correction meant to stay at full strength "
         "while powered is the layer most likely to want a ramp. The master "
         "\"Follow display brightness\" switch still turns both off, and a dim "
         "knob still cannot un-gate a dead screen.");
@@ -10164,31 +10253,39 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
         ImGui::SameLine();
         if (ImGui::ColorEdit3("##rampcol", layer.rampColor,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
-            *dirty = true; *what = "change ramp start colour";
+            *dirty = true; *what = "change ramp start color";
         }
-        UiItemTooltip("The colour at a dark knob. The swatch on the layer row is "
-                      "the colour at a full one.");
+        UiItemTooltip("The color at a dark knob. The swatch on the layer row is "
+                      "the color at a full one.");
 
         // What is being MIXED right now, and from what. The same argument as the
         // daylight row's live readout: a ramp that looks like it does nothing and
         // a knob sitting at the top are the same picture without the number, and
-        // the swatch is the half of it a colour value cannot replace.
+        // the swatch is the half of it a color value cannot replace.
+        //
+        // ⚠ Through FxCurveLiveX — the SAME reader the curve editor's marker
+        // uses, because the ramp now interpolates on the same raw knob position
+        // that marker shows. Two live readouts in one pane disagreeing about
+        // where the knob is would be worse than either one missing.
         ImGui::SameLine();
-        float drive = 1.0f;
+        float knob = 1.0f;
         const char* rectName = nullptr;
         const FxLayerNow now = FxLayerAtAmbient(layer);
-        if (FxLayerLiveDrive(stack, layer, &drive, &rectName)) {
+        if (FxCurveLiveX(stack, &knob, &rectName)) {
             float mixed[3];
-            FxLayerColorAtDrive(layer, now.color, drive, mixed);
+            FxLayerColorAtDrive(layer, now.color, knob, mixed);
             ImGui::ColorButton("##rampnow", ImVec4(mixed[0], mixed[1], mixed[2], 1.0f),
                                ImGuiColorEditFlags_NoTooltip, ImVec2(20.0f, 20.0f));
-            UiItemTooltip("The colour being painted right now: the mix at "
-                          "brightness %.3f, read from \"%s\".\n\n"
+            UiItemTooltip("The color being painted right now: the mix at knob "
+                          "%.3f, read from \"%s\".\n\n"
+                          "This is the raw dataref position, NOT the response "
+                          "curve's output - the ramp follows where the knob is, "
+                          "not how strongly the layer is being painted there.\n\n"
                           "Hold the slider under \"Brightness knob override\" at "
                           "the top of this tab to sweep it without leaving the "
-                          "editor.", drive, rectName ? rectName : "?");
+                          "editor.", knob, rectName ? rectName : "?");
             ImGui::SameLine();
-            ImGui::TextDisabled("mix @ %.2f", drive);
+            ImGui::TextDisabled("mix @ knob %.2f", knob);
         } else {
             ImGui::TextDisabled("(no member rect to read a knob from)");
         }
@@ -10223,7 +10320,7 @@ static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
         "opacity, instead of the target's response setting.\n\n"
         "This is what to reach for when two layers of one target need to come up "
         "at different points on the knob - a bleed that should only show on an "
-        "already-bright screen, over a colour correction that has to be fully "
+        "already-bright screen, over a color correction that has to be fully "
         "there the moment the readout is readable. One curve on the target "
         "cannot express both.\n\n"
         "It overrides the target's response switch, including \"Linear\". It has "
@@ -10603,7 +10700,7 @@ static void BuildFxAmbientPane() {
     UiItemTooltip("Seconds to close about 63%% of a step. NOT cosmetic: the raw "
                   "value jumps the instant a cloud crosses the sun or the "
                   "aircraft banks, and every screen in the cockpit would shift "
-                  "colour with it. 0 disables the smoothing entirely.");
+                  "color with it. 0 disables the smoothing entirely.");
 
     // Which dataref is being read, and the escape hatch to change it. Same shape
     // as the driver editor, and for the same reason: the built-in choice is a
@@ -10801,7 +10898,13 @@ static void FxDriveTheAircraft(float t) {
 // instrument for a parked aircraft, and the knobs stay where the slider left
 // them.
 static void BuildFxDrivePane() {
-    if (!ImGui::CollapsingHeader("Brightness knob override (test)")) return;
+    // ⚠ DefaultOpen, unlike the ambient pane beside it. A folded header is a
+    // control most of its users never find, and this one has no other way in:
+    // the ambient pin at least has a plotted blend and a PINNED badge elsewhere
+    // to hint that it exists. (ImGui remembers the state per window once it has
+    // been clicked, so this only decides the first run.)
+    if (!ImGui::CollapsingHeader("Brightness knob override (test)",
+                                 ImGuiTreeNodeFlags_DefaultOpen)) return;
     ImGui::Indent(8.0f);
 
     // Kept between frames so releasing and grabbing again resumes where it was.
@@ -11288,9 +11391,305 @@ static void DbgLogDsl(const DbgLight& l) {
         Log("      # omnidirectional (dir 0 0 0) - no aim or spread");
     }
     Log("      size: " + DbgFmt(l.v[4]) + ";");
+    if (l.boost > 0.0f)
+        Log("      optimize: boost " + DbgFmt(gDbgFloodBoost)
+            + ";   # simplified copy - the size above is the authored value");
     Log("  # offset applied while tuning: "
         + DbgFmt(l.off[0]) + " " + DbgFmt(l.off[1]) + " " + DbgFmt(l.off[2])
         + " (already folded into `at:` above)");
+}
+
+// ---- the tuning file --------------------------------------------------------
+// "Log DSL" prints one light; this is the WHOLE session — every light whose
+// values differ from the OBJ's baked seeds, in .phdsl shape, plus the
+// simplified-flood boost factor — in one file that outlives the sim. It lands in
+// the repo's .scratch/ (gitignored) when the Build tab knows where the repo is,
+// else beside the preferences; the path is shown in the tab and logged. The file
+// is the deliverable of a tuning session: transcribe it into src/lights/*.phdsl,
+// then rebuild.
+//
+// ⚠ IT IS ALSO READ BACK, AND SAVED WITHOUT BEING ASKED (2026-08-09). Until then
+// a tuning pass lived only in this plugin's memory, so closing X-Plane, reloading
+// the aircraft or deploying a new build discarded it in silence — which is
+// exactly how an afternoon of screen-glow colour work was lost, with no file, no
+// log line and nothing in git to recover from. Hence: auto-save on the way out
+// and on every aircraft load, restore when the manifest loads, and a format that
+// is parseable as well as readable.
+//
+// ⚠ THE IDENTITY IS FIXTURE + NAME, never the slot. Slots shift the moment the
+// DSL gains or loses a light, and the cockpit names REPEAT — `int_panelflood#a`
+// is two different lamps on two different fixtures. Fixture+name is unique, and
+// a test pins that it stays so.
+//
+// ⚠ EVERY RECORD CARRIES THE SEED IT WAS TUNED AGAINST (`from:`), and a restore
+// SKIPS any light whose OBJ no longer bakes that seed. Otherwise editing the
+// .phdsl and rebuilding would appear to do nothing: the saved session would keep
+// overwriting the new authored values, which is the same class of trap as a
+// debug OBJ silently hiding the gate it is meant to show.
+static fs::path DbgTuningFilePath() {
+    if (!gRepoPath.empty())
+        return fs::path(gRepoPath) / ".scratch" / "light_tuning.txt";
+    char root[512] = {0};
+    XPLMGetSystemPath(root);
+    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_tuning.txt";
+}
+
+static bool DbgLightChanged(const DbgLight& l) {
+    for (int i = 0; i < kDbgParamCount; ++i)
+        if (l.v[i] != l.base[i]) return true;
+    for (int i = 0; i < 3; ++i)
+        if (l.off[i] != l.baseOff[i]) return true;
+    return l.pitch != l.basePitch || l.yaw != l.baseYaw;
+}
+
+static int DbgTuningEditCount() {
+    int n = 0;
+    for (size_t i = 0; i < gDbgLights.size(); ++i)
+        if (DbgLightChanged(gDbgLights[i])) ++n;
+    return n;
+}
+
+// Is there anything worth writing? Auto-save asks first, so that a session in
+// which nothing was touched cannot blank a file a previous one filled in.
+static bool DbgTuningDirty() {
+    return DbgTuningEditCount() > 0 || gDbgFloodBoost != gDbgFloodBoostSeed;
+}
+
+// The nine numbers a record is checked against on the way back in: the OBJ's
+// baked colour, alpha, size and cone, plus its baked position. If the .phdsl has
+// moved on, these no longer match and the record is skipped rather than applied.
+static void DbgTuningSeed(const DbgLight& l, float out[9]) {
+    out[0] = l.base[0]; out[1] = l.base[1]; out[2] = l.base[2];
+    out[3] = l.base[3]; out[4] = l.base[4]; out[5] = l.base[8];
+    out[6] = l.pos[0];  out[7] = l.pos[1];  out[8] = l.pos[2];
+}
+
+static void DbgSaveTuning(bool quiet) {
+    std::error_code ec;
+    const fs::path p = DbgTuningFilePath();
+    fs::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        gDbgNote = "could not write " + p.string();
+        Log("light editor: " + gDbgNote);
+        return;
+    }
+    f << "# ToLiss Photon - in-sim light tuning (Dev window; " << gDbgManifest << ")\n"
+      << "#\n"
+      << "# WRITTEN BY THE PLUGIN, and read back by it: the values below are\n"
+      << "# re-applied on the next aircraft load, so a session survives closing the\n"
+      << "# sim. Edit or delete this file freely - it is not source.\n"
+      << "#\n"
+      << "# TO KEEP THESE VALUES: transcribe into src/lights/lights.style.phdsl\n"
+      << "# (colors, alpha, size, aim, spread - the light type or palette entry) and\n"
+      << "# lights.layout.phdsl (per-fixture geometry), rebuild, then delete this\n"
+      << "# file. See docs/dsl.md. Only lights that differ from the OBJ's baked\n"
+      << "# values are listed; `from:` is what they were baked at when tuned, and a\n"
+      << "# record whose OBJ no longer matches it is SKIPPED rather than applied.\n\n";
+
+    int boosted = 0;
+    for (size_t i = 0; i < gDbgLights.size(); ++i)
+        if (gDbgLights[i].boost > 0.0f) ++boosted;
+    if (boosted) {
+        f << "# The simplified main panel floods -> `optimize: boost <f>;` in\n"
+          << "# lights.layout.phdsl, on every line that carries one today ("
+          << boosted << " lights).\n"
+          << "boost: " << DbgFmt(gDbgFloodBoost) << ";\n"
+          << "boost_from: " << DbgFmt(gDbgFloodBoostSeed) << ";\n\n";
+    }
+
+    const int changed = DbgTuningEditCount();
+    for (size_t i = 0; i < gDbgLights.size(); ++i) {
+        const DbgLight& l = gDbgLights[i];
+        if (!DbgLightChanged(l)) continue;
+        f << "light " << l.name << "\n";
+        f << "  fixture: " << l.fixture << ";\n";
+        f << "  where: " << (l.category.empty() ? "-" : l.category.c_str())
+          << " " << l.source << "[" << l.index << "] slot " << l.n << ";\n";
+        f << "  rgb: " << DbgFmt(l.v[0]) << " " << DbgFmt(l.v[1]) << " "
+          << DbgFmt(l.v[2]) << ";\n";
+        f << "  alpha: " << DbgFmt(l.v[3]) << ";\n";
+        f << "  size: " << DbgFmt(l.v[4]) << ";\n";
+        const bool omni = l.v[5] == 0.0f && l.v[6] == 0.0f && l.v[7] == 0.0f;
+        if (!omni) {
+            f << "  aim: " << DbgFmt(l.pitch) << " " << DbgFmt(l.yaw) << ";\n";
+            f << "  spread: " << DbgFmt(DbgConeToSpread(l.v[8])) << ";\n";
+        } else {
+            f << "  # omnidirectional (dir 0 0 0) - no aim or spread\n";
+        }
+        f << "  at: " << DbgFmt(l.pos[0] + l.off[0]) << " "
+          << DbgFmt(l.pos[1] + l.off[1]) << " "
+          << DbgFmt(l.pos[2] + l.off[2]) << ";\n";
+        if (l.boost > 0.0f)
+            f << "  # simplified copy - `size:` above is the AUTHORED size; it is\n"
+              << "  # drawn at that x the boost factor above.\n";
+        float seed[9];
+        DbgTuningSeed(l, seed);
+        f << "  from:";
+        for (int k = 0; k < 9; ++k) f << " " << DbgFmt(seed[k]);
+        f << ";\n\n";
+    }
+    if (!changed) f << "# (no per-light edits)\n";
+    gDbgNote = "saved " + std::to_string(changed) + " edited light(s) -> " + p.string();
+    if (!quiet) Log("light editor: " + gDbgNote);
+    else        Log("light editor: auto-saved " + std::to_string(changed)
+                    + " edited light(s) -> " + p.string());
+}
+
+// Called from the two paths that would otherwise DISCARD a session's work: the
+// aircraft load that reseeds every light from the manifest, and plugin shutdown.
+static void DbgAutoSaveTuning() {
+    if (gDbgLights.empty() || !DbgTuningDirty()) return;
+    DbgSaveTuning(true);
+}
+
+// ---- reading it back --------------------------------------------------------
+// Line-oriented on purpose: the file is meant to be read and edited by a person,
+// and a format that only a parser can produce would stop being the deliverable
+// it is supposed to be.
+static std::string DbgTrim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// "  size: 0.9;   # comment"  ->  key "size", value "0.9"
+static bool DbgSplitKeyValue(const std::string& line, std::string& key, std::string& value) {
+    const std::string t = DbgTrim(line);
+    if (t.empty() || t[0] == '#') return false;
+    const size_t colon = t.find(':');
+    if (colon == std::string::npos) return false;
+    key = DbgTrim(t.substr(0, colon));
+    value = DbgTrim(t.substr(colon + 1));
+    const size_t hash = value.find('#');
+    if (hash != std::string::npos) value = DbgTrim(value.substr(0, hash));
+    if (!value.empty() && value.back() == ';') value.pop_back();
+    return !key.empty();
+}
+
+static int DbgParseFloats(const std::string& s, float* out, int max) {
+    std::istringstream in(s);
+    int n = 0;
+    while (n < max && (in >> out[n])) ++n;
+    return n;
+}
+
+// One parsed record, applied when the next `light` line (or EOF) closes it.
+struct DbgTuningRecord {
+    std::string name, fixture;
+    bool  hasRgb = false, hasAlpha = false, hasSize = false;
+    bool  hasAim = false, hasSpread = false, hasAt = false, hasSeed = false;
+    float rgb[3] = {0,0,0}, alpha = 0.0f, size = 0.0f;
+    float pitch = 0.0f, yaw = 0.0f, spread = 0.0f, at[3] = {0,0,0}, seed[9] = {0};
+};
+
+// applied / skipped-because-the-OBJ-moved / skipped-because-no-such-light
+static void DbgApplyTuningRecord(const DbgTuningRecord& r, int& ok, int& stale, int& gone) {
+    if (r.name.empty()) return;
+    DbgLight* target = nullptr;
+    for (size_t i = 0; i < gDbgLights.size(); ++i) {
+        DbgLight& l = gDbgLights[i];
+        if (l.name == r.name && l.fixture == r.fixture) { target = &l; break; }
+    }
+    if (!target) { ++gone; return; }
+    if (r.hasSeed) {
+        float seed[9];
+        DbgTuningSeed(*target, seed);
+        for (int k = 0; k < 9; ++k) {
+            if (std::fabs(seed[k] - r.seed[k]) > 1e-3f) { ++stale; return; }
+        }
+    }
+    DbgLight& l = *target;
+    if (r.hasRgb) { l.v[0] = r.rgb[0]; l.v[1] = r.rgb[1]; l.v[2] = r.rgb[2]; }
+    if (r.hasAlpha) l.v[3] = r.alpha;
+    if (r.hasSize)  l.v[4] = r.size;
+    if (r.hasAim) {
+        l.pitch = r.pitch; l.yaw = r.yaw;
+        DbgAimToDir(l.pitch, l.yaw, &l.v[5]);
+    }
+    if (r.hasSpread) l.v[8] = DbgSpreadToCone(r.spread);
+    if (r.hasAt) {
+        for (int k = 0; k < 3; ++k) {
+            float off = r.at[k] - l.pos[k];
+            if (off >  kDbgPosRange) off =  kDbgPosRange;   // the ANIM keyframe span
+            if (off < -kDbgPosRange) off = -kDbgPosRange;
+            l.off[k] = off;
+        }
+    }
+    ++ok;
+}
+
+// Restore the saved session onto the freshly loaded manifest. Runs at the END of
+// DbgLoadManifest, so the baked values are the seeds and these are edits on top.
+static void DbgLoadTuning() {
+    const fs::path p = DbgTuningFilePath();
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return;                          // no saved session; nothing to say
+
+    DbgTuningRecord rec;
+    bool inRecord = false;
+    int ok = 0, stale = 0, gone = 0;
+    bool haveBoost = false, haveBoostFrom = false;
+    float boost = 0.0f, boostFrom = 0.0f;
+    std::string line;
+    while (std::getline(f, line)) {
+        const std::string t = DbgTrim(line);
+        if (t.rfind("light ", 0) == 0) {
+            if (inRecord) DbgApplyTuningRecord(rec, ok, stale, gone);
+            rec = DbgTuningRecord();
+            rec.name = DbgTrim(t.substr(6));
+            inRecord = true;
+            continue;
+        }
+        std::string key, value;
+        if (!DbgSplitKeyValue(line, key, value)) continue;
+        float nums[9];
+        const int got = DbgParseFloats(value, nums, 9);
+        if (!inRecord) {
+            if (key == "boost" && got >= 1)      { boost = nums[0];     haveBoost = true; }
+            else if (key == "boost_from" && got >= 1) { boostFrom = nums[0]; haveBoostFrom = true; }
+            continue;
+        }
+        if      (key == "fixture") rec.fixture = value;
+        else if (key == "rgb"    && got >= 3) { rec.hasRgb = true; for (int k=0;k<3;++k) rec.rgb[k]=nums[k]; }
+        else if (key == "alpha"  && got >= 1) { rec.hasAlpha = true; rec.alpha = nums[0]; }
+        else if (key == "size"   && got >= 1) { rec.hasSize = true;  rec.size  = nums[0]; }
+        else if (key == "aim"    && got >= 2) { rec.hasAim = true; rec.pitch = nums[0]; rec.yaw = nums[1]; }
+        else if (key == "spread" && got >= 1) { rec.hasSpread = true; rec.spread = nums[0]; }
+        else if (key == "at"     && got >= 3) { rec.hasAt = true; for (int k=0;k<3;++k) rec.at[k]=nums[k]; }
+        else if (key == "from"   && got >= 9) { rec.hasSeed = true; for (int k=0;k<9;++k) rec.seed[k]=nums[k]; }
+    }
+    if (inRecord) DbgApplyTuningRecord(rec, ok, stale, gone);
+
+    // ⚠ Same staleness rule as a light's `from:`: a boost saved against an
+    // authored 1.5 must not keep overriding a .phdsl that now says something
+    // else. With no `boost_from:` recorded, the file predates the check and the
+    // value is taken as-is.
+    if (haveBoost && (!haveBoostFrom || std::fabs(boostFrom - gDbgFloodBoostSeed) < 1e-3f))
+        gDbgFloodBoost = boost;
+    else if (haveBoost)
+        ++stale;
+
+    if (!ok && !stale && !gone) return;
+    std::string note = "restored " + std::to_string(ok) + " tuned light(s) from "
+                     + p.filename().string();
+    if (stale) note += ", skipped " + std::to_string(stale) + " the OBJ has moved past";
+    if (gone)  note += ", " + std::to_string(gone) + " no longer in the manifest";
+    gDbgNote = note;
+    Log("light editor: " + note + " (" + p.string() + ")");
+    if (stale)
+        Log("light editor: a skipped record was tuned against different baked "
+            "values than this OBJ has - the .phdsl moved on, so the authored "
+            "values win. Delete the tuning file to stop it being offered.");
+}
+
+static void DbgForgetTuning() {
+    std::error_code ec;
+    const fs::path p = DbgTuningFilePath();
+    if (fs::remove(p, ec)) gDbgNote = "deleted " + p.string();
+    else                   gDbgNote = "no tuning file at " + p.string();
+    Log("light editor: " + gDbgNote);
 }
 
 static void BuildLightRow(DbgLight& l) {
@@ -11357,19 +11756,56 @@ static void BuildLightEditor(DbgLight& l) {
     ImGui::TextDisabled("slot %d - fixture %s - category %s - %s[%d]",
                         l.n, l.fixture.c_str(), l.category.c_str(),
                         l.source.c_str(), l.index);
+    if (l.boost > 0.0f) {
+        ImGui::TextDisabled("simplified flood - drawn at size x%.2f "
+                            "(the multiplier on the Cockpit tab)",
+                            (double)gDbgFloodBoost);
+        if (ImGui::IsItemHovered())
+            UiTooltip("This is the one-light-per-lamp copy the 'Use simplified "
+                      "lighting' checkbox switches to. The size below is the "
+                      "AUTHORED size; the shared multiplier scales it live and "
+                      "writes back as `optimize: boost <f>` in the DSL.");
+    }
+    if (l.source == "du") {
+        ImGui::Checkbox("Edit all screens together", &gDbgScreensLink);
+        if (ImGui::IsItemHovered())
+            UiTooltip("The six screen-glow lights are one design in six places, "
+                      "so their shared attributes - color, brightness, size, aim, "
+                      "spread - are edited as one; edits here land on all six. "
+                      "Position stays per-light. Untick to tune one screen alone.");
+    }
 
+    const bool sizeDriven = (l.source == "du");
     ImGui::ColorEdit3("color", l.v);
     ImGui::SliderFloat("brightness", &l.v[3], 0.0f, 1.0f, "x%.3f");
-    if (ImGui::IsItemHovered())
-        UiTooltip("The light's own alpha. What reaches the sim is this "
-                  "TIMES the rheostat it is wired to (%s[%d] = %.3f), "
-                  "which is why a light can be at 1.0 and still dark.",
-                  l.source.c_str(), l.index, (double)DbgRheostat(l));
+    if (ImGui::IsItemHovered()) {
+        if (sizeDriven)
+            UiTooltip("The light's alpha, and for a screen glow that is a "
+                      "CONSTANT: the DU knob drives size instead (%s[%d] = "
+                      "%.3f), so this is the intensity at every knob "
+                      "position. Write it back as `alpha:` in the DSL - the "
+                      "shipping plugin never overwrites it.",
+                      l.source.c_str(), l.index, (double)DbgRheostat(l));
+        else
+            UiTooltip("The light's own alpha. What reaches the sim is this "
+                      "TIMES the rheostat it is wired to (%s[%d] = %.3f), "
+                      "which is why a light can be at 1.0 and still dark.",
+                      l.source.c_str(), l.index, (double)DbgRheostat(l));
+    }
     ImGui::SliderFloat("size", &l.v[4], 0.0f, 8.0f, "%.3f m");
-    if (ImGui::IsItemHovered())
-        UiTooltip("How far the pool reaches. Raise this FIRST when a "
-                  "spread edit looks inert - a cone two centimeters from "
-                  "the panel it lights has nowhere to widen into.");
+    if (ImGui::IsItemHovered()) {
+        if (sizeDriven)
+            UiTooltip("How far the pool reaches AT A SCREEN TURNED FULLY UP - "
+                      "this is the driven slot for a screen glow, scaled live "
+                      "by %s[%d] (= %.3f now) and by the Displays tab's "
+                      "strength. Turn the DU knob down and the pool pulls in "
+                      "rather than fading.",
+                      l.source.c_str(), l.index, (double)DbgRheostat(l));
+        else
+            UiTooltip("How far the pool reaches. Raise this FIRST when a "
+                      "spread edit looks inert - a cone two centimeters from "
+                      "the panel it lights has nowhere to widen into.");
+    }
 
     const bool omni = l.v[5] == 0.0f && l.v[6] == 0.0f && l.v[7] == 0.0f;
     if (omni) {
@@ -11426,7 +11862,7 @@ static void BuildLightEditor(DbgLight& l) {
         ImGui::TextDisabled("(cone %.3f)", (double)l.v[8]);
     }
 
-    if (gDbgPosTunable) {
+    if (l.posTunable) {
         ImGui::SeparatorText("position");
         ImGui::TextDisabled("baked %.3f %.3f %.3f  ->  live %.3f %.3f %.3f",
                             (double)l.pos[0], (double)l.pos[1], (double)l.pos[2],
@@ -11458,6 +11894,7 @@ static void BuildLightEditor(DbgLight& l) {
             for (int k = 0; k < 3; ++k) o.off[k] = o.baseOff[k];
             o.pitch = o.basePitch; o.yaw = o.baseYaw;
         }
+        gDbgFloodBoost = gDbgFloodBoostSeed;
         gDbgNote = "reverted every light to the OBJ's baked values";
     }
     if (ImGui::IsItemHovered())
@@ -11470,6 +11907,73 @@ static void BuildLightEditor(DbgLight& l) {
                   "deliverable of a tuning session. Nothing here writes "
                   "the DSL for you; a tuned value that never gets "
                   "transcribed is lost on the next build.");
+
+    // The screens group link, applied AFTER this frame's widgets so whatever
+    // they did to the selected light lands on the other five the same frame.
+    // Everything but position is shared: the baked pos and the live offset are
+    // the one per-light attribute of a screen-glow light.
+    if (gDbgScreensLink && l.source == "du") {
+        for (size_t i = 0; i < gDbgLights.size(); ++i) {
+            DbgLight& o = gDbgLights[i];
+            if (o.n == l.n || o.source != "du") continue;
+            for (int k = 0; k < kDbgParamCount; ++k) o.v[k] = l.v[k];
+            o.pitch = l.pitch; o.yaw = l.yaw;
+        }
+    }
+}
+
+// ---- dev-only extras under the shared Cockpit pane --------------------------
+// The Dev window's Cockpit tab is the SHIPPING pane plus this: a live intensity
+// multiplier for the simplified main panel floods, i.e. the DSL's
+// `optimize: boost <f>` as a knob. It sits on THIS tab, beside the "Use
+// simplified lighting" checkbox that shows what it drives, and deliberately not
+// inside BuildCockpitPerformance — that pane is built by the shipping window
+// too, and nothing dev-only may reach a release (same rule as the probe).
+static void BuildDevCockpitTuning() {
+    if (!gDbgScanned) DbgLoadManifest();
+    int boosted = 0;
+    for (size_t i = 0; i < gDbgLights.size(); ++i)
+        if (gDbgLights[i].boost > 0.0f) ++boosted;
+
+    ImGui::PushID("cockpit-dev-tuning");
+    ImGui::Spacing();
+    ImGui::SeparatorText("Simplified flood tuning (dev)");
+    ImGui::Spacing();
+    if (!gDbgOwnsRefs) {
+        UiHint("Another plugin owns ToLissPhoton/debug/light/* - see the Lights "
+               "tab for who and why.");
+    } else if (!boosted) {
+        UiHint("Needs a DEBUG interior OBJ, which emits the simplified floods as "
+               "tunable lights:\n"
+               "    src\\native\\deploy.ps1 -Dev -DebugObjs   (or Build tab > "
+               "Interior debug)\n"
+               "then Reload manifest on the Lights tab.");
+    } else {
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::SliderFloat("intensity multiplier", &gDbgFloodBoost,
+                           0.25f, 3.0f, "x%.2f");
+        if (ImGui::IsItemHovered())
+            UiTooltip("Scales all %d simplified main panel floods together - the "
+                      "live form of the DSL's `optimize: boost <f>`. Their color, "
+                      "aim and authored size are per-light knobs on the Lights "
+                      "tab. Authored factor: x%.2f.",
+                      boosted, (double)gDbgFloodBoostSeed);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("authored")) gDbgFloodBoost = gDbgFloodBoostSeed;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Save tuning")) DbgSaveTuning(false);
+        if (ImGui::IsItemHovered())
+            UiTooltip("Write the multiplier and every edited light to the tuning "
+                      "file - same button as the Lights tab's Save tuning.");
+        // The gate this knob depends on, said HERE: with the full stacks drawing
+        // the simplified set is hidden and the slider looks inert.
+        if (!gCockpit.optimized)
+            UiHint("'Use simplified lighting' is OFF above, so the full stacks "
+                   "are drawing and the simplified floods are hidden - turn it "
+                   "on to see what this knob moves.");
+        if (!gDbgNote.empty()) ImGui::TextDisabled("%s", gDbgNote.c_str());
+    }
+    ImGui::PopID();
 }
 
 static void BuildLightsTab() {
@@ -11491,10 +11995,24 @@ static void BuildLightsTab() {
 
     if (ImGui::Button("Reload manifest")) DbgLoadManifest();
     if (ImGui::IsItemHovered())
-        UiTooltip("Re-read lights_inn.debug.json / lights_screens.debug.json "
-                  "from the loaded aircraft. Needed after every --debug "
+        UiTooltip("Re-read lights_inn.debug.json + lights_screens.debug.json "
+                  "from the loaded aircraft (both are merged - they live on "
+                  "separate dataref slots). Needed after every --debug "
                   "rebuild that changes the light LIST; editing values "
                   "needs nothing.");
+    ImGui::SameLine();
+    const int edits = DbgTuningEditCount();
+    char saveLabel[64];
+    std::snprintf(saveLabel, sizeof(saveLabel), "Save tuning (%d)###savetuning", edits);
+    if (ImGui::Button(saveLabel)) DbgSaveTuning(false);
+    if (ImGui::IsItemHovered())
+        UiTooltip("Write every edited light - plus the simplified-flood "
+                  "multiplier - in .phdsl shape to the file named below.\n"
+                  "This also happens BY ITSELF when the aircraft reloads and "
+                  "when the sim shuts down, and the file is read back on the "
+                  "next load, so a session is not lost by closing X-Plane. "
+                  "Transcribe it into src/lights/*.phdsl when the look is "
+                  "settled - a rebuild is what makes it permanent.");
     ImGui::SameLine();
     ImGui::Checkbox("Isolate", &gDbgIsolate);
     if (ImGui::IsItemHovered())
@@ -11578,9 +12096,10 @@ static void BuildLightsTab() {
                "hypothesizing: three earlier explanations were all wrong.");
 
     if (gDbgLights.empty()) {
-        UiHint("No debug lights. Build the OBJ in its tunable shape first:\n"
-               "    python build/build_objs.py build --target interior --debug --write\n"
-               "then Reload manifest. %s",
+        UiHint("No debug lights. Build the OBJs in their tunable shape first:\n"
+               "    src\\native\\deploy.ps1 -Dev -DebugObjs\n"
+               "(or per target: build/build_objs.py build --target interior "
+               "--debug --write, same for screens)\nthen Reload manifest. %s",
                gDbgNote.empty() ? "" : ("(" + gDbgNote + ")").c_str());
         return;
     }
@@ -11589,6 +12108,25 @@ static void BuildLightsTab() {
                         (int)gDbgLights.size(),
                         gDbgPosTunable ? ", position tunable" : "");
     if (!gDbgNote.empty()) { ImGui::SameLine(); ImGui::TextDisabled("| %s", gDbgNote.c_str()); }
+
+    // ⚠ The destination, spelled out. It moves depending on whether the Build
+    // tab knows the repo, and a file written somewhere the user is not looking
+    // is the same as no file at all — which is the failure this whole mechanism
+    // was added to stop happening twice.
+    const std::string tuningPath = DbgTuningFilePath().string();
+    ImGui::TextDisabled("tuning file: %s", tuningPath.c_str());
+    if (ImGui::IsItemHovered())
+        UiTooltip("Saved here automatically on aircraft reload and sim shutdown, "
+                  "and read back on the next load. Set the repo path on the "
+                  "Build tab to have it land in .scratch/ instead, where it is "
+                  "beside the .phdsl you will transcribe it into.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Forget saved")) DbgForgetTuning();
+    if (ImGui::IsItemHovered())
+        UiTooltip("Delete that file, so the next aircraft load shows the OBJ's "
+                  "authored values with nothing layered on top. Do this once a "
+                  "session has been transcribed into the .phdsl - otherwise the "
+                  "saved copy keeps being restored over a rebuild.");
     ImGui::Separator();
 
     ImGui::BeginChild("dbg_tree", ImVec2(260.0f, 0.0f), ImGuiChildFlags_Borders);
@@ -11620,7 +12158,9 @@ static void BuildDevUi() {
     // The same two builders the shipping settings window uses, so a tuning pass
     // never has to wonder whether the Dev window's copy has drifted.
     DevTab("Exterior", [] { BuildConfigTab(kExtAxis); });
-    DevTab("Cockpit",  [] { BuildConfigTab(kIntAxis); });
+    // The shipping pane plus the dev-only simplified-flood knob — appended
+    // OUTSIDE the shared builder so it cannot reach the release window.
+    DevTab("Cockpit",  [] { BuildConfigTab(kIntAxis); BuildDevCockpitTuning(); });
     DevTab("Displays", [] { BuildDisplaysTab(); });
     // Same pane as the shipping Performance window, with `dev` true: the internal
     // levers and the full sweep are the only difference.
@@ -11808,6 +12348,12 @@ PLUGIN_API int XPluginEnable(void) {
 }
 
 PLUGIN_API void XPluginDisable(void) {
+#if PHOTON_DEV
+    // ⚠ FIRST, and before StopPanelPass tears the light pool down. This is the
+    // ordinary way a tuning session ends — the user quits X-Plane — and until it
+    // existed that was also the way a tuning session was silently thrown away.
+    DbgAutoSaveTuning();
+#endif
     if (gAutoLoopRegistered) {
         XPLMUnregisterFlightLoopCallback(AutoLoop, nullptr);
         gAutoLoopRegistered = false;

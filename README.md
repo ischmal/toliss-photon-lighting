@@ -95,7 +95,7 @@ files into one that can be switched in-sim, the same way the exterior lights wor
 There is also a **Reduced light count** option (Cockpit tab, or the Cockpit sub-menu). The
 main panel floods are drawn as a stack of two or three overlapping lights each, which is
 what gives them their soft edge; this replaces each stack with one wider, brighter light —
-same colours, same knobs, six fewer lights for your GPU. Worth a try if the cockpit costs
+same colors, same knobs, six fewer lights for your GPU. Worth a try if the cockpit costs
 you frames.
 
 Installing it also replaces a set of cockpit textures and adjusts the aircraft's `.acf`

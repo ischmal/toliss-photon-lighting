@@ -5,10 +5,10 @@
 // Those lights sit inside deep, wing-specific animation chains, so they cannot be
 // re-homed into `lights_out`. This rewrites each one IN PLACE into a ToLiss
 // parametric light gated by the ToLissPhoton datarefs — same X/Y/Z, so it keeps
-// RealWings' exact position and animation, but gains the original/LED colour
+// RealWings' exact position and animation, but gains the original/LED color
 // switch. The original line is preserved (commented) for reversibility.
 //
-// ⚠ NO DSL PARSER HERE, AND NEVER ONE. The replacement parameters — class, colour,
+// ⚠ NO DSL PARSER HERE, AND NEVER ONE. The replacement parameters — class, color,
 // intensity, cone, direction, the category dataref, and the `@realwings { offset }`
 // placement correction — are resolved out of `lights.layout.phdsl` AT BUNDLE TIME
 // by `build/patch_realwings.py` and shipped as `payload/realwings_patch.json`. That

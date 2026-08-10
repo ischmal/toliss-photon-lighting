@@ -201,11 +201,14 @@ TunerCoarseStep = {"pos": 0.10, "dir": 0.10, "size": 0.25, "cone": 0.020}
 #
 # ⚠ A debug OBJ has NO category gating, so the Cockpit profile menu does nothing while it
 # is installed. Put the real one back with `build --target interior --write`.
-# One manifest per debug-capable build target, newest-first at load time. Both
-# number their slots from 0, so only ONE debug OBJ can be driven at a time; we take
-# the most recently WRITTEN manifest, which is the one you just built, and name it
-# in the window so there is never a question which is live. Keep in step with
-# DEBUG_MANIFESTS in build/build_objs.py.
+# One manifest per debug-capable build target. Since 2026-08-09 the generator
+# allocates slots from per-target bases (DEBUG_SLOT_BASE in build_objs.py:
+# interior from 0, screens from 48), so the two debug OBJs no longer collide —
+# the native Dev window merges both. THIS tool still drives one manifest at a
+# time, the most recently WRITTEN (it names it in the window); that is fine,
+# because slot `n` comes from the manifest rows either way, and this tool only
+# matters when a non-dev .xpl is deployed. Keep in step with DEBUG_MANIFESTS in
+# build/build_objs.py.
 DebugManifests = (
     ("cockpit", os.path.join("objects", "lights_inn.debug.json")),
     ("screens", os.path.join("objects", "lights_screens.debug.json")),
@@ -705,6 +708,7 @@ class PythonInterface:
         self.dbgMarkerDots = DebugMarkerDots   # re-read from the manifest
         self.dbgCompare = 1             # 1 = tunable debug copies, 0 = original lines
         self.dbgLights = []             # manifest rows
+        self.dbgSlotBase = 0            # first dataref slot of the driven manifest
         # working values, 12 per light: r,g,b,a,size,dx,dy,dz,cone + x,y,z OFFSET
         self.dbgVals = []
         self.dbgBase = []               # the manifest's own values, for Revert
@@ -2203,7 +2207,8 @@ class PythonInterface:
             for i in range(offset, min(total, offset + count)):
                 dot, axis = divmod(i, DebugPosCount)
                 n, dot = divmod(dot, stride)
-                out.append(self._dbg_marker_offset(n, dot)[axis])
+                # n is the absolute slot the OBJ baked; the lists are dense.
+                out.append(self._dbg_marker_offset(n - self.dbgSlotBase, dot)[axis])
             values.extend(out)
             return len(out)
         except Exception:
@@ -2263,7 +2268,7 @@ class PythonInterface:
         Normalized here whatever the vector's length, because the marker shows
         direction — length is the sim's problem, and `build` warns about it."""
         base = self._dbg_pos_offset(n)
-        if dot == 0 or n >= len(self.dbgLights):
+        if dot == 0 or n < 0 or n >= len(self.dbgLights):
             return base
         # While probing, the marker draws the PROBE's own direction slots — so the arrow
         # shows what slot 5/6/7 was set to and the light shows what X-Plane did with it.
@@ -2385,7 +2390,8 @@ class PythonInterface:
             out = []
             for i in range(offset, min(total, offset + count)):
                 n, axis = divmod(i, DebugPosCount)
-                out.append(self._dbg_pos_offset(n)[axis])
+                # n is the absolute slot the OBJ baked; the lists are dense.
+                out.append(self._dbg_pos_offset(n - self.dbgSlotBase)[axis])
             values.extend(out)
             return len(out)
         except Exception:
@@ -2431,7 +2437,9 @@ class PythonInterface:
         if not self.dbgVals and not self.dbgLoadTried:
             self.dbgLoadTried = True
             self._dbg_load()
-        return self.dbgVals[n] if n < len(self.dbgVals) else None
+        # 0 <= n matters: a negative dense index (an absolute slot below this
+        # manifest's base) would wrap around and drive the wrong light.
+        return self.dbgVals[n] if 0 <= n < len(self.dbgVals) else None
 
     def _dbg_rheostat(self, source, index):
         """The 0..1 brightness knob a light rides, cached for the current frame.
@@ -2481,8 +2489,12 @@ class PythonInterface:
 
         Offsets in DbgReadArray index THIS array, not the readable one, so the reorder
         has to happen before the slice — X-Plane asking for [5:9] must get semi/dx/dy/dz,
-        not dx/dy/dz/cone."""
-        params = self._dbg_params(n)
+        not dx/dy/dz/cone.
+
+        `n` is the ABSOLUTE dataref slot; the working lists are dense, so the
+        manifest's slot base (0 for the cockpit, 48 for the screens) is subtracted
+        here, at the wire — same place the reorder happens."""
+        params = self._dbg_params(n - self.dbgSlotBase)
         return [params[i] for i in DebugDataRefOrder]
 
     def _dbg_probe_params(self, n):
@@ -2531,12 +2543,16 @@ class PythonInterface:
     def _dbg_load(self):
         """(Re)read the newest debug manifest from the installed aircraft.
 
-        There is one manifest per debug-capable target (cockpit, screens) and both
-        number their dataref slots from 0, so driving two at once would have every
-        screen light fighting a cockpit light for the same slot. The most recently
-        WRITTEN manifest wins — that is the build you just ran — and its name goes in
-        the window so "why is the list full of the wrong lights" is never a puzzle."""
+        There is one manifest per debug-capable target (cockpit, screens). Since
+        2026-08-09 the generator gives each target its own slot window (interior
+        from 0, screens from 48 — DEBUG_SLOT_BASE in build_objs.py), so the two
+        OBJs no longer collide; THIS tool still drives one manifest at a time,
+        the most recently WRITTEN — that is the build you just ran — and its name
+        goes in the window so "why is the list full of the wrong lights" is never
+        a puzzle. The manifest's slot base is kept in dbgSlotBase and applied at
+        the dataref boundary; everything else here stays dense from 0."""
         self.dbgLights, self.dbgVals, self.dbgBase = [], [], []
+        self.dbgSlotBase = 0
         self.dbgPosTunable = False      # re-asserted from the manifest below
         self.dbgMarkerDots = 0          # 0 = this OBJ has no markers in it
         self.dbgTarget = ""
@@ -2561,14 +2577,19 @@ class PythonInterface:
         found.sort(reverse=True)        # newest mtime first
         _, self.dbgTarget, path = found[0]
         if len(found) > 1:
-            _log("live light debug: %d debug OBJs are installed (%s); driving the "
-                 "newest, %s. They share the same dataref slots, so rebuild the "
-                 "other WITHOUT --debug to avoid two lights per slot."
+            _log("live light debug: %d debug OBJs are installed (%s); this tool "
+                 "drives ONE at a time and picked the newest, %s. (They live on "
+                 "separate slot windows now — the native Dev window's Lights tab "
+                 "drives both at once.)"
                  % (len(found), ", ".join(f[1] for f in found), self.dbgTarget))
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.dbgLights = list(data.get("lights", []))
+            # The generator numbers slots from a per-target base (0 cockpit, 48
+            # screens); the dense lists below start at that base.
+            ns = [int(l.get("n", i)) for i, l in enumerate(self.dbgLights)]
+            self.dbgSlotBase = min(ns) if ns else 0
             # Default False: a manifest is always written with its OBJ, so a missing key
             # means an old or hand-made one, and hiding the controls is the safe read.
             self.dbgPosTunable = bool(data.get("pos_tunable", False))
@@ -2716,11 +2737,12 @@ class PythonInterface:
             v[slot] = max(-DebugPosRange, min(DebugPosRange, v[slot]))
 
     def _dbg_marker_value(self):
-        """The number the OBJ's ANIM_hide gate reads: 0 off, -1 all, n+1 = light n."""
+        """The number the OBJ's ANIM_hide gate reads: 0 off, -1 all, n+1 = light n.
+        The gate is keyed on the ABSOLUTE slot, so the manifest's base is added."""
         if self.dbgMarkerMode == "all":
             return DebugMarkerAll
         if self.dbgMarkerMode == "this":
-            return self.dbgSel + 1
+            return self.dbgSlotBase + self.dbgSel + 1
         return DebugMarkerOff
 
     def _dbg_set_marker(self, mode):

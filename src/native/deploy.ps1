@@ -29,7 +29,15 @@
                          Re-run without -Dev to get a clean plugin back.
                          It does NOT imply a --debug OBJ build: those bind the
                          ToLissPhoton/debug/light/* pool and are not installable,
-                         so the light tuner stays an explicit, separate step.
+                         so the light tuner stays an explicit, separate step:
+    -DebugObjs           build the DEBUG OBJ variant: the interior and screens
+                         OBJs re-emitted with every light live-tunable from the
+                         Dev window's Lights tab (the exterior stays a normal
+                         build - it has frozen goldens). Adds per-light dataref
+                         overhead, so leave it off when assessing performance.
+                         Usually paired with -Dev; without a dev plugin the
+                         debug lights draw at seed colors and ignore every knob.
+                         Re-run without -DebugObjs to put the real OBJs back.
     -Test                run the unit suite first and stop if it fails (~10 s).
     -NoObjs              skip steps 2-3; plugin only.
     -NoBuild             skip step 4; just copy the already-built .xpl.
@@ -58,7 +66,8 @@ param(
     [string] $Target = "all",
     [ValidateSet('stock','durantula','realwings')]
     [string] $Wing = "stock",
-    [switch] $Dev
+    [switch] $Dev,
+    [switch] $DebugObjs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,8 +146,15 @@ if ($Test -or -not $NoObjs) {
         # --write installs each OBJ into the live aircraft as well as dist/.
         # Default target is `all`: `both` silently omits the screens OBJ, which
         # is what makes an edited screens fixture look like it did not rebuild.
-        Invoke-RepoPython $py @('build/build_objs.py','build','--target',$Target,'--wing',$Wing,'--write') `
-            "Building OBJs ($Target, $Wing) into $XPlaneRoot..."
+        # --debug only applies to the debug-capable targets (interior, screens);
+        # cmd_build scopes it, so the exterior stays a normal build either way.
+        $objArgs = @('build/build_objs.py','build','--target',$Target,'--wing',$Wing,'--write')
+        if ($DebugObjs) {
+            $objArgs += '--debug'
+            Write-Host "DEBUG OBJs - interior + screens lights are live-tunable. Not installable, never ship dist/ from this state." -ForegroundColor Yellow
+        }
+        Invoke-RepoPython $py $objArgs `
+            "Building OBJs ($Target, $Wing$(if ($DebugObjs) { ', DEBUG' })) into $XPlaneRoot..."
     }
 }
 
@@ -223,6 +239,17 @@ if (Test-Path $fxSrc) {
 
 if ($Dev) {
     Write-Host "           DEV build - Plugins > ToLiss Photon > Dev > Dev window..." -ForegroundColor Yellow
+    # Seed the Dev window's repo path, ONCE. Without it the Build tab has nowhere
+    # to run commands and -- the reason this is here -- the light tuner writes
+    # light_tuning.txt beside X-Plane's preferences instead of into .scratch/,
+    # which is a file the next person looking for their tuning will not find.
+    # Never overwritten: after the first write it is the user's to edit in the UI.
+    $devPrefs = Join-Path $XPlaneRoot 'Output\preferences\ToLissPhoton_dev.txt'
+    if (-not (Test-Path $devPrefs)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $devPrefs) | Out-Null
+        Set-Content -Path $devPrefs -Value "repo $repo" -Encoding utf8
+        Write-Host ("           dev repo path seeded -> {0}" -f $devPrefs)
+    }
 }
 
 # One summary, so "did the OBJs actually go in?" is answerable without scrolling
@@ -233,7 +260,12 @@ Write-Host ("  plugin   {0} build -> {1}" -f $(if ($Dev) { 'DEV' } else { 'relea
 if ($NoObjs) {
     Write-Host "  OBJs     SKIPPED (-NoObjs) - the aircraft lights in the sim are whatever was there before"
 } else {
-    Write-Host ("  OBJs     {0} ({1} wings) -> the installed aircraft" -f $Target, $Wing)
+    Write-Host ("  OBJs     {0} ({1} wings{2}) -> the installed aircraft" -f $Target, $Wing, $(if ($DebugObjs) { ', DEBUG' } else { '' }))
+    if ($DebugObjs) {
+        Write-Host "  note     DEBUG OBJs installed: tune from Dev > Lights (screens edit as one) and" -ForegroundColor Yellow
+        Write-Host "           Dev > Cockpit (simplified-flood multiplier); Save tuning writes" -ForegroundColor Yellow
+        Write-Host "           .scratch\light_tuning.txt. Re-deploy without -DebugObjs when done." -ForegroundColor Yellow
+    }
 }
 if (-not $Test) {
     Write-Host "  tests    not run (pass -Test)"

@@ -1,4 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
+
+# --- binary hygiene: universal binaries on macOS -----------------------------
+# ⚠ BEFORE project(), and as cache variables — CMake reads both during platform
+# initialization, and CMAKE_OSX_ARCHITECTURES only initializes a target's
+# OSX_ARCHITECTURES property at add_library/add_executable time. This used to be
+# set inside the .xpl's per-platform block, AFTER photoncore and photon-installer
+# already existed: the static lib came out single-arch and the universal installer
+# exe could not link its x86_64 slice on an arm64 runner. Ignored everywhere but
+# macOS, so it is unconditional (APPLE is not defined until project() runs).
+#
+# The deployment target pins the oldest macOS the binaries run on. Without it the
+# floor is whatever SDK the build machine carries, and an installer built on a new
+# CI runner refuses to launch on an older Intel Mac it would otherwise support.
+# 11.0 = X-Plane 12's own floor; the arm64 slice cannot go lower anyway.
+set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS: universal 2")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "macOS: oldest supported OS")
+
 project(ToLissPhotonNative CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -58,7 +75,13 @@ target_include_directories(photoncore PUBLIC
 target_compile_features(photoncore PUBLIC cxx_std_17)
 
 if(WIN32)
-    target_compile_definitions(photoncore PRIVATE
+    # ⚠ PUBLIC, not PRIVATE. Every consumer of this library that also includes
+    # windows.h needs the same guards, and NOMINMAX is the one that bites: without
+    # it windows.h defines min/max as MACROS, and the first `std::min(` in a
+    # consumer fails with "illegal token on right side of '::'" — an error that
+    # names neither windows.h nor the macro. Setting it here rather than repeating
+    # it per target is what stops the next target from rediscovering that.
+    target_compile_definitions(photoncore PUBLIC
         _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     # ⚠ Source files hold UTF-8 string literals (the ⚠ in log lines, and every
     # comment). MSVC otherwise reads them in the system code page and mangles them.
@@ -76,8 +99,21 @@ endif()
 # No framework, matching the offline ImGui reproduction harness that found the
 # CmdListsCount bug in a minute after two sim restarts found nothing. Runs on all
 # three OSes in CI; also the place to reproduce a patcher bug without X-Plane.
-add_executable(photoncore_tests tests/core_tests.cpp)
+#
+# The TUI's string engine is tested here too. It lives in the installer target
+# rather than photoncore (nothing else draws a terminal), so its two files are
+# compiled into the test binary directly — `WrapAnsi`/`Clip`/`VisLen` are pure
+# functions with an exhaustive-case shape, and they are exactly the layer where a
+# 1:1 port of somebody else's index arithmetic goes subtly wrong.
+add_executable(photoncore_tests
+    tests/core_tests.cpp
+    tests/install_tests.cpp
+    src/installer/tui.cpp
+    src/installer/platform.cpp)
 target_link_libraries(photoncore_tests PRIVATE photoncore)
+if(WIN32)
+    target_link_libraries(photoncore_tests PRIVATE shell32)
+endif()
 enable_testing()
 add_test(NAME photoncore_tests COMMAND photoncore_tests)
 
@@ -87,12 +123,24 @@ add_test(NAME photoncore_tests COMMAND photoncore_tests)
 # never runs for it.
 add_executable(photon-installer
     src/installer/main.cpp
-    src/installer/cli.cpp)
+    src/installer/cli.cpp
+    src/installer/platform.cpp
+    src/installer/log.cpp
+    src/installer/tui.cpp
+    src/installer/screens.cpp)
 target_link_libraries(photon-installer PRIVATE photoncore)
 
+if(WIN32)
+    # ShellExecuteW, for opening the .org/GitHub pages from the Complete screen.
+    target_link_libraries(photon-installer PRIVATE shell32)
+    # A CONSOLE subsystem app, deliberately and permanently: this is a terminal UI,
+    # and a WIN32 subsystem build would open with no console for it to draw in.
+    set_target_properties(photon-installer PROPERTIES WIN32_EXECUTABLE OFF)
+endif()
+
 if(APPLE)
-    set_target_properties(photon-installer PROPERTIES
-        OSX_ARCHITECTURES "arm64;x86_64")   # universal 2, same as the .xpl
+    # Universal 2 + deployment target come from the cache variables at the top of
+    # this file — set there, before any target, so photoncore gets them too.
 elseif(NOT MSVC)
     # The same flags the `.xpl` already uses: a distro's libstdc++ is older than the
     # one this was built against more often than not, and the installer has to run
@@ -212,7 +260,9 @@ if(WIN32)
     set(PHOTON_ARCH win_x64)
 elseif(APPLE)
     target_compile_definitions(ToLissPhoton PRIVATE APL=1 IBM=0 LIN=0)
-    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")   # universal 2 (Apple Silicon + Intel)
+    # Universal 2 comes from CMAKE_OSX_ARCHITECTURES at the top of this file —
+    # setting it HERE never worked: the property snapshots the variable when the
+    # target is created, and this line ran after add_library(ToLissPhoton).
     target_link_libraries(ToLissPhoton PRIVATE
         "-F${XPLANE_SDK}/Libraries/Mac" "-framework XPLM"
         "-framework OpenGL")

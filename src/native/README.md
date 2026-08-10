@@ -13,14 +13,14 @@ Auto resolution (1 Hz), ToLiss detection, and the superseded-file sweep.
 
 ## The three CMake targets
 
-`src/native/CMakeLists.txt` builds three things, not one:
+`src/native/CMakeLists.txt` builds four things, not one:
 
 | Target | What | Needs the SDK? |
 |---|---|---|
 | `ToLissPhoton` | the shipping `.xpl` | yes |
 | `photoncore` | STATIC lib: constants, version, the file patchers, detection, the manifest | **no** |
-| `photon-installer` | the compiled end-user installer (`docs/installer_cpp_plan.md`) | **no** |
-| `photoncore_tests` | plain-`main()` assert exe over `photoncore` | **no** |
+| `photon-installer` | the compiled end-user installer — TUI + headless CLI (`docs/installer_cpp_plan.md`) | **no** |
+| `photoncore_tests` | plain-`main()` assert exe over `photoncore` **and the TUI's string engine** | **no** |
 
 ⚠ **`photoncore` MUST NOT INCLUDE AN XPLM HEADER OR LINK THE SDK.** The installer and
 the core tests build on machines and CI runners with no X-Plane SDK, and that
@@ -54,6 +54,19 @@ consumer is a warning at best and two heaps at worst. Static is the right side:
 `photon-installer` is a file an end user downloads and double-clicks, and a
 missing-VC++-redistributable dialog on a lighting mod reads as malware. The `.xpl`
 gains the same property (it previously took the default `/MD`).
+
+⚠ **`NOMINMAX` / `WIN32_LEAN_AND_MEAN` / `_CRT_SECURE_NO_WARNINGS` are PUBLIC on
+`photoncore`, not private.** Every consumer that also includes `windows.h` needs the
+same guards, and `NOMINMAX` is the one that bites: without it `windows.h` defines
+`min`/`max` as **macros**, and the first `std::min(` in a consumer fails with
+*"illegal token on right side of '::'"* — an error naming neither `windows.h` nor the
+macro. Setting it on the library is what stops each new target rediscovering it. The
+cost is that `WIN32_LEAN_AND_MEAN` rides along, so a consumer wanting
+`ShellExecuteW`/`CommandLineToArgvW` includes `<shellapi.h>` itself.
+
+⚠ **`photon-installer` is a CONSOLE subsystem app, permanently.** It is a terminal
+UI; a `WIN32_EXECUTABLE ON` build would launch with no console to draw in and look
+like nothing happened.
 
 ## Get the SDK (one-time)
 
@@ -113,6 +126,34 @@ $cmake = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\Comm
 macOS / Linux: `cmake -B build && cmake --build build`. Output lands in the fat-plugin
 layout X-Plane expects — `build/ToLissPhoton/<arch>/ToLissPhoton.xpl`, arch =
 `win_x64 | mac_x64 | lin_x64` — and all three can sit side by side.
+
+## Running `photon-installer` while working on it
+
+⚠ **The freshly built binary does NOT work where CMake leaves it.** It resolves its
+bundle from its own directory (`payload/`, then `data/`), and nothing stages one into
+the build tree — so a bare run out of `build/Release/` reports *"no bundled payload …
+this build is incomplete"*, which reads as a broken checkout rather than a missing
+step. That is what `--payload-dir` is for:
+
+```powershell
+python build\make_release.py --plugin-dir src\native\build\ToLissPhoton   # once
+& $cmake --build build --config Release --target photon-installer        # each edit
+..\..\src\native\build\Release\photon-installer.exe --payload-dir ..\..\release\payload --dry-run
+```
+
+Stage the bundle **once**, then the loop is a rebuild. Restaging instead re-copies
+~58 MiB of interior textures every time, which is the whole reason the flag exists.
+
+`--payload-dir` is accepted by every mode — the interactive run and each subcommand —
+because it is handled before the two split apart. ⚠ **A path that is not a directory
+is refused by name** (exit 2), rather than falling through to the generic
+"this build is incomplete": that message would send you to re-download a bundle that
+is fine, over an argument you mistyped.
+
+⚠ **Always start with `--dry-run`.** Without it the installer writes to a real
+X-Plane install — it is the shipping tool, not a sandbox. The interactive mode takes
+only `--dry-run`, `--xplane-root` and `--payload-dir`; anything else exits with a
+message rather than opening a full-screen UI over the top of it.
 
 ## `PHOTON_DEV` — the one dev flag
 

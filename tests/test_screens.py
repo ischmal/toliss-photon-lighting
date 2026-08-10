@@ -26,7 +26,6 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 import build_objs as B          # noqa: E402
-from installer import patch_acf_screens as PS  # noqa: E402
 import photon_dsl as PD        # noqa: E402
 
 PLUGIN_CPP = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
@@ -190,12 +189,12 @@ class MasterGateTests(unittest.TestCase):
         self.assertIn("ReadScreensDisabledInt", reg[:300])
         self.assertIn("ReadScreensDisabledFloat", reg[:300])
 
-    def test_the_alpha_path_still_gates_too(self):
+    def test_the_per_frame_path_still_gates_too(self):
         """BOTH halves stay. The OBJ block is the cheap gate for the user's
-        switch; the per-frame alpha is what follows the DU knobs and the DC bus,
-        neither of which belongs in an ANIM_hide. Removing the alpha gating
-        because "the block is hidden anyway" would leave the spill lit through a
-        bus failure whenever the switch happens to be on."""
+        switch; the per-frame size factor is what follows the DU knobs and the DC
+        bus, neither of which belongs in an ANIM_hide. Removing the per-frame
+        gating because "the block is hidden anyway" would leave the spill lit
+        through a bus failure whenever the switch happens to be on."""
         engine = re.search(r"const float userGain = [^\n]*", PLUGIN_CPP)
         self.assertIsNotNone(engine)
         self.assertIn("DisplayFeatureOn(gDisplays.spill)", engine.group(0))
@@ -433,14 +432,80 @@ class SpillDataRefTests(unittest.TestCase):
         self.assertIsNotNone(m, "kSpillScreenPrefix missing from plugin.cpp")
         self.assertEqual(m.group(1), SPILL_PREFIX)
 
-    def test_alpha_is_baked_low_for_the_plugin_absent_case(self):
-        """With the plugin absent X-Plane draws the baked params unmodified, so
-        the degraded state must be a faint glow — never a glare in a dark
-        cockpit. Slot 6 of LIGHT_SPILL_CUSTOM (x y z r g b a ...) is alpha."""
+    def test_the_screens_accessor_drives_size_and_the_map_one_drives_alpha(self):
+        """⚠ THE TWO SPILL ACCESSORS DRIVE DIFFERENT SLOTS (2026-08-09), and
+        nothing in the sim complains if they are swapped: driving alpha on a
+        screen makes the knob fade a fixed pool instead of spreading it, and
+        driving size on the map spot makes the map knob grow a pool at constant
+        opacity. Both look plausible in a screenshot and wrong in motion.
+
+        The slot numbers themselves are the load-bearing part: 3 and 4 are the
+        only two that mean the same thing in both custom-light orderings (the
+        rotation is confined to the trailing four), which is what makes driving
+        either one safe at all. test_light_editor.py pins that."""
+        screens = PLUGIN_CPP[PLUGIN_CPP.index("static int ReadSpillScreen("):]
+        screens = screens[:screens.index("\n}")]
+        self.assertIn("kSpillSizeSlot", screens)
+        self.assertNotIn("kSpillAlphaSlot", screens)
+
+        mapspot = PLUGIN_CPP[PLUGIN_CPP.index("static int ReadSpillMap("):]
+        mapspot = mapspot[:mapspot.index("\n}")]
+        self.assertIn("kSpillAlphaSlot", mapspot)
+        self.assertNotIn("kSpillSizeSlot", mapspot)
+
+        self.assertIn("static const int   kSpillAlphaSlot  = 3;", PLUGIN_CPP)
+        self.assertIn("static const int   kSpillSizeSlot   = 4;", PLUGIN_CPP)
+
+    def test_the_authored_size_is_captured_once_and_reset_per_aircraft(self):
+        """The plugin scales the OBJ's authored `size:` rather than owning a copy
+        of it, so the .phdsl stays the only place a size is written. Two things
+        make that safe and both fail silently if dropped:
+
+        * it CAPTURES on first read and assigns thereafter — multiplying the
+          buffer in place would compound to zero if X-Plane ever fed our own
+          output back, and nothing here has measured that it does not;
+        * the capture is dropped on aircraft load, or a rebuilt OBJ with a new
+          `size:` would be scaled against the previous build's reach forever."""
+        self.assertIn("gScreenBakedSize", PLUGIN_CPP)
+        acc = PLUGIN_CPP[PLUGIN_CPP.index("static int ReadSpillScreen("):]
+        acc = acc[:acc.index("\n}")]
+        self.assertIn("gScreenBakedSeen[slot] = true;", acc)
+        self.assertIn("gScreenBakedSize[slot] * gScreenSizeFactor[slot]", acc)
+
+        # ⚠ The DEFINITION, not the forward declaration 1800 lines above it —
+        # matching the bare signature slices the wrong function entirely.
+        load = PLUGIN_CPP[PLUGIN_CPP.index("static void UpdateMenuVisibility() {"):]
+        load = load[:load.index("\n}")]
+        self.assertIn("gScreenBakedSeen[i] = false;", load,
+                      "the captured sizes must be dropped on aircraft load")
+
+    def test_the_baked_alpha_is_the_shipping_intensity_and_is_never_zero(self):
+        """⚠ ALPHA IS NOW A CONSTANT THE PLUGIN NEVER WRITES (2026-08-09): the DU
+        knob drives SIZE, so what the DSL bakes here is the intensity at every
+        knob position, with the plugin loaded or absent.
+
+        Zero is still the one value that must not appear. An invisible light
+        reads in-sim as "the .acf attachment never happened" and sends the next
+        person after the wrong bug — the same reasoning behind naming the master
+        gate for its OFF state. The upper bound is 1 because that is the range,
+        not a taste judgement: with alpha no longer a degraded-state fallback,
+        how bright the glow should be is a tuning decision for the .phdsl.
+
+        Slot 6 of LIGHT_SPILL_CUSTOM (x y z r g b a ...) is alpha."""
         for ln in spill_lines(build()):
             alpha = float(ln.split()[7])
             self.assertGreater(alpha, 0.0, ln)
-            self.assertLessEqual(alpha, 0.25, f"baked alpha too bright: {ln}")
+            self.assertLessEqual(alpha, 1.0, f"baked alpha out of range: {ln}")
+
+    def test_the_baked_size_is_the_reach_at_full_and_is_never_zero(self):
+        """The driven slot. The plugin captures this from the pre-filled buffer
+        and scales it by the DU knob, so a zero here would multiply out to a
+        light with no reach at every knob position — invisible, and invisible is
+        the failure this feature keeps having to design against. Slot 8 is size
+        (x y z r g b a s ...)."""
+        for ln in spill_lines(build()):
+            size = float(ln.split()[8])
+            self.assertGreater(size, 0.0, ln)
 
 
 class DUMappingTests(unittest.TestCase):
@@ -466,11 +531,14 @@ class DUMappingTests(unittest.TestCase):
         plugin = self._du_from_plugin()
         manifest = self._du_from_manifest()
         self.assertEqual(len(plugin), 6)
+        # Debug slots start at the screens' DEBUG_SLOT_BASE; kScreenDU indexes
+        # the six spill lights from 0, so the base is subtracted to compare.
+        base = B.DEBUG_SLOT_BASE["screens"]
         for slot, du in sorted(manifest.items()):
             self.assertEqual(
-                du, plugin[slot],
+                du, plugin[slot - base],
                 f"slot {slot}: the DSL says DUBrightness[{du}] but kScreenDU "
-                f"says [{plugin[slot]}] — one of them binds the wrong screen")
+                f"says [{plugin[slot - base]}] — one of them binds the wrong screen")
 
     def test_each_screen_has_its_own_display(self):
         self.assertEqual(len(set(self._du_from_plugin())), 6,
@@ -569,6 +637,56 @@ class DebugManifestTests(unittest.TestCase):
         self.assertEqual(len(em.debug_lights), 6)
         self.assertLessEqual(len(em.debug_lights), B.DEBUG_MAX_LIGHTS)
 
+    def test_a_plain_build_removes_a_stale_debug_manifest(self):
+        """⚠ Going BACK to a normal OBJ has to take the manifest with it.
+
+        The manifest is what the Dev window's Lights tab reads. Left behind after
+        a non-debug rebuild it describes an OBJ that no longer binds
+        ToLissPhoton/debug/light/*, so the tab lists every light as usual and not
+        one knob moves anything — which reads as the light editor being broken
+        rather than as "you are not running a debug OBJ any more"."""
+        with tempfile.TemporaryDirectory() as td:
+            def build_args(debug):
+                a = type("A", (), {"airframe": "a320", "wing": "stock", "flat": False,
+                                   "write": False, "target": "screens", "debug": debug,
+                                   "debug_pos": False, "no_debug_pos": False})()
+                a.out = Path(td)
+                return a
+
+            B.cmd_build(build_args(True))
+            manifest = (Path(td) / "A320" / "objects"
+                        / B.DEBUG_MANIFESTS["screens"])
+            self.assertTrue(manifest.exists(), "the debug build wrote no manifest")
+
+            B.cmd_build(build_args(False))
+            self.assertFalse(manifest.exists(),
+                             "a plain build left the debug manifest behind — the "
+                             "Lights tab will offer knobs that drive nothing")
+            # ...and the OBJ itself is back to the real datarefs.
+            obj = (Path(td) / "A320" / "objects" / "lights_screens.obj").read_text()
+            self.assertNotIn(B.DEBUG_LIGHT_DREF, obj)
+
+    def test_the_two_debug_targets_have_disjoint_slot_windows(self):
+        """Slots come from per-target bases so both debug OBJs can be installed
+        and driven at once (the native Dev window merges the manifests). The
+        interior must stay below the screens base and the screens below the pool
+        end, or two lights silently share a dataref and one knob moves two lamps."""
+        cfg = B.load_config(wing="stock")
+        inn = B.Emitter(cfg, "a320", "stock", target="interior", debug=True)
+        inn.emit()
+        scr = B.Emitter(cfg, "a320", "stock", target="screens", debug=True)
+        scr.emit()
+        inn_slots = [d["n"] for d in inn.debug_lights]
+        scr_slots = [d["n"] for d in scr.debug_lights]
+        base = B.DEBUG_SLOT_BASE["screens"]
+        self.assertEqual(min(inn_slots), B.DEBUG_SLOT_BASE["interior"])
+        self.assertLess(max(inn_slots), base,
+                        "the interior debug build grew into the screens' slot "
+                        "window — move the bases apart in DEBUG_SLOT_BASE")
+        self.assertEqual(scr_slots, list(range(base, base + 6)))
+        self.assertLess(max(scr_slots), B.DEBUG_MAX_LIGHTS)
+        self.assertFalse(set(inn_slots) & set(scr_slots))
+
 
 # ─── .acf attachment ─────────────────────────────────────────────────────────
 
@@ -593,129 +711,13 @@ def make_acf(count=3, style="xp12", with_inn=True, eol="\r\n"):
     return eol.join(lines) + eol
 
 
-class AcfAttachTests(unittest.TestCase):
-    def test_attach_adds_a_row_and_bumps_the_count(self):
-        text = make_acf()
-        self.assertFalse(PS.is_attached(text))
-        new, changed = PS.patch_text(text)
-        self.assertTrue(PS.is_attached(new))
-        self.assertEqual(PS.declared_count(new), PS.declared_count(text) + 1)
-        self.assertEqual(PS.find_obj(new, PS.SCREENS_OBJ), 3)
-        self.assertGreater(changed, 0)
-
-    def test_attach_is_idempotent(self):
-        once, _ = PS.patch_text(make_acf())
-        twice, changed = PS.patch_text(once)
-        self.assertEqual(changed, 0)
-        self.assertEqual(twice, once)
-
-    def test_detach_restores_the_file_byte_for_byte(self):
-        for style in ("xp12", "xp11"):
-            for eol in ("\r\n", "\n"):
-                with self.subTest(style=style, eol=eol):
-                    text = make_acf(style=style, eol=eol)
-                    patched, _ = PS.patch_text(text)
-                    back, _ = PS.unpatch_text(patched)
-                    self.assertEqual(back, text)
-
-    def test_detach_is_idempotent(self):
-        text = make_acf()
-        back, changed = PS.unpatch_text(text)
-        self.assertEqual(changed, 0)
-        self.assertEqual(back, text)
-
-    def test_row_is_copied_from_lights_inn_not_invented(self):
-        """Our light coordinates are authored in lights_inn.obj's frame, and that
-        frame's origin differs per airframe (26.00 / 20.75 / 6.78 ft). Copying is
-        the only thing that is correct on all three."""
-        text = make_acf()
-        new, _ = PS.patch_text(text)
-        rows = PS.attachment_rows(new)
-        src = rows[PS.find_obj(text, PS.FRAME_TEMPLATE_OBJ)]
-        ours = rows[PS.find_obj(new, PS.SCREENS_OBJ)]
-        self.assertEqual(ours[PS.FILE_FIELD], PS.SCREENS_OBJ)
-        for field, value in src.items():
-            if field != PS.FILE_FIELD:
-                self.assertEqual(ours[field], value, field)
-
-    def test_float_style_is_preserved_not_reformatted(self):
-        """The XP11/XP12 trap: values are copied as strings, so each file keeps
-        its own rendering and nothing is re-formatted."""
-        xp11, _ = PS.patch_text(make_acf(style="xp11"))
-        row = PS.attachment_rows(xp11)[PS.find_obj(xp11, PS.SCREENS_OBJ)]
-        self.assertEqual(row["_v10_att_z_acf_prt_ref"], "20.75")
-        xp12, _ = PS.patch_text(make_acf(style="xp12"))
-        row = PS.attachment_rows(xp12)[PS.find_obj(xp12, PS.SCREENS_OBJ)]
-        self.assertEqual(row["_v10_att_z_acf_prt_ref"], "20.750000000")
-
-    def test_refuses_when_there_is_no_frame_to_copy(self):
-        """Better to fail loudly than to attach at a guessed datum and mis-place
-        every light on two airframes out of three."""
-        with self.assertRaises(PS.AcfError):
-            PS.patch_text(make_acf(with_inn=False))
-
-    def test_missing_count_is_an_error_not_a_guess(self):
-        text = make_acf().replace("P _obja/count 3\r\n", "")
-        with self.assertRaises(PS.AcfError):
-            PS.declared_count(text)
-
-    def test_a_row_outside_the_declared_count_does_not_read_as_installed(self):
-        """A row at index >= count is in the file but never read by X-Plane. It
-        looks installed to a grep and draws nothing in the sim."""
-        patched, _ = PS.patch_text(make_acf())
-        broken = patched.replace("P _obja/count 4", "P _obja/count 3")
-        self.assertIsNotNone(PS.find_obj(broken, PS.SCREENS_OBJ))
-        self.assertFalse(PS.is_attached(broken))
-
-    def test_detach_closes_the_gap_when_a_row_was_added_after_ours(self):
-        """X-Plane reads indices 0..count-1, so leaving a hole would silently
-        unload whatever the table says that index is — another mod's OBJ."""
-        patched, _ = PS.patch_text(make_acf())
-        later = patched.replace(
-            "P _obja/count 4",
-            "P _obja/4/_v10_att_file_stl other_mod.obj\r\nP _obja/count 5")
-        back, _ = PS.unpatch_text(later)
-        rows = PS.attachment_rows(back)
-        self.assertIsNone(PS.find_obj(back, PS.SCREENS_OBJ))
-        self.assertEqual(PS.find_obj(back, "other_mod.obj"), 3)
-        self.assertEqual(PS.declared_count(back), 4)
-        self.assertEqual(sorted(rows), list(range(4)))
-
-    def test_acf_files_skips_backups(self):
-        """Patching a .bak would corrupt another mod's uninstall — Durantula
-        keeps an a320.acf.durantula.bak of this very file."""
-        with tempfile.TemporaryDirectory() as td:
-            d = Path(td)
-            (d / "a320.acf").write_text(make_acf(), encoding="utf-8", newline="")
-            (d / "a320.acf.durantula.bak").write_text(make_acf(), encoding="utf-8",
-                                                      newline="")
-            found = [p.name for p in PS.acf_files(d)]
-            self.assertEqual(found, ["a320.acf"])
-
-    def test_run_round_trips_a_file_on_disk(self):
-        with tempfile.TemporaryDirectory() as td:
-            d = Path(td)
-            p = d / "a320.acf"
-            original = make_acf().encode("utf-8")
-            p.write_bytes(original)
-            PS.run(d)
-            self.assertNotEqual(p.read_bytes(), original)
-            with p.open("r", **PS._ENC) as f:
-                self.assertTrue(PS.is_attached(f.read()))
-            PS.run(d, reverse=True)
-            self.assertEqual(p.read_bytes(), original)
-
-
-class AcfDryRunTests(unittest.TestCase):
-    def test_dry_run_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as td:
-            d = Path(td)
-            p = d / "a320.acf"
-            original = make_acf().encode("utf-8")
-            p.write_bytes(original)
-            PS.run(d, dry=True)
-            self.assertEqual(p.read_bytes(), original)
-
+# ⚠ THE .acf ATTACHMENT TESTS MOVED TO C++ (2026-08-09). `AcfAttachTests`
+# lived here and drove `installer/patch_acf_screens.py`, which is gone with the
+# Python installer. The attachment table — copying the lights_inn frame, the
+# idempotent re-attach, the stale-row-beyond-the-count case and the renumber-down
+# on detach — is pinned by the `screens:` cases in
+# src/native/tests/core_tests.cpp. What stays in THIS file is the DSL side: which
+# fixtures the screens target emits and how they are gated.
 
 if __name__ == "__main__":
     unittest.main()

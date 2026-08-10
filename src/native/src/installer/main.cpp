@@ -7,17 +7,26 @@
 //
 // ⚠ THE PAYLOAD IS RESOLVED FROM THE EXECUTABLE'S OWN PATH, never the working
 // directory. Users run this from Downloads, from a USB stick, and from inside
-// X-Plane/Resources/plugins/ — the bundle travels with the binary.
-#include <clocale>
+// X-Plane/Resources/plugins/ — the bundle travels with the binary. `--payload-dir`
+// overrides that, which is what makes the dev loop a rebuild rather than a
+// 58 MiB restage (see the flag's own note below).
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <vector>
 
+#include "core/fsutil.h"
 #include "core/payload.h"
 #include "installer/cli.h"
+#include "installer/screens.h"
 
 #ifdef _WIN32
 #include <windows.h>
+// ⚠ Explicitly, because photoncore compiles every consumer with
+// WIN32_LEAN_AND_MEAN — which is exactly what leaves CommandLineToArgvW out of
+// windows.h.
+#include <shellapi.h>
 #endif
 
 namespace {
@@ -67,11 +76,39 @@ std::string ExecutablePath(const std::vector<std::string>& args) {
     return args.empty() ? std::string() : args[0];
 }
 
+// Pull `--payload-dir PATH` (or `--payload-dir=PATH`) out of `args`, returning the
+// rest untouched.
+//
+// ⚠ HANDLED HERE, BEFORE THE MODE SPLIT, so it applies to the TUI and to every
+// subcommand from one implementation. Threading it through both parsers instead
+// would give two chances to forget it, and the failure — a flag silently ignored
+// while the installer reads the wrong bundle — looks exactly like the payload
+// being broken.
+std::vector<std::string> TakePayloadDir(const std::vector<std::string>& args,
+                                        std::string& out, bool& bad) {
+    static const std::string kEq = "--payload-dir=";
+    std::vector<std::string> rest;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "--payload-dir") {
+            if (i + 1 >= args.size()) {
+                bad = true;
+                return rest;
+            }
+            out = args[++i];
+        } else if (a.rfind(kEq, 0) == 0) {
+            out = a.substr(kEq.size());
+        } else {
+            rest.push_back(a);
+        }
+    }
+    return rest;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::vector<std::string> args = Utf8Args(argc, argv);
-    photon::payload::InitFromExecutable(ExecutablePath(args));
+    const std::vector<std::string> rawArgs = Utf8Args(argc, argv);
 
 #ifdef _WIN32
     // ⚠ The console has to be told the output is UTF-8, or the box-drawing glyphs
@@ -80,16 +117,61 @@ int main(int argc, char** argv) {
     ::SetConsoleOutputCP(CP_UTF8);
 #endif
 
+    std::string payloadDir;
+    bool badPayloadDir = false;
+    const std::vector<std::string> args =
+        TakePayloadDir(rawArgs, payloadDir, badPayloadDir);
+    if (badPayloadDir) {
+        std::cerr << "--payload-dir needs a value\n\n"
+                  << photon::installer::UsageText();
+        return 2;
+    }
+
+    photon::payload::InitFromExecutable(ExecutablePath(args));
+    if (!payloadDir.empty()) {
+        // ⚠ A WRONG EXPLICIT PATH IS A USER ERROR, AND MUST SAY SO. Left to the
+        // normal machinery a typo here surfaces as "this build is incomplete —
+        // re-download", which sends someone chasing a broken bundle over a
+        // mistyped argument.
+        std::error_code ec;
+        const std::filesystem::path given = photon::fsutil::PathFromUtf8(payloadDir);
+        if (!std::filesystem::is_directory(given, ec)) {
+            std::cerr << "--payload-dir is not a directory: " << payloadDir << "\n";
+            return 2;
+        }
+        // Absolute, so the log line and the `--json` report name a path that means
+        // the same thing to whoever reads them later. A relative argument resolves
+        // against the working directory — correct for a flag, useless in a log.
+        const std::filesystem::path abs = std::filesystem::weakly_canonical(given, ec);
+        photon::payload::SetPayloadDir(
+            photon::fsutil::PathToUtf8(ec ? given : abs));
+    }
+
     if (photon::installer::IsCliInvocation(args)) {
         return photon::installer::RunCli(args);
     }
 
-    // The interactive TUI is Phase 4 of the port (docs/installer_cpp_plan.md §4).
-    // Until it lands, a bare invocation says so rather than doing nothing —
-    // a silent no-op would read as a broken download.
-    std::cout << "The interactive installer is not built into this binary yet.\n"
-                 "Use the headless commands, or the Python installer "
-                 "(python install.py):\n\n"
-              << photon::installer::UsageText();
-    return 2;
+    // ─── the interactive installer ───────────────────────────────────────────
+    // Only two arguments reach it, both mirroring the Python installer's:
+    // `--dry-run` (log everything, write nothing) and `--xplane-root PATH` (skip
+    // auto-detection). Anything else is a typo, and saying so beats silently
+    // opening a full-screen UI over the top of it.
+    std::string xplaneRoot;
+    bool dryRun = false;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "--dry-run") {
+            dryRun = true;
+        } else if (a == "--xplane-root" && i + 1 < args.size()) {
+            xplaneRoot = args[++i];
+        } else if (a.rfind("--xplane-root=", 0) == 0) {
+            xplaneRoot = a.substr(std::string("--xplane-root=").size());
+        } else {
+            std::cerr << "unrecognized argument: " << a << "\n\n"
+                      << photon::installer::UsageText();
+            return 2;
+        }
+    }
+
+    return photon::installer::RunTui(xplaneRoot, dryRun);
 }

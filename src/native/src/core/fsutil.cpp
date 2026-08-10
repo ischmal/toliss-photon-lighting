@@ -45,9 +45,16 @@ std::string Utf8FromWide(const std::wstring& s) {
 
 // A temp name in the DESTINATION's own directory. Same-volume is what makes the
 // rename atomic; a system temp dir would silently degrade to a copy.
+//
+// ⚠ `+=` appends in the path's own native encoding. Building the name via
+// `filename().string()` narrows through the ANSI code page on Windows, which
+// mangles a non-ASCII filename (a flattened livery backup carries the livery
+// folder's name, which the user chose) into an unwritable one — the same trap
+// patch_realwings sidesteps for its `.bak` sibling.
 fs::path TempSibling(const fs::path& dest) {
-    return dest.parent_path() /
-           (dest.filename().string() + ".photontmp");
+    fs::path tmp = dest;
+    tmp += ".photontmp";
+    return tmp;
 }
 
 }  // namespace
