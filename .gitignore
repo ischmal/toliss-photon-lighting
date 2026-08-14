@@ -36,3 +36,8 @@ src/native/build-dev/
 # photoncore_tests and photon-installer with no X-Plane SDK present, which is what
 # CI uses for the installer and what a contributor without the SDK can still run.
 src/native/build-core/
+# The GUI tree: `cmake -DPHOTON_GUI=ON` builds photon-installer with the Slint
+# front-end. Its own tree because that configure downloads and compiles Slint from
+# source (Rust), which is minutes of work nobody wants to redo by toggling a flag
+# in a shared tree. See docs/installer_gui_plan.md.
+src/native/build-gui/

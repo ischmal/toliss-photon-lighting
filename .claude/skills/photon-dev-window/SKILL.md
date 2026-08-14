@@ -66,6 +66,33 @@ are. See the `panel-fx` skill.
   hypothesis that turned out to be wrong, since a four-slot rotation is not an axis
   permutation. `tests/test_light_editor.py` pins the constants the two share;
   `test_dev_light_debug.py` pins the Python stand-down.
+- ⚠ **THE LIGHTS TAB HAS A READ-ONLY MODE, and which mode you get is decided by the
+  INSTALLED OBJ** (2026-08-10). A plain build of the interior/screens targets now drops
+  `lights_inn.info.json` / `lights_screens.info.json` beside the normal OBJ; a `--debug`
+  build drops `*.debug.json` instead. **Each build deletes the other's file**, so exactly
+  one exists at a time and the tab decides by which one it found — tunable, or the same
+  tree and numbers disabled. The fallback is **per target** (`haveDebug[c]`), so an
+  interior built `--debug` can sit beside stock screens.
+  - **`DbgLight::readOnly` is per LIGHT, not per session.** `gDbgReadOnly` is the
+    separate "nothing here is tunable" flag, and all it does is hide the toolbar of
+    things that only mean something to a debug OBJ (Save tuning, Isolate, Mark, Blink,
+    the A/B Tunable switch, the markers, the slot probe) plus the tuning-file row. Hidden
+    rather than disabled, deliberately.
+  - ⚠ **`variants[i]` is indexed by the CATEGORY DATAREF'S VALUE** — the same contract
+    `build_objs.branch_gate` emits the OBJ's `ANIM_hide`s from — because a shipping OBJ
+    bakes each lamp once per look and only one branch draws. Never match on the profile
+    NAME; it is carried for display only. `DbgApplyVariants` runs every frame from the
+    tab (the era can change from the Cockpit tab while it is open) and keeps `base[]`
+    equal to `v[]`, so a branch change can never read as an EDIT.
+  - ⚠ **A read-only session never touches the tuning file** — `DbgLoadManifest` skips
+    `DbgLoadTuning`, `DbgLightChanged` returns false, `DbgApplyTuningRecord` skips
+    read-only lights (the mixed case). Those records are edits against a *debug* OBJ;
+    applied over an installable one they would show numbers nothing is rendering.
+  - **Info rows carry the same slot numbers as debug rows** (same `DEBUG_SLOT_BASE`, same
+    order), so `slot 12` is one light whichever build is installed.
+  - The Cockpit tab's flood-boost slider checks `gDbgReadOnly` **before** the `boosted`
+    count: an info manifest carries the boost rows too, so the count alone is satisfied
+    and the slider would appear over an OBJ that bakes the factor.
 - **The Lights tab MERGES both debug manifests** (2026-08-09): the two targets live on
   disjoint slot windows (`DEBUG_SLOT_BASE` — interior 0, screens 48..53), so cockpit and
   screens lights tune side by side. Per-manifest facts (`pos_tunable`, `boost`) are

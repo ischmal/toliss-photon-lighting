@@ -19,7 +19,12 @@
 #include "core/fsutil.h"
 #include "core/payload.h"
 #include "installer/cli.h"
+#include "installer/platform.h"
 #include "installer/screens.h"
+
+#ifdef PHOTON_GUI
+#include "installer/gui.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -110,6 +115,14 @@ std::vector<std::string> TakePayloadDir(const std::vector<std::string>& args,
 int main(int argc, char** argv) {
     const std::vector<std::string> rawArgs = Utf8Args(argc, argv);
 
+#ifdef PHOTON_GUI
+    // ⚠ BEFORE ANY OUTPUT, AND BEFORE THE MODE SPLIT. A GUI-subsystem binary
+    // starts with no console, so every `std::cout` below this point — the whole
+    // CLI, and the argument errors on both paths — would go nowhere at all. It
+    // returns false on a double-click, which is the normal case and not an error.
+    photon::installer::platform::AttachParentConsole();
+#endif
+
 #ifdef _WIN32
     // ⚠ The console has to be told the output is UTF-8, or the box-drawing glyphs
     // and the ⚠ in log lines come out as mojibake. This is the C++ equivalent of
@@ -152,16 +165,24 @@ int main(int argc, char** argv) {
     }
 
     // ─── the interactive installer ───────────────────────────────────────────
-    // Only two arguments reach it, both mirroring the Python installer's:
-    // `--dry-run` (log everything, write nothing) and `--xplane-root PATH` (skip
-    // auto-detection). Anything else is a typo, and saying so beats silently
-    // opening a full-screen UI over the top of it.
+    // Three arguments reach it. Two mirror the Python installer's: `--dry-run`
+    // (log everything, write nothing) and `--xplane-root PATH` (skip
+    // auto-detection). `--tui` picks the terminal UI over the GUI. Anything else
+    // is a typo, and saying so beats silently opening a full-screen UI over the
+    // top of it.
     std::string xplaneRoot;
     bool dryRun = false;
+    bool forceTui = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& a = args[i];
         if (a == "--dry-run") {
             dryRun = true;
+        } else if (a == "--tui") {
+            // ⚠ ACCEPTED AND IGNORED IN A NON-GUI BUILD, deliberately. The two
+            // builds otherwise disagree about whether a valid argument exists,
+            // and a script or a support instruction that says "run it with
+            // --tui" would fail on exactly the build where it is redundant.
+            forceTui = true;
         } else if (a == "--xplane-root" && i + 1 < args.size()) {
             xplaneRoot = args[++i];
         } else if (a.rfind("--xplane-root=", 0) == 0) {
@@ -172,6 +193,14 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+
+#ifdef PHOTON_GUI
+    // The GUI is what a double-click gets. `--tui` is the way back to the
+    // terminal UI, which is what an SSH session or a headless box still needs.
+    if (!forceTui) return photon::installer::RunGui(xplaneRoot, dryRun);
+#else
+    (void)forceTui;
+#endif
 
     return photon::installer::RunTui(xplaneRoot, dryRun);
 }

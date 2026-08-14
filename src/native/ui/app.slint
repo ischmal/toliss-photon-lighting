@@ -1,0 +1,287 @@
+// The installer window: the frame, the step rail, and the entire C++ interface.
+//
+// ⚠ THE UI DECIDES NOTHING. Every `next()` and `back()` goes to C++, which works
+// out where to go and writes `step` back. The state machine lives in gui.cpp
+// beside the code that can actually answer "is this aircraft installable" — same
+// rule the TUI follows, and the reason all three front-ends stay in agreement.
+// What IS decided here is presentation: which screen a step shows, and how the
+// bottom bar is configured for it.
+//
+// Step numbering. 0 is the splash and has no rail — it sits AHEAD of the six
+// steps, so a rail with nothing marked would claim it is step zero of six. Every
+// later step maps to rail index `step - 1`.
+//
+//   0 splash · 1 directory · 2 aircraft · 3 features · 4 review · 5 run · 6 complete
+//
+// ⚠ STEP 5 IS "Run", NOT "Install" — that is the rail's label in the design, and
+// it is the better word, because the same screen runs an uninstall.
+
+// ⚠ SIDE-EFFECT IMPORTS — these register the families every `font-family` names.
+// Roboto is not installed by default on Windows or macOS, and Slint falls back to
+// a system font SILENTLY when a family is missing: the UI lays out fine and simply
+// is not the design, with no warning anywhere. See ui/assets/fonts/README.md.
+import "assets/fonts/Roboto-Regular.ttf";
+import "assets/fonts/Roboto-Medium.ttf";
+import "assets/fonts/Roboto-SemiBold.ttf";
+import "assets/fonts/Roboto-Bold.ttf";
+import "assets/fonts/Roboto-Black.ttf";
+import "assets/fonts/RobotoMono-Light.ttf";
+
+import { Tokens } from "tokens.slint";
+import { AircraftEntry, StepRail, BottomBar } from "widgets.slint";
+import { SplashScreen } from "screens/splash.slint";
+import { DirectoryScreen } from "screens/directory.slint";
+import { AircraftScreen } from "screens/aircraft.slint";
+import { FeaturesScreen } from "screens/features.slint";
+import { ReviewScreen, Attribute } from "screens/review.slint";
+import { RunScreen } from "screens/run.slint";
+import { CompleteScreen } from "screens/complete.slint";
+
+export { AircraftEntry, Attribute }
+
+export component App inherits Window {
+    title: "ToLiss Photon Lighting Installer";
+    width: Tokens.window-w;
+    height: Tokens.window-h;
+    background: Tokens.screen-bg;
+
+    // ─── frame ───────────────────────────────────────────────────────────────
+    in property <string> version: "";
+    in-out property <int> step: 0;
+    in property <bool> dry-run: false;
+
+    // ─── directory ───────────────────────────────────────────────────────────
+    in-out property <string> xplane-root;
+    in property <string> root-status;
+    in property <bool> root-status-ok: true;
+
+    // ─── aircraft ────────────────────────────────────────────────────────────
+    in property <[AircraftEntry]> aircraft: [];
+    in property <int> selected: -1;
+    // Only when the selected aircraft actually has something installed.
+    in property <bool> uninstall-available: false;
+
+    // ─── features ────────────────────────────────────────────────────────────
+    in property <bool> exterior: true;
+    in property <bool> displays: true;
+    in property <bool> interior: true;
+    in property <bool> interior-available: true;
+    in property <bool> wings-available: true;
+    in property <int> wing: 0;
+
+    // ─── review ──────────────────────────────────────────────────────────────
+    in property <string> aircraft-folder;
+    in property <string> aircraft-name;
+    in property <string> version-transition;
+    in property <[Attribute]> attributes: [];
+
+    // ─── run / complete ──────────────────────────────────────────────────────
+    in property <float> progress: 0.0;
+    // ⚠ ONE STRING, NOT A MODEL OF LINES. The Run screen renders it in a read-only
+    // TextInput so the user can select and copy it; a model would have to be
+    // joined for that anyway, and two representations of one log is one to keep in
+    // step. C++ appends "\n" + line.
+    in property <string> log-text;
+    in property <string> run-headline: "Working...";
+    // Gates the Next button on the Run screen: the design shows the button there
+    // from the start, and pressing it mid-install would leave a half-written
+    // aircraft behind.
+    in property <bool> run-finished: false;
+    in property <string> complete-headline: "Done";
+    in property <string> complete-summary;
+    in property <bool> log-available: true;
+
+    // ─── callbacks ───────────────────────────────────────────────────────────
+    callback next();
+    callback back();
+    callback uninstall();
+    callback browse();
+    callback path-edited(string);
+    callback select-aircraft(int);
+    callback toggle-exterior();
+    callback toggle-displays();
+    callback toggle-interior();
+    callback set-wing(int);
+    callback modify-another();
+    callback view-log();
+    callback open-org();
+    callback open-github();
+
+    // Presentation only — see the header note.
+    property <bool> on-splash: root.step == 0;
+    property <bool> running: root.step == 5;
+    property <bool> done: root.step == 6;
+
+    // The bottom bar's two conditions, hoisted so the key handler and the bar
+    // itself cannot disagree about whether a key is legal.
+    property <bool> can-advance: (root.step != 2 || root.selected >= 0)
+        && (!root.running || root.run-finished);
+    // ⚠ `!running` IS THE SAFETY CONDITION AND MUST STAY. Rewinding out of a run
+    // in progress would walk away from a half-written aircraft. It is also what
+    // keeps Complete's new Back a CLOSED LOOP: Complete steps to Run, and Run has
+    // no Back of its own, so the only way out of the pair is forward — there is
+    // no path from a finished install back to Review that could start a second
+    // one. `GoBack` is a plain `step - 1` with no side effects, which is what
+    // makes that round trip free.
+    property <bool> can-go-back: root.step > 0 && !root.running;
+
+    // ─── keyboard ────────────────────────────────────────────────────────────
+    // ⚠ THIS SCOPE WRAPS THE WHOLE WINDOW AND IS THE FALLBACK, NOT THE HANDLER.
+    // Slint delivers a key to the focused item and then walks up the parents, so
+    // a scope around everything gets what the focused control rejected. Enter on
+    // a focused button therefore clicks THAT button, and Enter with focus
+    // nowhere in particular advances the wizard.
+    //
+    // ⚠ `focus-on-click: false` IS LOAD-BEARING. A FocusScope with the default
+    // returns EventAccepted from its own press handler — at this size it would
+    // eat every click in the window before any TouchArea saw one, and the entire
+    // UI would go dead to the mouse. It is also why it is not `focus-on-tab-
+    // navigation` either: it would otherwise be a tab stop with nothing in it.
+    forward-focus: rootKeys;
+
+    // ⚠ FOCUS MUST BE PUT BACK WHEN THE STEP CHANGES. Every screen lives in an
+    // `if`, so advancing DESTROYS the focused control; focus becomes nothing and
+    // Enter stops working entirely until the user thinks to press Tab. Sending it
+    // back here also means repeated Enter walks the whole wizard, which is what
+    // anyone who has installed anything expects.
+    changed step => { rootKeys.focus(); }
+
+    rootKeys := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+
+        key-pressed(event) => {
+            // Enter is the default action — the bottom bar's primary button.
+            if (event.text == Key.Return && root.can-advance) {
+                root.next();
+                return accept;
+            }
+            // ⚠ Escape is BACK, not close. There is no Cancel in this wizard and
+            // inventing one that discards a half-finished install is the wrong
+            // way to read the key; stepping back is the reversible reading. On
+            // Run and Complete there is no Back, and it does nothing.
+            if (event.text == Key.Escape && root.can-go-back) {
+                root.back();
+                return accept;
+            }
+            return reject;
+        }
+
+        // ⚠ FIRST CHILD, AND THAT IS THE WHOLE CONTRACT. Slint hit-tests the
+        // LAST child first, so declared here this sits behind every screen and
+        // sees only what nothing else took — the rail, the margins, the bottom
+        // bar's spacer. Moved below the layout it would be on top of the entire
+        // UI and swallow every click, which is the same failure mode as a
+        // full-size FocusScope (§5.1) reached by a different route.
+        //
+        // Clicking dead space hands focus BACK to the root scope rather than
+        // dropping it: the ring goes away, and Enter still advances the wizard.
+        // `clear-focus()` would do the first and lose the second, leaving a
+        // window where the keyboard silently stops working until someone
+        // presses Tab.
+        TouchArea {
+            clicked => { rootKeys.focus(); }
+        }
+
+        VerticalLayout {
+            // The splash is full-bleed; every other step gets the rail.
+            HorizontalLayout {
+                if !root.on-splash: StepRail {
+                    width: Tokens.sidebar-w;
+                    current: root.step - 1;
+                    steps: [
+                        "X-Plane Directory",
+                        "Select Aircraft",
+                        "Select Features",
+                        "Review",
+                        "Run",
+                        "Complete",
+                    ];
+                }
+
+                if root.on-splash: SplashScreen { }
+
+                if root.step == 1: DirectoryScreen {
+                    path <=> root.xplane-root;
+                    status: root.root-status;
+                    status-ok: root.root-status-ok;
+                    browse => { root.browse(); }
+                    path-edited(p) => { root.path-edited(p); }
+                    // Enter in the path field is Next, on the same condition the
+                    // button uses — a text field that swallows Enter is the one
+                    // place the global handler cannot reach.
+                    accepted => {
+                        if (root.can-advance) { root.next(); }
+                    }
+                }
+
+                if root.step == 2: AircraftScreen {
+                    aircraft: root.aircraft;
+                    selected: root.selected;
+                    select(i) => { root.select-aircraft(i); }
+                }
+
+                if root.step == 3: FeaturesScreen {
+                    exterior: root.exterior;
+                    displays: root.displays;
+                    interior: root.interior;
+                    interior-available: root.interior-available;
+                    wings-available: root.wings-available;
+                    wing: root.wing;
+                    toggle-exterior => { root.toggle-exterior(); }
+                    toggle-displays => { root.toggle-displays(); }
+                    toggle-interior => { root.toggle-interior(); }
+                    set-wing(w) => { root.set-wing(w); }
+                }
+
+                if root.step == 4: ReviewScreen {
+                    xplane-root: root.xplane-root;
+                    aircraft-folder: root.aircraft-folder;
+                    aircraft-name: root.aircraft-name;
+                    version-transition: root.version-transition;
+                    attributes: root.attributes;
+                }
+
+                if root.running: RunScreen {
+                    progress: root.progress;
+                    log-text: root.log-text;
+                    headline: root.run-headline;
+                }
+
+                if root.done: CompleteScreen {
+                    headline: root.complete-headline;
+                    summary: root.complete-summary;
+                    log-available: root.log-available;
+                    modify-another => { root.modify-another(); }
+                    view-log => { root.view-log(); }
+                    open-org => { root.open-org(); }
+                    open-github => { root.open-github(); }
+                }
+            }
+
+            BottomBar {
+                version: root.version;
+                // ⚠ No Back on the splash (there is nowhere behind it) and none
+                // while Run is working. Complete DOES have one — see below and
+                // `screens/complete.slint`.
+                back-visible: root.can-go-back;
+                // Always present, matching the design — but dead until the run
+                // finishes, since pressing it mid-install would walk away from a
+                // half-written aircraft.
+                next-visible: true;
+                next-enabled: root.can-advance;
+                next-label: root.step == 4
+                    ? (root.dry-run ? "Dry run" : "Install")
+                    : (root.done ? "Exit" : "Next");
+                // ⚠ Only where it makes sense: an aircraft is chosen and
+                // something of ours is on it.
+                uninstall-visible: root.step == 2 && root.uninstall-available;
+
+                back => { root.back(); }
+                next => { root.next(); }
+                uninstall => { root.uninstall(); }
+                version-clicked => { root.open-org(); }
+            }
+        }
+    }
+}

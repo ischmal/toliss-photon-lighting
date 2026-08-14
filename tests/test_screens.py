@@ -33,6 +33,8 @@ PLUGIN_CPP = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
 DEV_PLUGIN = (REPO / "src" / "plugin" / "PI_PhotonDevReload.py").read_text(
     encoding="utf-8", errors="replace")
 
+# The A3xx three, which share one OBJ. The a339 is a screen airframe too but its
+# OBJ is deliberately NOT one of these — see A339PositionTests.
 SCREEN_AIRFRAMES = ("a319", "a320", "a321")
 SPILL_PREFIX = "ToLissPhoton/screens/spill/"
 
@@ -70,13 +72,18 @@ class BuildTests(unittest.TestCase):
         texts = {af: build(af) for af in SCREEN_AIRFRAMES}
         self.assertEqual(len(set(texts.values())), 1, texts.keys())
 
-    def test_a339_has_no_screens_target(self):
-        """Its cockpit is a different model, so these coordinates are meaningless
-        for it — the same reasoning that keeps it out of the interior mod."""
-        self.assertNotIn("screens", B.OBJ_TARGETS["a339"])
-        cfg = B.load_config(wing="stock")
-        with self.assertRaises(SystemExit):
-            B.Emitter(cfg, "a339", "stock", target="screens").emit()
+    def test_a339_has_its_own_screens_target(self):
+        """Added 2026-08-11. It was excluded alongside the interior, but the two
+        exclusions were never the same argument: the interior needs Gus's source
+        data and this needs only six positions and AirbusFBW/DUBrightness, both of
+        which the A330-900 has. What was true — its coordinates are not the A3xx's
+        — is handled by giving it its own fixtures, not by leaving it out."""
+        self.assertIn("screens", B.OBJ_TARGETS["a339"])
+        self.assertEqual(len(spill_lines(build("a339"))), 6)
+
+    def test_a339_still_has_no_interior_target(self):
+        """The other half of the split above: this one stays out (decision #14)."""
+        self.assertNotIn("interior", B.OBJ_TARGETS["a339"])
 
     def test_all_six_lights_are_spill_custom(self):
         """Brightness is per-display, which no rheostat INDEX can express — so
@@ -556,6 +563,66 @@ class DUMappingTests(unittest.TestCase):
             self.assertEqual(light["source"], "du", light["fixture"])
 
 
+class A339PositionTests(unittest.TestCase):
+    """The A330-900's six lights (2026-08-11).
+
+    ⚠ THE ONE THING THAT MAY DIFFER FROM THE A3xx IS POSITION. Color, alpha, size,
+    aim and spread all come from the shared `screen_glow` light type, so a retune
+    of the look moves both airframes together. If that stops being true, someone
+    has put a look decision in the layout file, and the next retune will silently
+    apply to one airframe only."""
+
+    def _lights(self, airframe):
+        """Each spill line as (pos, tail) — tail being everything the look owns:
+        rgb, alpha, size, dir, cone and the spill dataref."""
+        out = []
+        for ln in spill_lines(build(airframe)):
+            f = ln.split()
+            out.append((tuple(f[1:4]), tuple(f[4:])))
+        return out
+
+    def test_only_the_positions_differ_from_the_a320(self):
+        a320 = self._lights("a320")
+        a339 = self._lights("a339")
+        self.assertEqual(len(a320), 6)
+        self.assertEqual(len(a339), 6)
+        for i, ((pos20, tail20), (pos39, tail39)) in enumerate(zip(a320, a339)):
+            with self.subTest(light=i):
+                self.assertEqual(
+                    tail20, tail39,
+                    f"light {i}: the a339 differs from the a320 in something "
+                    f"other than position — color/alpha/size/aim/spread belong "
+                    f"to the shared light type, not to one airframe")
+                self.assertNotEqual(
+                    pos20, pos39,
+                    f"light {i}: the a339 reuses the a320's position, which is a "
+                    f"different flight deck against a different datum")
+
+    def test_the_positions_are_in_the_a339_cockpit_frame(self):
+        """A sanity floor, not a tuned value. The A3xx flight deck sits near
+        z = -4.7 in lights_inn.obj's frame; the A330-900's sits near z = -29 in
+        CockpitLighting_XP12.obj's. A number from the wrong frame is off by ~24 m
+        and lands outside the aeroplane, which is the one error here that a
+        screenshot could not tell you about — the light simply never appears."""
+        for pos, _tail in self._lights("a339"):
+            x, y, z = (float(v) for v in pos)
+            self.assertLess(z, -25.0, f"z={z} is not in the a339 cockpit frame")
+            self.assertGreater(z, -32.0, f"z={z} is behind the flight deck")
+            self.assertLess(abs(x), 1.0, f"x={x} is outside the flight deck")
+            self.assertTrue(0.0 < y < 1.5, f"y={y} is not at panel height")
+
+    def test_the_du_indices_match_the_a320s(self):
+        """Same six displays in the same Airbus numbering, so `index:` per screen
+        is identical — only where the light SITS changes. A339 fixtures are
+        hand-written rather than inherited, so nothing but this checks it."""
+        def du_by_slot(airframe):
+            cfg = B.load_config(wing="stock")
+            em = B.Emitter(cfg, airframe, "stock", target="screens", debug=True)
+            em.emit()
+            return {light["n"]: light["index"] for light in em.debug_lights}
+        self.assertEqual(du_by_slot("a339"), du_by_slot("a320"))
+
+
 class ReleaseIsolationTests(unittest.TestCase):
     """`screens` must not reach dist/ from a bare `build`.
 
@@ -601,8 +668,14 @@ class ReleaseIsolationTests(unittest.TestCase):
                 self.assertIn(name, written)
 
     def test_target_all_skips_airframes_without_the_target(self):
-        """a339 has no interior/screens key. A named target on it is an error;
-        a set-valued one (`both`, `all`) must skip it, not raise."""
+        """a339 has no INTERIOR key (decision #14). A named target on it is an
+        error; a set-valued one (`both`, `all`) must skip it, not raise.
+
+        ⚠ It DOES have a screens key since 2026-08-11, so this no longer asserts
+        that a339 builds one file — that reading made the test a restatement of
+        the airframe table rather than of the skip behavior it is named for. What
+        it checks is that the missing target is stepped over silently while the
+        present ones still emit."""
         with tempfile.TemporaryDirectory() as td:
             args = type("A", (), {"airframe": "a339", "wing": "stock", "out": None,
                                   "flat": False, "write": False, "target": "all",
@@ -610,8 +683,10 @@ class ReleaseIsolationTests(unittest.TestCase):
                                   "no_debug_pos": False})()
             args.out = Path(td)
             B.cmd_build(args)
-            written = [p.name for p in Path(td).rglob("*.obj")]
-            self.assertEqual(written, ["ExternalLights_XP12.obj"])
+            written = sorted(p.name for p in Path(td).rglob("*.obj"))
+            self.assertEqual(written,
+                             ["ExternalLights_XP12.obj", "lights_screens.obj"])
+            self.assertNotIn("lights_inn.obj", written)
 
 
 class DebugManifestTests(unittest.TestCase):

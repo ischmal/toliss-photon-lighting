@@ -121,6 +121,23 @@ std::string AttachmentAcf(bool xp12) {
         "P _obja/count 2\r\n";
 }
 
+// The A330-900 shape: no `lights_inn.obj` anywhere (that file is the A3xx's), and
+// its cockpit-lighting row carries an `_obj_hide_dataref` the A3xx template does
+// not — both faithful to the real `A330-900.acf`.
+std::string AttachmentAcfA339() {
+    return std::string(
+        "I\r\n"
+        "ACF\r\n"
+        "P _obja/0/_obj_hide_dataref AirbusFBW/ObjectKill\r\n"
+        "P _obja/0/_v10_att_file_stl Fuselage_Fwd.obj\r\n"
+        "P _obja/0/_v10_att_y_acf_prt_ref -3.000000000\r\n"
+        "P _obja/1/_obj_hide_dataref AirbusFBW/ObjectKill\r\n"
+        "P _obja/1/_v10_att_file_stl CockpitLighting_XP12.obj\r\n"
+        "P _obja/1/_v10_att_y_acf_prt_ref -3.000000000\r\n"
+        "P _obja/1/_v10_att_z_acf_prt_ref -3.359999895\r\n"
+        "P _obja/count 2\r\n");
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,6 +505,52 @@ TEST("screens: refuses when there is no frame to copy") {
         "P _obja/count 1\r\n";
     int changed = 0;
     CHECK_THROWS(patch_acf_screens::PatchText(noTemplate, changed), acf::AcfError);
+}
+
+// ⚠ THE A330-900 HAS NO `lights_inn.obj`, so the single-name template that served
+// the A3xx would make the patcher refuse this airframe outright — the glow would
+// install as a file on disk that nothing ever draws, which looks exactly like a
+// broken install and is the failure a `screens.added[]` entry cannot explain.
+TEST("screens: the a339 frame comes from CockpitLighting_XP12.obj") {
+    const std::string original = AttachmentAcfA339();
+    CHECK_EQ(patch_acf_screens::FindFrameTemplate(original), 1);
+
+    int changed = 0;
+    const std::string patched = patch_acf_screens::PatchText(original, changed);
+    CHECK(changed > 0);
+    CHECK(patch_acf_screens::IsAttached(patched));
+    CHECK_EQ(patch_acf_screens::DeclaredCount(patched), 3);
+
+    const auto rows = patch_acf_screens::AttachmentRows(patched);
+    const int idx = patch_acf_screens::FindObj(patched, kScreensObj);
+    CHECK_EQ(idx, 2);
+    // The a339's own datum, copied verbatim — NOT the A3xx's 20.75.
+    CHECK_EQ(rows.at(2).at("_v10_att_z_acf_prt_ref"),
+             std::string("-3.359999895"));
+    CHECK_EQ(rows.at(2).at("_v10_att_y_acf_prt_ref"),
+             rows.at(1).at("_v10_att_y_acf_prt_ref"));
+    // ⚠ Every field is copied, INCLUDING `_obj_hide_dataref`, which the A3xx
+    // template does not carry. That is the point of copying verbatim: our OBJ
+    // gets exactly the visibility behavior the aircraft's own cockpit-lighting
+    // OBJ has, rather than a field set invented from the other airframe.
+    CHECK_EQ(rows.at(2).at("_obj_hide_dataref"),
+             std::string("AirbusFBW/ObjectKill"));
+
+    int rchanged = 0;
+    CHECK_EQ(patch_acf_screens::UnpatchText(patched, rchanged), original);
+}
+
+TEST("screens: the A3xx template still wins where both are present") {
+    // Order in ScreensFrameTemplates() is the tie-break, and it has to be stable:
+    // the two frames are different datums, so "whichever was found first" must be
+    // a decision rather than a map iteration order.
+    std::string both = AttachmentAcf(true);
+    both = both.substr(0, both.find("P _obja/count")) +
+           "P _obja/2/_v10_att_file_stl CockpitLighting_XP12.obj\r\n"
+           "P _obja/2/_v10_att_y_acf_prt_ref -3.000000000\r\n"
+           "P _obja/count 3\r\n";
+    CHECK_EQ(patch_acf_screens::FindFrameTemplate(both),
+             patch_acf_screens::FindObj(both, "lights_inn.obj"));
 }
 
 TEST("screens: a row beyond the declared count does not read as attached") {
@@ -966,14 +1029,19 @@ TEST("constants: the interior OBJ is never an airframe fingerprint") {
     }
 }
 
-TEST("constants: a339 offers stock only and has no interior or screens") {
+TEST("constants: a339 offers stock only and has screens but no interior") {
     // ⚠ Without this gate, the DSL's mount lookup falls back to whatever mount
     // exists and ships a stock OBJ mislabeled as a mod build.
     CHECK(WingIsOfferedFor("a339", "stock"));
     CHECK(!WingIsOfferedFor("a339", "durantula"));
     CHECK(!WingIsOfferedFor("a339", "realwings"));
     CHECK(!AirframeHasInterior("a339"));
-    CHECK(!AirframeHasScreens("a339"));
+    // ⚠ THE TWO EXCLUSIONS WERE NEVER THE SAME ARGUMENT, though they were written
+    // as one line and lived together until 2026-08-11. The interior needs Gus's
+    // source data, which does not cover this airframe, and its rheostat indices
+    // differ; the display glow needs six positions and AirbusFBW/DUBrightness,
+    // both of which the A330-900 has. So this one is IN and that one stays out.
+    CHECK(AirframeHasScreens("a339"));
     CHECK(RealWingsDir("a339").empty());
     for (const std::string& af : {"a319", "a320", "a321"}) {
         CHECK(WingIsOfferedFor(af, "realwings"));

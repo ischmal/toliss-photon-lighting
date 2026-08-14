@@ -223,11 +223,19 @@ class DisplaysMasterTests(unittest.TestCase):
                          + "; ".join(offenders))
 
     def test_both_consumers_use_it(self):
+        # ⚠ The two halves are their own functions (2026-08-10): the compositor
+        # asks each of them WITHOUT a rect in hand, to decide whether the pass
+        # and each target are worth any GL at all. FxDisplayUserFactor is the
+        # per-rect chooser over the same two, so the switch is read in one place
+        # per effect however it is asked.
         self.assertIn("DisplayFeatureOn(gDisplays.spill)", PLUGIN_CPP)
         self.assertIn("DisplayFeatureOn(gDisplays.screenFx)",
-                      _fn("static float FxDisplayUserFactor("))
+                      _fn("static float FxScreenUserFactor("))
         self.assertIn("DisplayFeatureOn(gDisplays.otherFx)",
-                      _fn("static float FxDisplayUserFactor("))
+                      _fn("static float FxOtherUserFactor("))
+        chooser = _fn("static float FxDisplayUserFactor(")
+        self.assertIn("FxScreenUserFactor()", chooser)
+        self.assertIn("FxOtherUserFactor()", chooser)
 
     def test_the_master_is_persisted(self):
         """"Absent means default" cannot express a switch the user turned off, so

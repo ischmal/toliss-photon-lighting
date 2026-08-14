@@ -596,9 +596,14 @@ struct Progress {
     }
 };
 
-void OnProgress(int done, int total, const std::string& name, void* userData) {
-    static_cast<Progress*>(userData)->Set("copying textures " + std::to_string(done) +
-                                          "/" + std::to_string(total) + " — " + name);
+// ⚠ THE TERMINAL INSTALLER GAINS THE PERCENTAGE FOR FREE. It only ever said
+// "copying textures 7/11" — during the one loop that reported, on the one axis that
+// is opt-in — so its spinner was as uninformative as the GUI's bar. The plan now
+// covers every phase and names it, and a text line can show both without needing a
+// design change the way the GUI's does.
+void OnProgress(double fraction, const std::string& step, void* userData) {
+    const int pct = static_cast<int>(fraction * 100.0 + 0.5);
+    static_cast<Progress*>(userData)->Set(std::to_string(pct) + "% — " + step);
 }
 
 std::string VariantLabel(const std::string& action, bool interior) {

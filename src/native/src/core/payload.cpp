@@ -117,8 +117,15 @@ std::string InteriorObjText() {
     return ReadTextOrThrow(fsutil::PathFromUtf8(InteriorObjPath()), "interior OBJ");
 }
 
-std::string ScreensObjPath() {
-    const fs::path p = Dir() / "objs" / "screens" / kScreensObj;
+std::string ScreensObjPath(const std::string& airframeKey) {
+    // ⚠ The airframe gate fires BEFORE the file check, the same way ObjPath's wing
+    // gate does and for the same reason: an airframe this feature does not cover
+    // must report "not supported here", never "your download is incomplete".
+    if (!AirframeHasScreens(airframeKey)) {
+        throw PayloadError("the display-glow OBJ is not supported on " +
+                           airframeKey);
+    }
+    const fs::path p = Dir() / "objs" / "screens" / airframeKey / kScreensObj;
     std::error_code ec;
     if (!fs::is_regular_file(p, ec) || ec) {
         throw PayloadError("missing bundled screen-glow OBJ: " +
@@ -127,15 +134,15 @@ std::string ScreensObjPath() {
     return fsutil::PathToUtf8(p);
 }
 
-std::string ScreensObjText() {
+std::string ScreensObjText(const std::string& airframeKey) {
     RequireBundle();
-    return ReadTextOrThrow(fsutil::PathFromUtf8(ScreensObjPath()),
+    return ReadTextOrThrow(fsutil::PathFromUtf8(ScreensObjPath(airframeKey)),
                            "screen-glow OBJ");
 }
 
-bool ScreensAvailable() {
+bool ScreensAvailable(const std::string& airframeKey) {
     try {
-        (void)ScreensObjPath();
+        (void)ScreensObjPath(airframeKey);
         return Available();
     } catch (const PayloadError&) {
         return false;

@@ -197,10 +197,35 @@ class TuningPersistenceTests(unittest.TestCase):
     def test_the_saved_session_is_read_back_after_the_manifest_loads(self):
         # A saved session is EDITS on top of the baked values, so the restore has
         # to run last - the manifest's numbers are the seeds it is checked against.
+        # The seeding itself lives in DbgReadManifest (one call per manifest
+        # file, since 2026-08-10), so the ordering to pin is against those calls.
         body = self._fn("DbgLoadManifest")
         self.assertIn("DbgLoadTuning();", body)
-        self.assertGreater(body.index("DbgLoadTuning();"), body.rindex("gDbgLights.push_back"),
+        self.assertGreater(body.index("DbgLoadTuning();"), body.rindex("DbgReadManifest("),
                            "the restore must come after the lights are seeded")
+        # ...and the branch values are resolved before it, so a record is checked
+        # against the numbers the OBJ actually bakes.
+        self.assertGreater(body.index("DbgLoadTuning();"), body.index("DbgApplyVariants();"),
+                           "variants must be applied before the restore reads base[]")
+
+    def test_a_read_only_session_never_restores_a_tuning_file(self):
+        """A tuning file records edits made against a DEBUG OBJ. With a plain OBJ
+        installed the lights bake their authored values and ignore those
+        datarefs, so applying the records would put numbers on screen that
+        nothing in the cockpit is drawing - an inspector that lies."""
+        body = self._fn("DbgLoadManifest")
+        self.assertIn("if (!gDbgReadOnly) DbgLoadTuning();", body)
+        # ...and per light, which is what covers a MIXED session (one target
+        # built --debug, the other not).
+        self.assertIn("if (l.readOnly) continue;", self._fn("DbgApplyTuningRecord"))
+
+    def test_a_read_only_light_can_never_be_written_to_the_tuning_file(self):
+        # DbgLightChanged is the one gate every writer goes through - the edit
+        # count, the dirty check and the per-light record all ask it first.
+        m = re.search(r"static bool DbgLightChanged\([^)]*\)\s*\{", PLUGIN_CPP)
+        assert m, "DbgLightChanged not found"
+        body = PLUGIN_CPP[m.start():PLUGIN_CPP.index("\n}", m.start())]
+        self.assertIn("if (l.readOnly) return false;", body)
 
     def test_an_untouched_session_cannot_blank_an_existing_file(self):
         # Auto-save fires on every aircraft load. Without this guard, loading an
@@ -249,6 +274,155 @@ class TuningPersistenceTests(unittest.TestCase):
         self.assertEqual(len(set(keys)), len(keys),
                          "fixture+name is no longer unique, so a restored tuning "
                          "would land on the wrong light")
+
+
+class InfoManifestTests(unittest.TestCase):
+    """The READ-ONLY manifest a plain build drops beside the installable OBJ
+    (INFO_MANIFESTS, 2026-08-10), which is what lets a -Dev plugin show every
+    light without -DebugObjs.
+
+    Its whole value is being trustworthy: an inspector that shows the wrong
+    branch, or a light on the wrong rheostat, is worse than none — you would act
+    on it. Every assertion here is one of the ways it could quietly lie.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = B.load_config(wing="stock")
+        cls.info = {}
+        cls.debug = {}
+        for target in ("interior", "screens"):
+            em = B.Emitter(cls.cfg, "a320", "stock", target=target, debug=False)
+            em.emit()
+            cls.info[target] = em.info_lights
+            dem = B.Emitter(cls.cfg, "a320", "stock", target=target, debug=True)
+            dem.emit()
+            cls.debug[target] = dem.debug_lights
+
+    def test_both_manifests_cover_the_same_targets(self):
+        # A target with a debug manifest and no info one is a target the Lights
+        # tab can tune but not read, which is the wrong way round: reading is
+        # the thing you want without a redeploy.
+        self.assertEqual(set(B.INFO_MANIFESTS), set(B.DEBUG_MANIFESTS))
+        self.assertEqual(set(B.INFO_MANIFESTS), set(B.DEBUG_TARGETS))
+
+    def test_the_two_manifests_are_never_the_same_file(self):
+        """⚠ Exactly one exists at a time and each build deletes the other, so
+        which FILE is present is how the plugin tells tunable from read-only.
+        Sharing a name would make that undecidable without parsing."""
+        self.assertFalse(set(B.INFO_MANIFESTS.values())
+                         & set(B.DEBUG_MANIFESTS.values()))
+
+    def test_the_plugin_looks_for_exactly_these_filenames(self):
+        # The plugin finds them from the aircraft path alone. A rename here with
+        # no rename there is a tab that says "no lights" forever, and nothing in
+        # the log to say a file was skipped.
+        for name in list(B.INFO_MANIFESTS.values()) + list(B.DEBUG_MANIFESTS.values()):
+            self.assertIn('"%s"' % name, PLUGIN_CPP,
+                          "%s is not in plugin.cpp's candidate table" % name)
+
+    def test_a_light_is_the_same_light_and_the_same_slot_in_both(self):
+        """⚠ Slot N must name one light whichever manifest you are reading. The
+        two are built by different code paths - a debug build emits ONE branch
+        per fixture, a plain build one per profile - so the numbering agreeing is
+        a property to check, not one to assume."""
+        for target in ("interior", "screens"):
+            info, dbg = self.info[target], self.debug[target]
+            self.assertEqual(len(info), len(dbg),
+                             "%s: the two manifests hold different light counts"
+                             % target)
+            for a, b in zip(dbg, info):
+                self.assertEqual(
+                    (a["n"], a["name"], a["fixture"], a["source"], a["index"], a["pos"]),
+                    (b["n"], b["name"], b["fixture"], b["source"], b["index"], b["pos"]),
+                    "%s: slot %d names a different light in the two manifests"
+                    % (target, a["n"]))
+
+    def test_the_slot_bases_keep_the_two_targets_apart(self):
+        # Both manifests are merged into one list by the Lights tab, so a slot
+        # collision would hide one light behind another.
+        slots = [r["n"] for t in self.info for r in self.info[t]]
+        self.assertEqual(len(set(slots)), len(slots))
+        for r in self.info["screens"]:
+            self.assertGreaterEqual(r["n"], B.DEBUG_SLOT_BASE["screens"])
+
+    def test_variant_order_is_the_dataref_value(self):
+        """⚠ THE CONTRACT THE WHOLE READ-ONLY VIEW RESTS ON. The plugin indexes
+        `variants` with the live category dataref, because that is the same rule
+        branch_gate emits the OBJ's ANIM_hides from. If the list were ever
+        ordered any other way, every colour shown would be some other era's -
+        and it would look entirely plausible."""
+        for r in self.info["interior"]:
+            profiles = self.cfg["categories"][r["category"]].get("profiles")
+            self.assertIsNotNone(profiles, "category %r has no profile list"
+                                 % r["category"])
+            self.assertEqual([v["profile"] for v in r["variants"]], list(profiles),
+                             "light %r on %r lists its branches in a different "
+                             "order than the OBJ gates them"
+                             % (r["name"], r["category"]))
+
+    def test_every_light_carries_at_least_one_variant(self):
+        # A row with none would show as a black omni light at the origin, which
+        # reads as a broken fixture rather than as a broken manifest.
+        for target in ("interior", "screens"):
+            for r in self.info[target]:
+                self.assertTrue(r["variants"], "%s has no variants" % r["name"])
+
+    def test_the_category_names_are_ones_the_plugin_can_resolve(self):
+        """DbgLiveBranch matches the row's `category` against kIntCategories to
+        find which dataref picks the branch. An unmatched name falls back to
+        branch 0 - i.e. it silently shows Old Halogen for everything."""
+        keys = re.findall(r'\{"(\w+)",\s+"ToLissPhoton/interior/\w+"', PLUGIN_CPP)
+        self.assertTrue(keys, "kIntCategories not found in plugin.cpp")
+        for r in self.info["interior"]:
+            self.assertIn(r["category"], keys)
+
+    def test_a_screens_light_has_one_branch_and_the_du_source(self):
+        # No category, so nothing picks between branches; and every screen light
+        # rides a DU knob rather than a rheostat.
+        for r in self.info["screens"]:
+            self.assertEqual(len(r["variants"]), 1)
+            self.assertEqual(r["source"], "du")
+
+    def test_the_simplified_floods_are_marked_in_both(self):
+        # The Cockpit tab reads `boost` to decide whether to offer the multiplier
+        # at all, so the info rows have to carry it for the read-only readout.
+        info = sorted(r["n"] for r in self.info["interior"] if "boost" in r)
+        dbg = sorted(r["n"] for r in self.debug["interior"] if "boost" in r)
+        self.assertEqual(info, dbg)
+        self.assertTrue(info, "no `optimize: boost` lights - this test is now vacuous")
+
+    def test_the_manifest_key_distinguishes_a_light_from_its_simplified_copy(self):
+        """A boosted light is emitted TWICE - once in the full stack, once
+        scaled in the reduced set - and the two are different rows. Merging them
+        would fold three profile branches into six variants on one row and put
+        every era in the wrong slot."""
+        for target in ("interior", "screens"):
+            keys = [(r["fixture"], r["name"]) for r in self.info[target]]
+            self.assertEqual(len(set(keys)), len(keys),
+                             "%s: two info rows share fixture+name" % target)
+
+    def test_a_plain_build_records_no_debug_lights_and_the_reverse(self):
+        # The two collections are alternatives. Both filled would mean the OBJ
+        # carries dataref-driven lights AND a read-only description of them.
+        for target in ("interior", "screens"):
+            em = B.Emitter(self.cfg, "a320", "stock", target=target, debug=False)
+            em.emit()
+            self.assertEqual(em.debug_lights, [])
+            self.assertTrue(em.info_lights)
+            dem = B.Emitter(self.cfg, "a320", "stock", target=target, debug=True)
+            dem.emit()
+            self.assertEqual(dem.info_lights, [])
+            self.assertTrue(dem.debug_lights)
+
+    def test_the_exterior_gets_no_manifest_of_either_kind(self):
+        # It has frozen goldens and no debug build, so there is nothing to read
+        # a manifest against - and an extra file beside the exterior OBJ would
+        # be the first thing to look wrong in a release diff.
+        em = B.Emitter(self.cfg, "a320", "stock", target="exterior", debug=False)
+        em.emit()
+        self.assertEqual(em.info_lights, [])
+        self.assertNotIn("exterior", B.INFO_MANIFESTS)
 
 
 if __name__ == "__main__":

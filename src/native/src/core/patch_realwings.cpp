@@ -288,11 +288,13 @@ std::string PatchText(const std::string& text, const PatchData& data,
 namespace {
 
 std::vector<fs::path> ObjsUnder(const fs::path& root,
-                                const std::vector<std::string>& needles) {
+                                const std::vector<std::string>& needles,
+                                const progress::StepProgress& onProgress) {
     std::vector<fs::path> hits;
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return hits;
     std::vector<fs::path> objs;
+    std::vector<std::uintmax_t> sizes;
     for (fs::recursive_directory_iterator it(root, ec), end; it != end;
          it.increment(ec)) {
         if (ec) break;
@@ -300,12 +302,33 @@ std::vector<fs::path> ObjsUnder(const fs::path& root,
         if (!it->is_regular_file(fe) || fe) continue;
         const std::string name =
             fsutil::ToLower(fsutil::PathToUtf8(it->path().filename()));
-        if (fsutil::EndsWith(name, ".obj")) objs.push_back(it->path());
+        if (!fsutil::EndsWith(name, ".obj")) continue;
+        std::error_code se;
+        const std::uintmax_t sz = it->file_size(se);
+        objs.push_back(it->path());
+        sizes.push_back(se ? 0 : sz);
     }
-    std::sort(objs.begin(), objs.end());
-    for (const fs::path& p : objs) {
+    // Keep sizes beside their paths through the sort — the reported fraction has to
+    // follow the order the files are actually read in.
+    std::vector<std::size_t> order(objs.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&objs](std::size_t a, std::size_t b) { return objs[a] < objs[b]; });
+
+    std::uintmax_t totalBytes = 0;
+    for (std::uintmax_t s : sizes) totalBytes += s;
+
+    std::uintmax_t readBytes = 0;
+    for (std::size_t idx : order) {
+        const fs::path& p = objs[idx];
         std::string text;
-        if (!fsutil::ReadFileBytes(p, text)) continue;
+        const bool got = fsutil::ReadFileBytes(p, text);
+        readBytes += sizes[idx];
+        if (onProgress && totalBytes > 0) {
+            onProgress(static_cast<double>(readBytes) /
+                       static_cast<double>(totalBytes));
+        }
+        if (!got) continue;
         for (const std::string& n : needles) {
             if (text.find(n) != std::string::npos) {
                 hits.push_back(p);
@@ -319,7 +342,8 @@ std::vector<fs::path> ObjsUnder(const fs::path& root,
 }  // namespace
 
 RunResult Run(const std::string& rootUtf8, const PatchData& data,
-              const std::string& airframe, bool dryRun) {
+              const std::string& airframe, bool dryRun,
+              const progress::StepProgress& onProgress) {
     RunResult result;
     const fs::path root = fsutil::PathFromUtf8(rootUtf8);
     std::error_code ec;
@@ -329,7 +353,18 @@ RunResult Run(const std::string& rootUtf8, const PatchData& data,
     needles.reserve(data.classes.size());
     for (const auto& kv : data.classes) needles.push_back(kv.first);
 
-    const std::vector<fs::path> objs = ObjsUnder(root, needles);
+    // ⚠ THE SCAN IS ~90% OF THIS PHASE AND IT IS THE PART THAT ANIMATES. `ObjsUnder`
+    // reads every `.obj` under the mod folder — 140.6 MB on the A320's RealWings320,
+    // against roughly 14 MB of hits the loop below re-reads and rewrites. So the
+    // scan is mapped over the step's first 0.9 and the patch loop is left as one
+    // step at the end: sub-reporting a tenth of a 1.5 s phase is not worth threading
+    // a second callback through the refresh/backup/write branches below.
+    const std::vector<fs::path> objs =
+        ObjsUnder(root, needles,
+                  onProgress ? progress::StepProgress([&onProgress](double f) {
+                      onProgress(f * 0.9);
+                  })
+                             : progress::StepProgress{});
     if (objs.empty()) {
         throw RealWingsError(
             "no RealWings OBJs with baked wingtip lights found under root");
@@ -398,6 +433,7 @@ RunResult Run(const std::string& rootUtf8, const PatchData& data,
         result.lights += changed;
         ++result.files;
     }
+    if (onProgress) onProgress(1.0);
     std::ostringstream tail;
     tail << (dryRun ? "would patch " : "patched ") << result.lights
          << " light(s) across " << objs.size() << " file(s)";

@@ -54,7 +54,8 @@ const std::vector<int>* IndicesFor(const std::string& airframeKey) {
 
 std::vector<std::string> TargetFiles(const std::string& objectsDirUtf8,
                                      const std::string& airframeKey,
-                                     bool reverse) {
+                                     bool reverse,
+                                     const progress::StepProgress& onProgress) {
     std::vector<std::string> hits;
     const std::vector<int>* indices = IndicesFor(airframeKey);
     if (indices == nullptr || indices->empty()) return hits;
@@ -65,19 +66,45 @@ std::vector<std::string> TargetFiles(const std::string& objectsDirUtf8,
     if (!fs::is_directory(dir, ec)) return hits;
 
     std::vector<fs::path> objs;
+    // ⚠ SIZES ARE COLLECTED IN THE SAME WALK. Progress here has to be weighted by
+    // BYTES, not by file count: on the A330-900 these 61 files run from 4 KB to
+    // 133 MB, so a bar stepping 1/61 per file crawls through the first fifty and
+    // then hangs for seconds on the last few — which is exactly the "stuck" reading
+    // this whole exercise exists to remove.
+    std::vector<std::uintmax_t> sizes;
     for (fs::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
         if (ec) break;
         std::error_code fe;
         if (!it->is_regular_file(fe) || fe) continue;
         const std::string name =
             fsutil::ToLower(fsutil::PathToUtf8(it->path().filename()));
-        if (fsutil::EndsWith(name, ".obj")) objs.push_back(it->path());
+        if (!fsutil::EndsWith(name, ".obj")) continue;
+        std::error_code se;
+        const std::uintmax_t sz = it->file_size(se);
+        objs.push_back(it->path());
+        sizes.push_back(se ? 0 : sz);
     }
-    std::sort(objs.begin(), objs.end());
+    // Sort paths and sizes together so the reported fraction matches the order the
+    // files are actually read in.
+    std::vector<std::size_t> order(objs.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&objs](std::size_t a, std::size_t b) { return objs[a] < objs[b]; });
 
-    for (const fs::path& p : objs) {
+    std::uintmax_t totalBytes = 0;
+    for (std::uintmax_t s : sizes) totalBytes += s;
+
+    std::uintmax_t readBytes = 0;
+    for (std::size_t idx : order) {
+        const fs::path& p = objs[idx];
         std::string text;
-        if (!fsutil::ReadFileBytes(p, text)) continue;
+        const bool got = fsutil::ReadFileBytes(p, text);
+        readBytes += sizes[idx];
+        if (onProgress && totalBytes > 0) {
+            onProgress(static_cast<double>(readBytes) /
+                       static_cast<double>(totalBytes));
+        }
+        if (!got) continue;
         for (const auto& pr : pairs) {
             if (text.find(pr.first) != std::string::npos) {
                 hits.push_back(fsutil::PathToUtf8(p));
@@ -101,7 +128,8 @@ std::string PatchText(const std::string& text, const std::string& airframeKey,
 }
 
 RunResult Run(const std::string& objectsDirUtf8, const std::string& airframeKey,
-              bool reverse, bool dryRun) {
+              bool reverse, bool dryRun, const std::vector<std::string>* scanned,
+              const progress::StepProgress& onProgress) {
     RunResult result;
     const std::vector<int>* indices = IndicesFor(airframeKey);
     if (indices == nullptr || indices->empty()) {
@@ -109,8 +137,19 @@ RunResult Run(const std::string& objectsDirUtf8, const std::string& airframeKey,
                              airframeKey + "' — nothing to do");
         return result;
     }
-    const std::vector<std::string> files =
-        TargetFiles(objectsDirUtf8, airframeKey, reverse);
+    // ⚠ THE INSTALLER ALREADY SCANNED, AND THE SCAN IS THE EXPENSIVE HALF. It needs
+    // the list first to back each file up, then called us — and we scanned the whole
+    // folder again, reading every `.obj` in the aircraft a second time. On the
+    // A330-900 that is 1,597 MB twice, and it was 11.1 s of an 11.5 s install: the
+    // duplicate pass was the single largest cost in the entire installer.
+    // Passing the list in cuts it in half. `nullptr` keeps the old self-scanning
+    // behavior for the CLI and the tests, which have no list to hand.
+    std::vector<std::string> ownScan;
+    if (scanned == nullptr) {
+        ownScan = TargetFiles(objectsDirUtf8, airframeKey, reverse, onProgress);
+        scanned = &ownScan;
+    }
+    const std::vector<std::string>& files = *scanned;
     const char* verb = dryRun ? "would change"
                               : (reverse ? "restored" : "redirected");
     for (const std::string& pathUtf8 : files) {

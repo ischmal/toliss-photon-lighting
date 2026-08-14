@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include "core/progress.h"
+
 namespace photon {
 namespace patch_glow {
 
@@ -42,9 +44,14 @@ const std::vector<int>* IndicesFor(const std::string& airframeKey);
 // Scanning rather than a hard-coded file list on purpose: it survives ToLiss
 // moving a region between OBJs, and it is what the installer uses to know which
 // files to back up before patching.
+// ⚠ THIS IS THE EXPENSIVE ONE. It reads every `.obj` in the folder in full, which
+// is 233 MB on an A319 and 1,597 MB on an A330-900 — the largest single cost in an
+// install, dwarfing everything Photon actually writes. `onProgress` is reported
+// per file and weighted by BYTES; see the note at the loop.
 std::vector<std::string> TargetFiles(const std::string& objectsDirUtf8,
                                      const std::string& airframeKey,
-                                     bool reverse = false);
+                                     bool reverse = false,
+                                     const progress::StepProgress& onProgress = {});
 
 // Swap the glow datarefs in one OBJ's text. Returns the number of regions changed.
 // Idempotent: re-running finds nothing left to swap.
@@ -57,8 +64,14 @@ struct RunResult {
     std::vector<std::string> log;
 };
 
+// ⚠ PASS `scanned` IF YOU ALREADY CALLED `TargetFiles`. Without it this scans the
+// whole folder AGAIN — the installer does need the list first, to back the files up,
+// so the default path read every `.obj` in the aircraft twice per install. `nullptr`
+// keeps the self-scanning behavior for callers that have no list.
 RunResult Run(const std::string& objectsDirUtf8, const std::string& airframeKey,
-              bool reverse, bool dryRun);
+              bool reverse, bool dryRun,
+              const std::vector<std::string>* scanned = nullptr,
+              const progress::StepProgress& onProgress = {});
 
 }  // namespace patch_glow
 }  // namespace photon

@@ -164,4 +164,8 @@ The file you're currently reading was still 100% written by me (schmal), a real 
 This project is an independent third-party modification and is not affiliated with ToLiss Simulations Solutions Inc.
 
 ## Usage
-ToLiss Photon is licensed under an MIT License. If you've discovered this addon and see that it's been years since I've updated it or fixed any bugs, feel free to fork it, fix it, and reupload it yourself. 
+ToLiss Photon is licensed under the **GNU General Public License v3.0** (see `LICENSE`). If you've discovered this addon and see that it's been years since I've updated it or fixed any bugs, feel free to fork it, fix it, and reupload it yourself — the GPL exists to make sure you can. What it asks in return is that your version stays open too: ship the source, and keep it under the GPL.
+
+The graphical installer is built with [Slint](https://slint.dev/), used here under its GPLv3 option, which is why the project as a whole is GPLv3.
+
+Third-party components keep their own licenses: the cockpit lighting data in `reference/gus/` is Gus Rodrigues's work, vendored with permission; `src/native/third_party/` holds Dear ImGui, nlohmann/json and stb; and the embedded Roboto fonts are Apache 2.0. All are compatible with the GPL.

@@ -1,0 +1,141 @@
+// Screen 6 — "Run": the install actually happening.
+//
+// ⚠ THE STEP IS CALLED "Run", NOT "Install". That is the rail's label in the
+// design, and it is the better word: the same screen runs an uninstall.
+//
+// The log is the screen's main content — 288 px of it against a 26 px progress bar —
+// which is a deliberate inversion of the usual installer. An install that fails
+// halfway has to say WHERE without sending the user to find a log file.
+
+import { Tokens } from "../tokens.slint";
+import { Header1, WellRecess, PhotonScrollView } from "../widgets.slint";
+
+// The design's Progress Bar component: a bordered track, a 2 px-inset accent
+// fill, and the percentage centered ON TOP of both — not beside them.
+component ProgressBar inherits Rectangle {
+    in property <float> progress: 0.0;
+
+    height: 26px;
+    border-radius: Tokens.radius;
+    background: Tokens.panel-bg;
+    border-width: 1px;
+    border-color: Tokens.card-border;
+    clip: true;
+
+    Rectangle {
+        x: 2px;
+        y: 2px;
+        width: max(0px, (parent.width - 4px) * root.progress);
+        height: parent.height - 4px;
+        border-radius: 3px;
+        background: Tokens.accent;
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        // String interpolation, not `+` — Slint's `+` does not join a number to a
+        // string, and `round()` returns a number.
+        text: "\{round(root.progress * 100)}%";
+        color: Tokens.text;
+        font-family: Tokens.font;
+        font-size: Tokens.h2-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component RunScreen inherits Rectangle {
+    in property <float> progress: 0.0;
+    // ⚠ ONE STRING, NOT A MODEL OF LINES — see the TextInput below.
+    in property <string> log-text;
+    in property <string> headline: "Working...";
+
+    background: Tokens.screen-bg;
+
+    VerticalLayout {
+        spacing: Tokens.content-gap;
+        padding-left: Tokens.content-pad-x;
+        padding-right: Tokens.content-pad-x;
+        padding-top: Tokens.content-pad-y;
+        padding-bottom: Tokens.content-pad-y;
+
+        Header1 {
+            height: 40px;
+            text: root.headline;
+        }
+
+        // The log well — the same recessed panel as the aircraft list, down to
+        // the design's inset shadow, which `WellRecess` approximates.
+        Rectangle {
+            background: Tokens.panel-bg;
+            border-color: Tokens.panel-border;
+            border-width: 1px;
+            border-radius: Tokens.radius-panel;
+            // ⚠ Required by WellRecess — its bands are square.
+            clip: true;
+
+            // ⚠ THE VIEW FILLS THE WELL AND THE 9 px INSET IS THE CONTENT'S
+            // PADDING — same reason as the aircraft list: Slint pins the scrollbar
+            // to the VIEW's right edge, so insetting the view moves the bar in
+            // with it.
+            PhotonScrollView {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+
+                VerticalLayout {
+                    alignment: start;
+                    padding-left: 9px;
+                    padding-top: 9px;
+                    padding-bottom: 9px;
+                    padding-right: Tokens.scrollbar-gutter;
+
+                    // ⚠ A READ-ONLY TextInput, NOT A COLUMN OF Text, AND THAT IS
+                    // THE WHOLE POINT: Slint's Text cannot be selected, and a
+                    // per-line Text could not be selected ACROSS lines even if it
+                    // could — which is exactly what someone reporting a failed
+                    // install has to do. `read-only` disables editing and keeps
+                    // selection, Ctrl+C and the drag; it also suppresses the caret,
+                    // so the log does not sit there blinking.
+                    //
+                    // ⚠ It is fed ONE STRING for the same reason. The line list
+                    // that used to drive this is gone from the C++ side too — two
+                    // representations of the same log would be one to keep in step.
+                    //
+                    // White and Roboto Medium, NOT the muted label style: the
+                    // design makes these read as content rather than as chrome,
+                    // which is right — this is the only place the installer says
+                    // what it did.
+                    TextInput {
+                        text: root.log-text;
+                        read-only: true;
+                        single-line: false;
+                        wrap: word-wrap;
+                        color: Tokens.text;
+                        font-family: Tokens.font;
+                        font-size: Tokens.label-size;
+                        font-weight: Tokens.weight-medium;
+                        selection-background-color: Tokens.accent;
+                        selection-foreground-color: Tokens.text;
+                    }
+                }
+            }
+
+            // ⚠ LAST, so it darkens the edges of the log text as an inset shadow
+            // should — and input-transparent, which matters more here than on the
+            // aircraft list: the text under it is selectable, and a band that ate
+            // the drag would break the copy this screen exists to allow.
+            WellRecess {
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        ProgressBar {
+            progress: root.progress;
+        }
+    }
+}

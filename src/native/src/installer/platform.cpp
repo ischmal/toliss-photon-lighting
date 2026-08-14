@@ -11,6 +11,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+// The Vista-era folder picker (IFileOpenDialog + FOS_PICKFOLDERS). Deliberately
+// NOT SHBrowseForFolder, whose dialog has looked out of place since Windows 7 and
+// cannot be resized or typed into.
+#include <shlobj.h>
+#include <shobjidl.h>
 #else
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -64,6 +69,87 @@ void EnableVt() {
     if (::GetConsoleMode(h, &mode) == 0) return;
     ::SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING |
                             ENABLE_PROCESSED_OUTPUT);
+#endif
+}
+
+std::string PickFolder(const std::string& titleUtf8, const std::string& startUtf8) {
+#ifdef _WIN32
+    // ⚠ COINIT_APARTMENTTHREADED, and the result is checked for RPC_E_CHANGED_MODE
+    // rather than treated as failure: Slint's own backend may already have
+    // initialized COM on this thread, and re-initializing with a different model
+    // returns that code while leaving the existing apartment perfectly usable.
+    const HRESULT init = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool weInitialized = SUCCEEDED(init);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE) return std::string();
+
+    std::string chosen;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+                                     IID_IFileOpenDialog,
+                                     reinterpret_cast<void**>(&dialog)))) {
+        DWORD flags = 0;
+        if (SUCCEEDED(dialog->GetOptions(&flags))) {
+            dialog->SetOptions(flags | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        }
+        if (!titleUtf8.empty()) {
+            dialog->SetTitle(fsutil::PathFromUtf8(titleUtf8).wstring().c_str());
+        }
+        if (!startUtf8.empty()) {
+            IShellItem* start = nullptr;
+            if (SUCCEEDED(::SHCreateItemFromParsingName(
+                    fsutil::PathFromUtf8(startUtf8).wstring().c_str(), nullptr,
+                    IID_IShellItem, reinterpret_cast<void**>(&start)))) {
+                dialog->SetFolder(start);
+                start->Release();
+            }
+        }
+        if (SUCCEEDED(dialog->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR wide = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+                    chosen = fsutil::PathToUtf8(std::filesystem::path(wide));
+                    ::CoTaskMemFree(wide);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+    }
+    if (weInitialized) ::CoUninitialize();
+    return chosen;
+#else
+    (void)titleUtf8;
+    (void)startUtf8;
+    return std::string();
+#endif
+}
+
+bool AttachParentConsole() {
+#ifdef _WIN32
+    if (::AttachConsole(ATTACH_PARENT_PROCESS) == 0) return false;
+    // Only the streams that have no handle of their own — see the header. A
+    // redirected stdout arrives here already valid and is left exactly as it is.
+    struct Stream {
+        DWORD id;
+        FILE* file;
+        const char* device;
+        const char* mode;
+    };
+    const Stream kStreams[] = {
+        {STD_OUTPUT_HANDLE, stdout, "CONOUT$", "w"},
+        {STD_ERROR_HANDLE, stderr, "CONOUT$", "w"},
+        {STD_INPUT_HANDLE, stdin, "CONIN$", "r"},
+    };
+    for (const Stream& s : kStreams) {
+        const HANDLE h = ::GetStdHandle(s.id);
+        if (h != nullptr && h != INVALID_HANDLE_VALUE) continue;
+        FILE* reopened = nullptr;
+        ::freopen_s(&reopened, s.device, s.mode, s.file);
+    }
+    return true;
+#else
+    return false;
 #endif
 }
 

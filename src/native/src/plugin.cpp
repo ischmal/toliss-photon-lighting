@@ -1204,6 +1204,20 @@ struct Entry {
 };
 static std::map<std::string, Entry> gProfiles;   // liveryKey -> entry
 
+// ⚠ IS THE LOADED AIRCRAFT A ToLiss AT ALL — the one question every per-frame
+// path has to ask, and the reason it is a stored flag rather than a call:
+// IsToLiss() reads the aircraft path out of XPLMGetNthAircraftModel and
+// lowercases it, which is not something to do from a draw callback. Set on every
+// aircraft load by UpdateMenuVisibility, and false until the first one.
+//
+// ⚠ IT IS NOT gMenuCreated, though that tracked it closely enough to gate the
+// waveform engine for a year. The menu is UI state — DestroyPhotonMenu is also
+// how the Cockpit submenu gets rebuilt between two ToLiss aircraft — so a path
+// that gates on it is one menu change away from silently changing what RUNS.
+// The panel-FX compositor is the proof: it asked neither, and painted A3xx tints
+// over every aircraft in the sim (fixed 2026-08-11).
+static bool gIsToLiss = false;
+
 // Whether THIS aircraft carries the cockpit mod (see kInteriorObjNeedle).
 // Re-detected on every aircraft load; false for any non-ToLiss.
 static bool gInteriorInstalled = false;
@@ -3050,9 +3064,18 @@ static void DetectInterior() {
 // release held ToLiss dataref handles across an aircraft change. Every symptom of
 // that is a crash in someone else's plugin.
 static void FxForgetDrivers();
+// Which aircraft family is loaded, for the panel-FX stacks scoped to one. Defined
+// with the compositor; called from BOTH the aircraft-load path and AutoLoop, and
+// logs only when the answer changes so the 1 Hz call is silent.
+static void ResolveFxFamily();
 // The DCDU brightness the buttons have been pressed to; rebound with the aircraft
 // because the commands belong to ToLiss's plugin.
 static void BindDcduCommands();
+// Stops a benchmark run (restoring every lever), drops the sampling flight loop
+// and stops the metrics thread. Defined with the performance tool; called from
+// XPluginDisable, XPluginStop — and from the aircraft-load path below, which is
+// what keeps a run from outliving the aircraft it was measuring.
+static void PerfShutdown();
 // AirbusFBW/DisplayResolutionFallback — which of the two DU rect sets to paint.
 // A ToLiss handle, so it is rebound with the aircraft like the ones above.
 //
@@ -3073,7 +3096,11 @@ static void DbgLoadTuning();
 #endif
 
 static void UpdateMenuVisibility() {
-    if (IsToLiss()) {
+    // ⚠ FIRST, and stored before anything below reads it: ResolveFxFamily (both
+    // branches) and every per-frame gate downstream answer from the flag, not
+    // from IsToLiss(). This function is the ONLY writer.
+    gIsToLiss = IsToLiss();
+    if (gIsToLiss) {
         DetectInterior();
         // The submenu is decided at menu-BUILD time, so switching between two
         // ToLiss aircraft that disagree about the cockpit mod has to rebuild —
@@ -3101,6 +3128,10 @@ static void UpdateMenuVisibility() {
         // first, exactly like the bus above, because the 1 Hz retry shares it.
         gDisplayFallbackLogged = false;
         ResolveDisplayFallback();
+        // Which cockpit the panel-FX stacks are looking at. Cheap, and unlike the
+        // handles around it there is nothing to drop first — it is a value, not a
+        // reference into somebody else's plugin.
+        ResolveFxFamily();
         // ⚠ Every panel-FX driver handle points into the PREVIOUS aircraft's
         // plugin. ToLiss's datarefs are unregistered with it, so a handle kept
         // across the swap is the one way this feature could take the sim down
@@ -3140,6 +3171,21 @@ static void UpdateMenuVisibility() {
         // unloaded, and the command handlers are registered against them.
         FxForgetDrivers();
         UnbindDcduCommands();
+        // ⚠ AND THE FX FAMILY GOES WITH THEM. It is the value that decides
+        // whether a SCOPED stack may paint, and it was resolved on the ToLiss
+        // branch only: switching to any other aircraft left it reading "a3xx",
+        // so the six A3xx-scoped stacks kept painting there alongside the four
+        // unscoped ones. AutoLoop cannot fix it up either — that loop returns
+        // early off this same aircraft check. Called rather than assigned so the
+        // log says which aircraft the answer changed for.
+        ResolveFxFamily();
+        // A benchmark must not outlive the aircraft it was started on. Its
+        // window went with the menu above, so a run left going would keep
+        // flipping the user's display switches for the next minute with nothing
+        // on screen to abort it — and its sampler is a real thread polling PDH
+        // once a second for a cockpit we are no longer in. Idempotent, and the
+        // pane re-creates both on demand when a ToLiss comes back.
+        PerfShutdown();
     }
 }
 
@@ -3191,8 +3237,11 @@ static bool StrobeGateOn() {
 }
 
 static float EngineLoop(float, float, int, void*) {
-    // Only drive lights on a ToLiss aircraft (gMenuCreated tracks that).
-    if (!gMenuCreated) { gLastSimTime = -1.0; return -1.0f; }
+    // ⚠ Only drive lights on a ToLiss. Everything below this line either writes
+    // a ToLiss dataref or reads one, so on anything else it is at best wasted
+    // and at worst a write into whatever plugin happens to own that name.
+    // Gated on the aircraft, not on gMenuCreated as it used to be — see gIsToLiss.
+    if (!gIsToLiss) { gLastSimTime = -1.0; return -1.0f; }
 
     double simTime = SimTime();
     if (gLastSimTime < 0) gLastSimTime = simTime;
@@ -3343,7 +3392,11 @@ static void StopEngine() {
 
 // ====================== Auto re-resolution (1 Hz) ============================
 static float AutoLoop(float, float, int, void*) {
-    if (!gMenuCreated) return 1.0f;
+    // Same gate as the engine, and for the same reason: every retry below binds
+    // a ToLiss handle. ⚠ Its corollary is that NOTHING here runs on another
+    // aircraft, so anything that must be cleaned up when one loads belongs in
+    // UpdateMenuVisibility's else branch, not in a "if it changed" check here.
+    if (!gIsToLiss) return 1.0f;
     // ToLiss's own datarefs AND COMMANDS appear when ITS plugin starts, which can
     // be after our aircraft-loaded hook ran. Retry here (1 Hz) rather than from
     // the per-frame engine loop.
@@ -3370,6 +3423,12 @@ static float AutoLoop(float, float, int, void*) {
     // every other face in the cockpit — see ResolveDisplayFallback.
     if (!gDisplayFallbackRef) ResolveDisplayFallback();
     if (gDcduBound < kDcduCommandCount) RetryDcduCommands();
+    // ⚠ UNCONDITIONAL, not `if (!gFxFamily)`. This is a VALUE, not a handle: a
+    // guard on "did we get one yet" would never re-run once an aircraft resolved,
+    // which is fine for a handle that stays valid and wrong for a reading that
+    // must change when the aircraft does. It is also cheap enough not to need the
+    // guard — one string dataref read, and ResolveFxFamily logs only on a change.
+    ResolveFxFamily();
     // What Auto WOULD pick, resolved whichever profile is selected, so the
     // settings window's "Auto (Hybrid LED)" label is right even while the axis is
     // on Classic. Cached rather than resolved from the UI: ResolveAutoProfile
@@ -3731,6 +3790,29 @@ static const PanelRect kPanelRectsHi[] = {
     { "ovhd aft L1", 381.4f,  457.0f,  890.6f,  929.6f, -1 },  // 3.6x1.9cm x-0.294
     { "ovhd aft L2", 474.9f,  550.6f,  890.6f,  929.6f, -1 },  // 3.6x1.9cm x-0.216
     { "FMS Load",    565.9f,  702.7f,  890.6f,  929.6f, -1 },  // 6.5x1.9cm x+0.259
+    // --- A330 ONLY, derived 2026-08-13 from A330-900_cockpit_INN.obj ----------
+    // ⚠ THE ONE ROW IN THIS TABLE THAT DOES NOT EXIST ON AN A3xx. The A330 has a
+    // THIRD MCDU on the aft pedestal, and the A3xx atlas carries NO readout face
+    // at these coordinates at all (checked with --all against the A320: two MCDU
+    // islands, nothing in 3821..4091 x 2830..3071). So the rect is real here and
+    // 270x240 px of somebody else's artwork there — which is why it is listed in
+    // kPanelRectFamilies and gated off everywhere but the A330. Every other row
+    // above is A3xx-derived and lands on the A330 too; this one is the mirror
+    // image of that and the only one so far.
+    //
+    // ⚠ These are the A330's OWN numbers, unlike `MCDU capt`/`MCDU FO`, which
+    // keep their A3xx values (the A330's own faces are 6-10 px inset from them —
+    // docs/fcu_tint_plan.md §2b). There is no A3xx value for this face to be
+    // consistent with.
+    //
+    // Identified by its manipulators, the house rule: ToLiss gives the A330 a
+    // full `AirbusFBW/MCDU3*` command set the A3xx does not have, and that
+    // keyboard's 72 faces center at x 0.009 y 0.299 z -28.219 against this
+    // island's x 0.010 y 0.294 z -28.317 — 1 mm across, 10 cm in front of the
+    // keys, which is where a screen sits. The same method puts `UndockMCDU1`
+    // and `UndockMCDU2` exactly on the other two islands, which is what says the
+    // method is sound. ⚠ Source-level only; not yet confirmed with Probe ▸ `?`.
+    { "MCDU 3",     3821.1f, 4091.0f, 2830.6f, 3070.6f, -1 },  // 270x240, x+0.010
 };
 
 // DisplayResolutionFallback == 1. Same faces, same origins, ~499 px instead of
@@ -3773,6 +3855,9 @@ static const PanelRect kPanelRectsLo[] = {
     { "ovhd aft L1", 381.4f,  457.0f,  890.6f,  929.6f, -1 },
     { "ovhd aft L2", 474.9f,  550.6f,  890.6f,  929.6f, -1 },
     { "FMS Load",    565.9f,  702.7f,  890.6f,  929.6f, -1 },
+    // Not resolution-switched — one island, no ANIM gate — so the same row as
+    // above, exactly like every other non-DU face in this table.
+    { "MCDU 3",     3821.1f, 4091.0f, 2830.6f, 3070.6f, -1 },
 };
 static const int kPanelRectCount = (int)(sizeof(kPanelRectsHi) / sizeof(kPanelRectsHi[0]));
 static_assert(sizeof(kPanelRectsLo) == sizeof(kPanelRectsHi),
@@ -3829,11 +3914,17 @@ static const PanelGroup kPanelGroups[] = {
                            nullptr } },
     { "DCDU",            { "DCDU capt", "DCDU FO", nullptr } },
     { "EFB",             { "EFB capt", "EFB FO", "EFB AviTab", nullptr } },
-    { "MCDU",            { "MCDU capt", "MCDU FO", nullptr } },
+    // ⚠ `MCDU 3` is a MEMBER like any other, and it is A330-only — see
+    // kPanelRectFamilies. A group lists what a face IS, not where it exists:
+    // membership is authored structure and stays the same on every aircraft, so
+    // the tree, the containment nesting and the composite order do not change
+    // shape with the aeroplane. The rect is gated in FxRectGated instead, which
+    // is where every other "this face cannot draw right now" answer lives.
+    { "MCDU",            { "MCDU capt", "MCDU FO", "MCDU 3", nullptr } },
     { "Glass displays",  { "capt PFD", "capt ND", "E/WD", "SD", "FO ND", "FO PFD",
                            "ISIS", "DCDU capt", "DCDU FO",
                            "EFB capt", "EFB FO", "EFB AviTab",
-                           "MCDU capt", "MCDU FO", nullptr } },
+                           "MCDU capt", "MCDU FO", "MCDU 3", nullptr } },
     { "FCU row",         { "capt baro", "FCU strip", "FO baro", nullptr } },
     { "Clock",           { "clock CHR", "clock UTC", "clock ET", nullptr } },
     { "DME",             { "ctr readout L", "ctr readout R", nullptr } },
@@ -3857,7 +3948,7 @@ static const PanelGroup kPanelGroups[] = {
                            "clock CHR", "clock UTC", "clock ET",
                            "ctr readout L", "ctr readout R", "ped strips",
                            "EFB capt", "EFB FO", "EFB AviTab",
-                           "MCDU capt", "MCDU FO",
+                           "MCDU capt", "MCDU FO", "MCDU 3",
                            "RMP1 active", "RMP1 stby", "RMP2 active", "RMP2 stby",
                            "RMP3 active", "RMP3 stby", "XPDR code", "rudder trim",
                            "BAT1", "BAT2",
@@ -3900,8 +3991,27 @@ static void ResolveDisplayFallback() {
     }
 }
 
+// ⚠ PINNED FOR THE LENGTH OF ONE COMPOSITOR PASS (2026-08-10), by DrawPanelFx and
+// by nothing else. PanelRects() is asked once per PaintPanelTarget call, i.e.
+// once per LAYER — 24 cross-plugin reads of one ToLiss dataref per frame to
+// re-learn a value that cannot sensibly change inside a single pass.
+//
+// The consistency is worth as much as the reads, and it is the same argument the
+// driver value cache makes: with the resolution flipping mid-pass, the six DUs
+// would be painted from the full-res table by the layers drawn before the flip
+// and from the low-res one by the layers after it — a half-composited look, on
+// exactly the six rects whose faults are hardest to attribute (see the note on
+// gDisplayFallbackRef above).
+//
+// ⚠ Null is "not in a pass", NOT "full-res". The Dev panes and the probe's log
+// line call PanelRects() outside the pass and must keep reading through to the
+// dataref, so the pin is armed and dropped in one place and the fallback below
+// is untouched.
+static const PanelRect* gFxPassRects = nullptr;
+
 // Which of the two sets is on screen right now.
 static const PanelRect* PanelRects() {
+    if (gFxPassRects) return gFxPassRects;
     const bool lo = gDisplayFallbackRef && XPLMGetDatai(gDisplayFallbackRef) != 0;
     return lo ? kPanelRectsLo : kPanelRectsHi;
 }
@@ -3918,6 +4028,58 @@ static int GroupTargetByName(const char* name) {
     for (int g = 0; g < kPanelGroupCount; ++g)
         if (std::strcmp(kPanelGroups[g].name, name) == 0) return kPanelRectCount + g;
     return -1;
+}
+
+// Every group's members as INDICES, resolved once. The names are what the tables
+// are authored and read in — that is the house rule and it is not changing — but
+// resolving them is a strcmp walk of the whole rect table, and this ran per
+// member per layer per PASS: "Main displays" alone did 24 walks a frame to
+// rediscover the same six numbers.
+//
+// ⚠ Safe only because a NAME MEANS THE SAME INDEX IN BOTH RECT TABLES. The two
+// are the same length (static_assert) and the same order — only the six DUs'
+// VALUES differ between them — which is why the resolved index can be looked up
+// once and then applied to whichever set PanelRects() hands back. The old code
+// already relied on this: it searched kPanelRectsHi for the name and indexed the
+// live set with the answer. A member that does not resolve keeps its -1 and is
+// skipped exactly as before; kPanelGroups and kPanelRectsHi are both static const,
+// so there is nothing that could later invalidate this.
+//
+// ⚠ It sits ABOVE the containment section on purpose (moved 2026-08-10). The
+// masks below are now built FROM it rather than re-resolving the same names, so
+// "which rects does this target contain" and "which rects does PaintPanelTarget
+// actually paint" cannot answer differently — a group naming a rect that no
+// longer exists drops that member from both, or from neither.
+static const int kPanelGroupMaxMembers =
+    (int)(sizeof(kPanelGroups[0].members) / sizeof(kPanelGroups[0].members[0]));
+
+struct PanelGroupMembers {
+    int idx[kPanelGroupMaxMembers];
+    int count = 0;
+};
+
+static const PanelGroupMembers& GroupMembers(int group) {
+    static PanelGroupMembers table[kPanelGroupCount];
+    static bool built = false;
+    if (!built) {
+        built = true;
+        for (int g = 0; g < kPanelGroupCount; ++g) {
+            const PanelGroup& src = kPanelGroups[g];
+            PanelGroupMembers& dst = table[g];
+            for (int m = 0; m < kPanelGroupMaxMembers && src.members[m]; ++m) {
+                const int i = RectIndexByName(src.members[m]);
+                // A miss is a member naming a rect that no longer exists, i.e. a
+                // rename that did not update this table. Say so once — silently
+                // painting a smaller group is the failure this table's naming
+                // rule exists to prevent.
+                if (i < 0) Log(std::string("panel fx: group '") + src.name
+                               + "' names no rect '" + src.members[m]
+                               + "' - that member is being skipped");
+                else dst.idx[dst.count++] = i;
+            }
+        }
+    }
+    return table[group];
 }
 
 // --- containment -------------------------------------------------------------
@@ -3946,26 +4108,71 @@ static_assert(kPanelRectCount <= 64,
               "the rect table has outgrown the containment mask - widen PanelMask "
               "(and everything derived from it) before appending more rows");
 
+// Every rect in the table, as a mask. The whole panel, for masking against.
+// (Up here rather than beside its other callers because BuildRectDrivers wants
+// it to seed the "which rects are on this aircraft" mask.)
+static PanelMask PanelAllRectsMask() {
+    return kPanelRectCount >= 64 ? ~(PanelMask)0
+                                 : (((PanelMask)1 << kPanelRectCount) - 1);
+}
+
+// ⚠ RESOLVED ONCE, then read as an array (2026-08-10). This derived a group's
+// mask by walking its member NAMES on every call, and every call therefore cost
+// up to 36 x 36 strcmps — for a function that is the comparator of the
+// compositor's per-pass sort and the whole basis of the editor's target tree:
+//
+//  * FxDrawOrder sorts ten stacks, so ~25 comparisons, each asking for two
+//    breadths, each of those a full re-derivation. Thousands of strcmps a frame,
+//    in the panel pass, to re-learn numbers that cannot change.
+//  * BuildFxTargetPane asks PanelTargetParent of all 51 targets and then does it
+//    again for every open node's children — an O(targets^2) sweep of the same
+//    re-derivation, per ImGui frame. That one was measured in strcmps per frame
+//    with six digits.
+//
+// The tables are static const and GroupMembers has already resolved the names, so
+// there is nothing here that could later change. FxDrawOrder's note still holds
+// and is untouched: it is the draw ORDER that must not be cached, not the masks
+// the order is derived from.
 static PanelMask PanelTargetMask(int t) {
-    if (t >= 0 && t < kPanelRectCount) return (PanelMask)1 << t;
-    if (t >= kPanelRectCount && t < kPanelTargetCount) {
-        const PanelGroup& g = kPanelGroups[t - kPanelRectCount];
-        const int maxMembers = (int)(sizeof(g.members) / sizeof(g.members[0]));
-        PanelMask mask = 0;
-        for (int m = 0; m < maxMembers && g.members[m]; ++m) {
-            const int i = RectIndexByName(g.members[m]);
-            if (i >= 0) mask |= (PanelMask)1 << i;
+    static PanelMask table[kPanelTargetCount];
+    static bool built = false;
+    if (!built) {
+        built = true;
+        for (int i = 0; i < kPanelRectCount; ++i) table[i] = (PanelMask)1 << i;
+        for (int g = 0; g < kPanelGroupCount; ++g) {
+            // ⚠ From GroupMembers, NOT from the names again — that is what makes
+            // "the rects this target contains" and "the rects PaintPanelTarget
+            // paints" one answer rather than two agreeing ones.
+            const PanelGroupMembers& src = GroupMembers(g);
+            PanelMask mask = 0;
+            for (int m = 0; m < src.count; ++m) mask |= (PanelMask)1 << src.idx[m];
+            table[kPanelRectCount + g] = mask;
         }
-        return mask;
     }
+    if (t >= 0 && t < kPanelTargetCount) return table[t];
     return 0;
 }
 
+// ⚠ Resolved once as well, and for the same reasons the mask above is: this is
+// the compositor's sort COMPARATOR — two calls per comparison, ~25 comparisons a
+// pass — and the number the editor's tree prints beside every target it draws,
+// which is another O(targets^2) sweep per ImGui frame. Each call was a popcount
+// of a 36-bit mask. The masks are a fixed table, so the counts are one too.
 static int PanelTargetBreadth(int t) {
-    PanelMask m = PanelTargetMask(t);
-    int n = 0;
-    for (; m; m &= m - 1) ++n;
-    return n;
+    static int table[kPanelTargetCount];
+    static bool built = false;
+    if (!built) {
+        built = true;
+        for (int i = 0; i < kPanelTargetCount; ++i) {
+            PanelMask m = PanelTargetMask(i);
+            int n = 0;
+            for (; m; m &= m - 1) ++n;
+            table[i] = n;
+        }
+    }
+    // Out of range keeps answering 0, which is what the popcount of
+    // PanelTargetMask's own out-of-range answer used to give.
+    return (t >= 0 && t < kPanelTargetCount) ? table[t] : 0;
 }
 
 // Strict containment: a contains b, and they are not the same set.
@@ -4103,15 +4310,39 @@ static void WritePanelTint(void* refcon, float v) {
 // loudly if a quad is emitted outside one.
 static GLint gQuadFront     = GL_CCW;
 static bool  gQuadBatchOpen = false;
+static bool  gQuadFrontHeld = false;
+
+// ⚠ A scope over WHICH THE WINDING CANNOT CHANGE, i.e. one in which nothing but
+// this file draws (2026-08-10). Inside it every batch reuses one query instead of
+// making its own — the shipped look opens ~24 batches a pass, and glGet is the
+// call this backend trusts least: under Vulkan the GL we draw through is a bridge
+// (the same reason the boxel transform comes from datarefs rather than glGet).
+//
+// ⚠ The DEFAULT IS STILL TO QUERY. X-Plane owns GL_FRONT_FACE, the probe and the
+// compositor can both run in one frame with the sim's own drawing between them,
+// and a stale winding is SILENTLY CULLED — indistinguishable from the compositor
+// not running. So the hold is opt-in, scoped, and unwound by the destructor; a
+// batch opened anywhere else queries exactly as before.
+struct PanelQuadWindingHold {
+    PanelQuadWindingHold() {
+        gQuadFront = GL_CCW;
+        glGetIntegerv(GL_FRONT_FACE, &gQuadFront);
+        gQuadFrontHeld = true;
+    }
+    ~PanelQuadWindingHold() { gQuadFrontHeld = false; }
+    PanelQuadWindingHold(const PanelQuadWindingHold&) = delete;
+    PanelQuadWindingHold& operator=(const PanelQuadWindingHold&) = delete;
+};
 
 struct PanelQuadBatch {
     PanelQuadBatch() {
-        // Queried per batch, not per pass: X-Plane owns this state, and the probe
-        // and the compositor can both run in one frame with the sim's own drawing
-        // in between. Once per layer is cheap; once per quad was 61 driver
-        // queries a frame.
-        gQuadFront = GL_CCW;
-        glGetIntegerv(GL_FRONT_FACE, &gQuadFront);
+        // Once per batch unless a PanelQuadWindingHold is open around the whole
+        // pass — never per quad, which was 61 driver queries a frame, and never
+        // per session, which is how it goes stale.
+        if (!gQuadFrontHeld) {
+            gQuadFront = GL_CCW;
+            glGetIntegerv(GL_FRONT_FACE, &gQuadFront);
+        }
         glBegin(GL_QUADS);
         gQuadBatchOpen = true;
     }
@@ -4235,52 +4466,10 @@ static void ClearProbeRect(const PanelRect& r, int, float cr, float cg, float cb
 // already is not.
 typedef void (*PanelPaintFn)(const PanelRect&, int, float, float, float);
 
-// Every group's members as INDICES, resolved once. The names are what the tables
-// are authored and read in — that is the house rule and it is not changing — but
-// resolving them is a strcmp walk of the whole rect table, and this ran per
-// member per layer per PASS: "Main displays" alone did 24 walks a frame to
-// rediscover the same six numbers.
-//
-// ⚠ Safe only because a NAME MEANS THE SAME INDEX IN BOTH RECT TABLES. The two
-// are the same length (static_assert) and the same order — only the six DUs'
-// VALUES differ between them — which is why the resolved index can be looked up
-// once and then applied to whichever set PanelRects() hands back. The old code
-// already relied on this: it searched kPanelRectsHi for the name and indexed the
-// live set with the answer. A member that does not resolve keeps its -1 and is
-// skipped exactly as before; kPanelGroups and kPanelRectsHi are both static const,
-// so there is nothing that could later invalidate this.
-static const int kPanelGroupMaxMembers =
-    (int)(sizeof(kPanelGroups[0].members) / sizeof(kPanelGroups[0].members[0]));
-
-struct PanelGroupMembers {
-    int idx[kPanelGroupMaxMembers];
-    int count = 0;
-};
-
-static const PanelGroupMembers& GroupMembers(int group) {
-    static PanelGroupMembers table[kPanelGroupCount];
-    static bool built = false;
-    if (!built) {
-        built = true;
-        for (int g = 0; g < kPanelGroupCount; ++g) {
-            const PanelGroup& src = kPanelGroups[g];
-            PanelGroupMembers& dst = table[g];
-            for (int m = 0; m < kPanelGroupMaxMembers && src.members[m]; ++m) {
-                const int i = RectIndexByName(src.members[m]);
-                // A miss is a member naming a rect that no longer exists, i.e. a
-                // rename that did not update this table. Say so once — silently
-                // painting a smaller group is the failure this table's naming
-                // rule exists to prevent.
-                if (i < 0) Log(std::string("panel fx: group '") + src.name
-                               + "' names no rect '" + src.members[m]
-                               + "' - that member is being skipped");
-                else dst.idx[dst.count++] = i;
-            }
-        }
-    }
-    return table[group];
-}
-
+// GroupMembers() — a group's members as resolved INDICES — is defined up beside
+// the rect table, because PanelTargetMask builds the containment masks from it.
+// See the note there for why the names stay the wire identity and the lookup does
+// not.
 static void PaintPanelTarget(int target, PanelPaintFn paint,
                              float cr, float cg, float cb) {
     const PanelRect* rects = PanelRects();
@@ -5004,6 +5193,122 @@ static bool FxBlendTakesTexture(int blend) {
     return blend != kFxBurn && blend != kFxDarken;
 }
 
+// ─── aircraft families ───────────────────────────────────────────────────────
+// Which cockpits a piece of the look belongs to. THREE things now carry one of
+// these masks, and they are the same mask read three times rather than three
+// features: a STACK (which cockpits this target paints on at all), a LAYER
+// (2026-08-13 — one layer of a shared stack that is only right on one family),
+// and a row of the built-in DRIVER table (which dataref a face's brightness
+// comes from here). Declared this far up because the first of the three to need
+// it is FxLayer, a few lines below.
+//
+// ⚠ WHY THIS EXISTS. The rect table is A3xx-derived but nothing in the draw path
+// ever asked which aircraft was loaded — `PanelTargetByName` resolves against a
+// compile-time table, so every stack in `panelfx.txt` resolved and painted on
+// whatever cockpit was in front of it. On a ToLiss A330-900 that is mostly benign
+// (ToLiss reuses one 4096 panel atlas layout across the fleet, so the six DUs, the
+// ISIS and both DCDUs land within ~3 px) and locally wrong: the FCU row is tuned to
+// the A3xx's artwork and reads as a mess there, and the overhead readouts have no
+// A330 counterpart at those coordinates at all. `docs/fcu_tint_plan.md` §4 claimed
+// the stacks were dropped with a log line on a non-A3xx; they never were.
+//
+// A BITMASK, so one stack can name several families, and 0 = unrestricted — which
+// is what every stack authored before this reads as, so an old file is unchanged.
+//
+// ⚠ A RESTRICTED STACK ON AN UNKNOWN AIRFRAME DRAWS NOTHING. That is the whole
+// point and it is the opposite of the drivers' "unreadable means on" rule: a
+// missing brightness driver should never blank a tint, but a cockpit we cannot
+// identify is exactly where an A3xx-shaped tint has no business being painted.
+// Only stacks that ASK to be scoped are affected; the rest still draw everywhere.
+// ⚠ Plain constants rather than an enum: one of them is bit 31, and an unscoped
+// enum's underlying type is the compiler's choice, so `1 << 31` in an int-backed
+// enum is a signed overflow. These are `unsigned` by construction.
+static constexpr unsigned kFxFamilyNone = 0u;
+static constexpr unsigned kFxFamilyA3xx = 1u << 0;  // A318/A319/A320/A321, ceo+neo
+static constexpr unsigned kFxFamilyA330 = 1u << 1;  // A330-800 / A330-900
+
+// ⚠ WHAT AN UNPARSEABLE SCOPE RESOLVES TO, and it is NOT 0. Zero means
+// "unrestricted", so a `family` line whose names this build does not recognize
+// could not be represented by clearing the mask — that would turn a scope we
+// failed to read into no scope at all, silently restoring exactly the
+// paint-on-the-wrong-cockpit behavior the line exists to stop, on the aircraft
+// its author cannot see. This bit matches no aircraft, so such a stack draws
+// nowhere and says so in the log.
+//
+// The realistic way to reach it is a file written by a LATER Photon that knows a
+// family this build does not — where drawing nothing is plainly right. A typo
+// cannot reach it in a shipped file: a test walks panelfx.txt and fails on any
+// name the plugin does not know.
+static constexpr unsigned kFxFamilyUnrecognized = 1u << 31;
+
+struct FxFamilyName { const char* name; unsigned bit; };
+// The wire names. Lower case, matched exactly; the order here is the order they
+// are written back in, so a saved file is stable.
+static const FxFamilyName kFxFamilyNames[] = {
+    { "a3xx", kFxFamilyA3xx },
+    { "a330", kFxFamilyA330 },
+};
+static const int kFxFamilyCount =
+    (int)(sizeof(kFxFamilyNames) / sizeof(kFxFamilyNames[0]));
+
+// ⚠ MATCH ON THE ICAO TYPE CODE, AND THE NEO CODES ARE NOT THE CEO ONES. The
+// ToLiss A320 reports **A20N**, not A320 — checked against the shipped `.acf`
+// files, where a319 = A319, a320 = A20N, a321 = A321, a339 = A339. A list built
+// from the obvious four (A319/A320/A321) therefore misses the A320 completely,
+// which is the ONE aircraft this project is mostly used on: every scoped stack
+// would vanish there and nowhere else. The neo codes are A19N/A20N/A21N (and
+// A18N, which ToLiss does not make — listed because omitting it buys nothing).
+//
+// The plugin has only the ICAO to go on; the installer keys everything by airframe
+// instead. Same split as GlowMapForIcao, which is the other place this is true.
+static unsigned FxFamilyForIcao(const std::string& icao) {
+    if (icao == "A318" || icao == "A319" || icao == "A320" || icao == "A321" ||
+        icao == "A18N" || icao == "A19N" || icao == "A20N" || icao == "A21N") {
+        return kFxFamilyA3xx;
+    }
+    if (icao == "A338" || icao == "A339") return kFxFamilyA330;
+    return kFxFamilyNone;
+}
+
+// The loaded aircraft's family. Re-resolved on every aircraft load AND on the 1 Hz
+// AutoLoop — the second is not belt-and-braces, it is the tripwire this project has
+// now learned three times: a value read once at load time is read before the thing
+// that supplies it is necessarily ready. `acf_ICAO` is the sim's own dataref rather
+// than ToLiss's, so it is far less likely to be late than a ToLiss handle, but the
+// cost of re-reading is one string dataref a second and the cost of being wrong is
+// a whole session of an effect silently missing.
+static unsigned gFxFamily = kFxFamilyNone;
+
+// Names for a mask, for the wire format and the Dev pane. Empty string = 0.
+static std::string FxFamilyMaskNames(unsigned mask) {
+    std::string s;
+    for (int i = 0; i < kFxFamilyCount; ++i) {
+        if (!(mask & kFxFamilyNames[i].bit)) continue;
+        if (!s.empty()) s += " ";
+        s += kFxFamilyNames[i].name;
+    }
+    return s;
+}
+
+static unsigned FxFamilyBitForName(const std::string& name) {
+    for (int i = 0; i < kFxFamilyCount; ++i) {
+        if (name == kFxFamilyNames[i].name) return kFxFamilyNames[i].bit;
+    }
+    return kFxFamilyNone;
+}
+
+// ⚠ THE RULE, STATED ONCE. Three things carry a family mask — a stack, a layer
+// and a row of the built-in driver table — and the wrappers below are one line
+// each precisely so the reading of "0 = every aircraft" cannot come to differ
+// between them. A second copy of this expression is how one of the three would
+// eventually fail OPEN on an aircraft nobody tests on.
+//
+// Pure — two loads and an AND — so it is free to ask per stack and per layer in
+// a pass.
+static bool FxFamilyAllows(unsigned families) {
+    return families == kFxFamilyNone || (families & gFxFamily) != 0;
+}
+
 // A switch that can defer to the level above it. Declared here rather than down
 // with FxStack because `follow` now exists at three levels — the master switch,
 // the target, and the layer — and each one's Inherit resolves to the next one
@@ -5112,7 +5417,30 @@ struct FxLayer {
     // apply, whatever is authored here.
     FxCurve curve;
 
+    // ---- and on WHICH AIRCRAFT does it exist? -------------------------------
+    // The same mask FxStack carries, one level further in. 0 = every aircraft,
+    // which is what every layer authored before this reads as.
+    //
+    // The target scope answers "is this face here at all"; this answers "is this
+    // part of the look right here". The two are different questions and the
+    // second one has no other spelling: a stack's targets are its identity, so
+    // "the same rects, the same order, one layer swapped" cannot be said with
+    // two stacks — they would be two targets with the same name, which the tree
+    // and the file both key on. Scoping the LAYER is what lets one authored
+    // stack cover both families and differ only where they differ: the A3xx's
+    // FCU artwork wants a Burn the A330's does not, and everything under it is
+    // shared.
+    //
+    // ⚠ It NARROWS the stack's scope, it does not widen it. A layer named a330
+    // inside a stack scoped a3xx draws nowhere at all — the stack is skipped
+    // before its layers are reached — and the editor says so rather than letting
+    // it read as a broken layer.
+    unsigned families = kFxFamilyNone;
 };
+
+// May this layer draw on the aircraft that is loaded? See FxFamilyAllows: the
+// rule is stated once and this is one of its three readers.
+static bool FxLayerFamilyAllows(const FxLayer& l) { return FxFamilyAllows(l.families); }
 
 // ==================== panel FX: brightness and power drivers =================
 //
@@ -5513,7 +5841,23 @@ static float gFxAmbientHi = 0.70f;
 // aircraft banks — and an un-smoothed blend makes every screen in the cockpit
 // shift color with it. Slow enough that nothing pops, fast enough that a
 // sunrise is not still catching up at cruise.
-static float gFxAmbientTau = 2.5f;
+static float gFxAmbientTau = 0.5f;
+
+// ⚠ The sun-elevation gate (2026-08-11). The cockpit light level is ANALYTIC —
+// computed from the light sources, not metered off the rendered frame — so a
+// red-heavy dome lamp slams one channel to ~1.0 and the MAX below reads it as
+// daylight: the screens swap to their day look at midnight because a cabin
+// lamp is on. Sun pitch is the one signal no cockpit light can touch, so the
+// blend target is multiplied by a smoothstep of
+// sim/graphics/scenery/sun_pitch_degrees across [lo, hi] degrees. lo == hi is
+// a hard step there; BOTH at -90 holds the gate open, which is the "off"
+// position. Daytime behavior is unchanged by design — clouds, shadow and a
+// hangar still read through the light level; the gate only forbids "day"
+// while the sun is down.
+static float gFxAmbientSunLo = -5.0f;
+static float gFxAmbientSunHi =  5.0f;
+static XPLMDataRef gFxSunPitchRef   = nullptr;
+static bool        gFxSunPitchTried = false;
 
 static float gFxAmbientRaw    = 0.0f;   // last reading, before lo/hi — for the pane
 static float gFxAmbient       = 0.0f;   // smoothed 0..1 — what the compositor uses
@@ -5555,6 +5899,29 @@ static float FxAmbientRawNow() {
     return best < 0.0f ? gFxAmbientRaw : best;
 }
 
+// A sim-owned dataref, so it is resolved lazily and once — the same shape as
+// kFxAmbientRefs, and like them it needs no AutoLoop retry line and is not
+// dropped by FxForgetDrivers. Unreadable means OPEN: same house rule as the
+// drivers — a missing source must not repaint the whole cockpit in its other
+// look.
+static float FxAmbientSunGate() {
+    if (!gFxSunPitchTried) {
+        gFxSunPitchTried = true;
+        gFxSunPitchRef = XPLMFindDataRef("sim/graphics/scenery/sun_pitch_degrees");
+        if (!gFxSunPitchRef)
+            Log("panel fx: sim/graphics/scenery/sun_pitch_degrees is missing - "
+                "the day/night blend's sun gate is held open.");
+    }
+    if (!gFxSunPitchRef) return 1.0f;
+    const float pitch = XPLMGetDataf(gFxSunPitchRef);
+    if (gFxAmbientSunHi <= gFxAmbientSunLo)
+        return pitch >= gFxAmbientSunLo ? 1.0f : 0.0f;
+    float t = (pitch - gFxAmbientSunLo) / (gFxAmbientSunHi - gFxAmbientSunLo);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // Sampled once per compositor pass rather than from a flight loop, so the value
 // is fresh exactly when it is used and there is nothing to keep in step. The
 // step is taken against the WALL CLOCK, not a fixed per-frame constant, so the
@@ -5576,6 +5943,12 @@ static void FxSampleAmbient() {
         : (gFxAmbientRaw - gFxAmbientLo) / span;
     if (target < 0.0f) target = 0.0f;
     if (target > 1.0f) target = 1.0f;
+
+    // The sun gate scales the TARGET, not the smoothed value, so dawn still
+    // arrives through the same smoothing as everything else. It also applies
+    // over an ambientref override — the gate is a separate question from
+    // which dataref answers "how bright is it in here".
+    target *= FxAmbientSunGate();
 
     // First sample of the session snaps: fading up from "night" over the first
     // two seconds of every flight would be a visible artifact on the runway at
@@ -5617,10 +5990,34 @@ static float FxAmbientNow() {
 // kFxOhpIntegral. That is what put the pedestal radios and the rudder trim on the
 // panel knob and RMP3 — which is on the OVERHEAD, not the pedestal — on the OHP
 // knob alongside the BAT windows (2026-08-02, user).
+// ⚠ A ROW MAY BE SCOPED TO AN AIRCRAFT FAMILY (2026-08-13), and the rows are
+// applied IN ORDER, so a scoped row is an OVERRIDE of the unscoped one above it
+// rather than a separate table. That is the whole mechanism: the unscoped row
+// says what a face reads by default, a row naming `kFxFamilyA330` says what it
+// reads on an A330 instead, and BuildRectDrivers skips every row that does not
+// name the loaded family.
+//
+// It exists because the same face is on a different knob on a different aircraft
+// — the FCU's integral lighting is `AirbusFBW/SupplLightLevels[1]` on the A330
+// and something else entirely on the A3xx — and a table with one answer per face
+// can only be right about one of them. The rect is the same rect; the dataref
+// behind it is not.
+//
+// ⚠ AN EMPTY FIELD IN A SCOPED ROW INHERITS, it does not clear. BuildRectDrivers
+// writes `bright` and `power` independently and only when non-empty, so a scoped
+// row that names a brightness source and leaves `power` empty keeps whatever the
+// unscoped row set. That is what makes an override a one-line edit; the cost is
+// that a family which needs a face to have NO power gate cannot say so here, and
+// would need its own stack in panelfx.txt. Nothing needs that today.
+//
+// ⚠ `families` is LAST and defaults to kFxFamilyNone, so every row written
+// before this existed still reads as "every aircraft" with no edit. A row that
+// names nothing is unrestricted, exactly as an absent `family` line is.
 struct PanelSource {
     const char* rect;
     const char* bright;  int brightIdx;  float brightLo, brightHi;
     const char* power;   int powerIdx;   float powerAbove;
+    unsigned families = kFxFamilyNone;
 };
 static const char* kFxPanelIntegral = "AirbusFBW/PanelBrightnessLevel";
 static const char* kFxOhpIntegral   = "AirbusFBW/OHPBrightnessLevel";
@@ -5642,6 +6039,15 @@ static const PanelSource kPanelSources[] = {
                        "AirbusFBW/ISIAvailable", -1, 0.5f },
     { "MCDU capt",     "AirbusFBW/MCDUScreenBrightnessArray", 0, 0.0f, 1.0f, "", -1, 0.0f },
     { "MCDU FO",       "AirbusFBW/MCDUScreenBrightnessArray", 1, 0.0f, 1.0f, "", -1, 0.0f },
+    // The A330's third MCDU, on the aft pedestal. ⚠ The INDEX is the assumption
+    // here, not the name: element 2 of the same array is where a third screen
+    // would go, and this hangar has no way to read it back. It is the safe kind
+    // of guess — an index past the end reads as UNREADABLE, which is factor 1,
+    // undimmed, and says so in red in the source pane. The rect itself is
+    // A330-only (kPanelRectFamilies), so this row is scoped to match rather than
+    // sitting unscoped and true-by-accident on an aircraft that has no such face.
+    { "MCDU 3",        "AirbusFBW/MCDUScreenBrightnessArray", 2, 0.0f, 1.0f,
+                       "", -1, 0.0f,  kFxFamilyA330 },
     // The DCDUs have BrightnessUp/Down COMMANDS and no level dataref anyone can
     // read, so Photon counts the presses itself and publishes the result — see
     // kDcduBrightnessRef. The name and the top of the range are taken FROM THOSE
@@ -5678,6 +6084,23 @@ static const PanelSource kPanelSources[] = {
                        "AirbusFBW/FCUAvail", -1, 0.5f },
     { "FO baro",       "ckpt/fcu/lights/right/anim", -1, 1.0f, 270.0f,
                        "AirbusFBW/FCUAvail", -1, 0.5f },
+    // ...and what the SAME three faces read on an A330 (2026-08-13, user).
+    // `AirbusFBW/SupplLightLevels[1]`, and it is an ordinary 0..1 knob rather
+    // than the 1..270 animation value above — which is the reason these are
+    // three more rows and not a second index on the ones above: `lo`/`hi` are
+    // part of what a source IS, so "the same dataref elsewhere" and "a different
+    // quantity entirely" cannot share a row.
+    //
+    // ⚠ These come AFTER the unscoped rows and that is load-bearing: later rows
+    // win, so moving them above would leave the A330 reading the A3xx knob. The
+    // power gate is left empty deliberately — an empty field in a scoped row
+    // inherits, so `AirbusFBW/FCUAvail` above still applies here.
+    { "FCU strip",     "AirbusFBW/SupplLightLevels", 1, 0.0f, 1.0f,
+                       "", -1, 0.0f,  kFxFamilyA330 },
+    { "capt baro",     "AirbusFBW/SupplLightLevels", 1, 0.0f, 1.0f,
+                       "", -1, 0.0f,  kFxFamilyA330 },
+    { "FO baro",       "AirbusFBW/SupplLightLevels", 1, 0.0f, 1.0f,
+                       "", -1, 0.0f,  kFxFamilyA330 },
     // The radios. Each RMP has its own AirbusFBW/RMP<n>Lights, which was what
     // these rows used until 2026-08-02 — but these faces are integral-lit like
     // every other segment window, and RMP1/2 sit on the PEDESTAL while RMP3 is on
@@ -5726,6 +6149,35 @@ static const PanelSource kPanelSources[] = {
     // The EFB tablets are on their own screen brightness, up/down buttons only.
 };
 static const int kPanelSourceCount = (int)(sizeof(kPanelSources) / sizeof(kPanelSources[0]));
+
+// ---- which rects EXIST on which aircraft -------------------------------------
+// ⚠ NOT an electrical gate and not a look — a statement that the face is not in
+// this cockpit. The rect table is one table for the whole ToLiss fleet, and it is
+// A3xx-derived: every row in it lands on an A330 too (docs/fcu_tint_plan.md §2b),
+// which is why nothing needed this until the A330's THIRD MCDU went in. That face
+// has no A3xx counterpart at all, so on an A3xx its UV rect is 270x240 px of
+// whatever artwork happens to be there — and a `Screen` layer painted over it
+// would be a pale patch on the panel with no screen under it.
+//
+// Absence from this table means "every aircraft", so 36 of the 37 rects say
+// nothing and the default is what the table looked like before it existed.
+//
+// ⚠ Keyed by rect NAME, like kPanelSources, kPanelBuses and kPanelGroups, and for
+// the same reason: the rect table is append-only but an index literal here would
+// still silently re-aim if a row were ever reordered by accident.
+//
+// ⚠ This is deliberately NOT group membership. `MCDU 3` is a member of `MCDU` on
+// every aircraft — membership is authored structure, so the editor tree, the
+// containment nesting and the broadest-first composite order keep one shape
+// everywhere — and EXISTENCE is answered per frame, by FxRectGated, alongside
+// power and the bus. A group that quietly changed size with the aeroplane would
+// change its own breadth, and breadth is what decides composite order.
+struct PanelRectFamily { const char* rect; unsigned families; };
+static const PanelRectFamily kPanelRectFamilies[] = {
+    { "MCDU 3", kFxFamilyA330 },
+};
+static const int kPanelRectFamilyCount =
+    (int)(sizeof(kPanelRectFamilies) / sizeof(kPanelRectFamilies[0]));
 
 // ---- the two ELECTRICAL gates ------------------------------------------------
 // A face's own `power` source above answers "does this unit exist and is it
@@ -5801,7 +6253,18 @@ static FxDriver gRectBright[64];
 static FxDriver gRectPower[64];
 static FxDriver gRectBus[64];
 static FxDriver gRectCb[64];
+// Which rects are on the aircraft that is loaded, as a mask. Built here rather
+// than asked per rect because it is the same shape as the drivers beside it —
+// per-rect configuration resolved once per aircraft family — and because the
+// question is then one shift and a test in the hot path.
+static PanelMask gRectsHere = 0;
 static bool     gRectDriversBuilt = false;
+// ⚠ WHICH FAMILY THE TABLE ABOVE WAS BUILT FOR. The source rows are per aircraft
+// family now, so "built" is no longer a yes/no — a table built for an A320 and
+// then read on an A330 is stale in exactly the way that is invisible: every
+// driver resolves, every value reads, and one face follows a knob that belongs to
+// another aeroplane. See EnsureRectDrivers.
+static unsigned gRectDriversFamily = kFxFamilyNone;
 
 static void BuildRectDrivers() {
     for (int i = 0; i < kPanelRectCount && i < 64; ++i) {
@@ -5810,8 +6273,30 @@ static void BuildRectDrivers() {
         gRectBus[i]    = FxDriver();
         gRectCb[i]     = FxDriver();
     }
+    // ⚠ EVERY RECT IS HERE UNLESS SOMETHING SAYS OTHERWISE. Building the mask
+    // the other way round — start empty, set the bits for rects that are on this
+    // aircraft — would mean a rect missing from the table below draws nowhere,
+    // and 36 of the 37 rows are deliberately absent from it.
+    gRectsHere = PanelAllRectsMask();
+    for (int r = 0; r < kPanelRectFamilyCount; ++r) {
+        const PanelRectFamily& p = kPanelRectFamilies[r];
+        const int i = RectIndexByName(p.rect);
+        if (i < 0 || i >= 64) {
+            Log(std::string("panel fx: rect-family table names '") + p.rect
+                + "', which is not a rect - ignored");
+            continue;
+        }
+        if (!FxFamilyAllows(p.families)) gRectsHere &= ~((PanelMask)1 << i);
+    }
     for (int s = 0; s < kPanelSourceCount; ++s) {
         const PanelSource& p = kPanelSources[s];
+        // ⚠ IN ORDER, and a row for another family is SKIPPED rather than
+        // merged: the rows for one rect are "the default, then what this family
+        // does instead", so the last row that names the loaded family wins. On
+        // an aircraft whose family is unknown only the unscoped rows apply,
+        // which leaves that face on the default source rather than on none —
+        // the same fail-open the drivers have everywhere else.
+        if (!FxFamilyAllows(p.families)) continue;
         const int i = RectIndexByName(p.rect);
         if (i < 0 || i >= 64) {
             Log(std::string("panel fx: source table names '") + p.rect
@@ -5858,7 +6343,26 @@ static void BuildRectDrivers() {
         // still counts as connected.
         gRectCb[i].floorF = 0.5f;
     }
-    gRectDriversBuilt = true;
+    gRectDriversBuilt  = true;
+    gRectDriversFamily = gFxFamily;
+}
+
+// ⚠ THE ONE WAY IN, and it replaced the bare "build it if it has never been
+// built" test at every call site (2026-08-13). Now that a source row can be scoped to an
+// aircraft family, "has the table been built" is the wrong question — the table
+// belongs to a family, and the aircraft can change under it. Making the rebuild a
+// call site's job would put a rule that has to hold in six places, and the way it
+// fails is silent in both directions: an A330 reading the A3xx's FCU knob after a
+// swap, or an A3xx reading the A330's.
+//
+// Cheap enough to call per rect per pass — a load, a compare and a branch — and
+// it is only ever more than that on the frame after an aircraft change.
+//
+// ⚠ Nothing here drops a cached HANDLE by itself: BuildRectDrivers assigns fresh
+// FxDrivers, so the handles go with the config. FxForgetDrivers is still what
+// answers the other half (the same table, a new copy of ToLiss's plugin).
+static void EnsureRectDrivers() {
+    if (!gRectDriversBuilt || gRectDriversFamily != gFxFamily) BuildRectDrivers();
 }
 
 // Drop every cached handle. ToLiss's datarefs go away with its plugin, so a
@@ -5901,7 +6405,16 @@ struct FxStack {
     FxDriver power;
     int      follow = kFxInherit;       // dim with the brightness driver at all
     int      curve  = kFxInherit;       // shape that dimming with kBrightnessCurve
+    // Which cockpits this stack may paint on. 0 = all of them, which is both the
+    // default and what every pre-2026-08-11 file means.
+    unsigned families = kFxFamilyNone;
 };
+
+// May this stack paint on the aircraft that is loaded? One line, over the shared
+// rule in FxFamilyAllows, and it deliberately does NOT join FxRectGated: that
+// function is per RECT and is asked once per quad, while this is a property of
+// the whole stack and is asked once before its first layer.
+static bool FxStackFamilyAllows(const FxStack& s) { return FxFamilyAllows(s.families); }
 
 static std::vector<FxStack> gFxStacks;
 static bool gFxEnabled = false;
@@ -5913,6 +6426,37 @@ static bool gFxFollowBrightness = true;
 // Declared up with the Displays tab, which asks this to decide whether its two
 // effect switches have anything to act on.
 static bool PanelFxLoaded() { return gFxEnabled && !gFxStacks.empty(); }
+
+// Read the loaded aircraft's family off its ICAO type code. Called from the
+// aircraft-load path and from AutoLoop; see the forward declaration for why both.
+//
+// ⚠ Logs ONLY ON A CHANGE, because AutoLoop calls it every second and a line a
+// second would bury `Log.txt`. The line it does emit is worth having: "which
+// family did Photon decide this is" is the first question when a scoped stack
+// does not paint, and an unrecognized cockpit says so by name.
+static void ResolveFxFamily() {
+    const std::string icao = AircraftIcao();
+    // ⚠ NOT A ToLiss => NO FAMILY, whatever the ICAO says. A third-party A320
+    // reports A20N exactly as readily as ToLiss's does, so matching on the type
+    // code alone would call somebody else's cockpit one of ours. The compositor
+    // is gated on gIsToLiss directly as well (DrawPanelFx), which is what makes
+    // this the second layer rather than the only one — but it is the layer the
+    // log and the Dev pane read, and a family that claims "a3xx" on a Cessna is
+    // how a later reader talks themselves out of the first layer.
+    const unsigned fam = gIsToLiss ? FxFamilyForIcao(icao) : kFxFamilyNone;
+    if (fam == gFxFamily) return;
+    gFxFamily = fam;
+    if (!gIsToLiss) {
+        Log("panel fx: not a ToLiss aircraft (ICAO '" + icao +
+            "') - the compositor draws nothing here");
+    } else if (fam == kFxFamilyNone) {
+        Log("panel fx: aircraft family unknown (ICAO '" + icao +
+            "') - stacks scoped to a family will not draw here");
+    } else {
+        Log("panel fx: aircraft family " + FxFamilyMaskNames(fam) +
+            " (ICAO '" + icao + "')");
+    }
+}
 
 static void FxForgetDrivers() {
     for (int i = 0; i < kPanelRectCount && i < 64; ++i) {
@@ -5988,20 +6532,28 @@ static const FxCurve* FxShapeFor(const FxLayer* l, const FxStack* s) {
 // RectIndexByName): panelfx.txt already names its targets, so a rect's name is
 // the wire identity and renaming one is already a breaking change. An index
 // literal here would survive a rename silently and re-aim the switch.
+// ⚠ `MCDU 3` belongs here too, A330-only or not. This list decides which of the
+// two Displays-tab switches owns a face, and that question has nothing to do with
+// which aircraft the face is on: a third MCDU left off it would follow the
+// "other readouts" switch while the two beside it followed "screens", so turning
+// the screen effects off would leave one of three MCDUs tinted. That reads as the
+// switch being broken, which is exactly what this list exists to prevent.
 static const char* const kScreenFxExtraRects[] = {
-    "MCDU capt", "MCDU FO", "DCDU capt", "DCDU FO", "ISIS",
+    "MCDU capt", "MCDU FO", "MCDU 3", "DCDU capt", "DCDU FO", "ISIS",
 };
 
-// Resolved once. The lookup is a strcmp walk of the whole table and this runs
-// per rect per layer per frame.
-static bool PanelRectIsScreen(int rectIndex) {
-    if (rectIndex < 0 || rectIndex >= kPanelRectCount) return false;
-    if (kPanelRectsHi[rectIndex].du >= 0) return true;
-
-    static PanelMask extras = 0;
+// Which rects the screen switch owns, as a mask, resolved once — the six with a
+// DUBrightness index plus the named extras above. A mask rather than a per-rect
+// test because the compositor now asks the question of a whole TARGET before it
+// spends any GL on one (see FxTargetGateMask), and because the lookup it replaced
+// was a strcmp walk of the whole table run per rect per layer per frame.
+static PanelMask FxScreenRectMask() {
+    static PanelMask mask = 0;
     static bool built = false;
     if (!built) {
         built = true;
+        for (int i = 0; i < kPanelRectCount; ++i)
+            if (kPanelRectsHi[i].du >= 0) mask |= (PanelMask)1 << i;
         const int n = (int)(sizeof(kScreenFxExtraRects) / sizeof(kScreenFxExtraRects[0]));
         for (int e = 0; e < n; ++e) {
             const int i = RectIndexByName(kScreenFxExtraRects[e]);
@@ -6010,10 +6562,15 @@ static bool PanelRectIsScreen(int rectIndex) {
             if (i < 0) Log(std::string("panel fx: no rect named '")
                            + kScreenFxExtraRects[e] + "' - it will follow the "
                            "other-displays switch instead");
-            else extras |= (PanelMask)1 << i;
+            else mask |= (PanelMask)1 << i;
         }
     }
-    return (extras >> rectIndex) & 1;
+    return mask;
+}
+
+static bool PanelRectIsScreen(int rectIndex) {
+    if (rectIndex < 0 || rectIndex >= kPanelRectCount) return false;
+    return (FxScreenRectMask() >> rectIndex) & 1;
 }
 
 // The USER's contribution to one rect's factor, from the Displays tab. Split by
@@ -6024,10 +6581,98 @@ static bool PanelRectIsScreen(int rectIndex) {
 // A rect index of -1 means the flood quad, which only the probe paints; it can
 // never reach here from the compositor, and treating it as "other" is the
 // harmless answer if it ever does.
-static float FxDisplayUserFactor(int rectIndex) {
-    if (PanelRectIsScreen(rectIndex))
-        return DisplayFeatureOn(gDisplays.screenFx) ? gDisplays.screenFxGain : 0.0f;
+//
+// ⚠ Split into the two halves and a per-rect chooser rather than written as one
+// branch, because the compositor asks both questions WITHOUT a rect in hand: "can
+// anything at all draw this pass" and "can anything in this target draw". A
+// second copy of either rule is how the pass and the skip would come to disagree,
+// and the way that reads in-sim is one effect switch turning the other one off.
+static float FxScreenUserFactor() {
+    return DisplayFeatureOn(gDisplays.screenFx) ? gDisplays.screenFxGain : 0.0f;
+}
+static float FxOtherUserFactor() {
     return DisplayFeatureOn(gDisplays.otherFx) ? 1.0f : 0.0f;
+}
+static float FxDisplayUserFactor(int rectIndex) {
+    return PanelRectIsScreen(rectIndex) ? FxScreenUserFactor() : FxOtherUserFactor();
+}
+
+// Which rects the Displays tab is letting through AT ALL right now. Pure — flags
+// and static masks, no dataref read — so it is free to ask before every pass.
+static PanelMask FxUserDrawableMask() {
+    PanelMask m = 0;
+    if (FxScreenUserFactor() > 0.0f) m |= FxScreenRectMask();
+    if (FxOtherUserFactor()  > 0.0f) m |= PanelAllRectsMask() & ~FxScreenRectMask();
+    return m;
+}
+
+// ⚠ THE GATES COME FIRST and are not what `follow` switches off. A target with
+// follow = Off means "full strength whenever this is powered", so skipping them
+// with it would leave the tint painted over a dead screen — the exact artifact
+// the whole driver mechanism exists to remove.
+//
+// Three of them, and the difference between the first and the other two is not
+// cosmetic. `power` may be OVERRIDDEN BY A STACK, because it is part of the
+// authored look. The bus and the breaker are always the RECT's own: they are
+// facts about the aircraft's electrical state, and a look that could opt out of
+// them would eventually be authored by accident. Any one of the three failing is
+// a hard zero — a screen with no power is off, not dim.
+//
+// ⚠ Split out of FxRectFactor (2026-08-10) because NONE OF IT DEPENDS ON THE
+// LAYER: the switch, the power source, the bus and the breaker are the same
+// answer for every layer of every stack aimed at this rect. That is what lets the
+// compositor ask "which rects of this target can draw at all?" once, before the
+// texture bind and the blend-equation change of the first layer — see
+// FxTargetGateMask. ⚠ ONE definition, called by both: a second copy of these rules
+// beside the skip would drift, and a skip that is stricter than the paint is a
+// target that silently stops drawing.
+// ⚠ The answer for the stack being drawn, resolved ONCE per stack per pass
+// (2026-08-10) — bit set means that rect can paint. Armed by DrawPanelFx around
+// one stack's layers and by nothing else, exactly like the driver value cache,
+// and for the same two reasons:
+//
+//  * The gates do not depend on the LAYER, so a stack of N layers over R rects
+//    was asking the same R questions N times: "Main displays" alone re-derived
+//    six answers three times a frame, each of them up to three driver lookups.
+//  * The Dev panes call FxRectFactor outside a pass to show what a rect resolves
+//    to RIGHT NOW. A memo they read through would freeze it, which is the one
+//    display that tells a mis-reading driver from an unbound one.
+//
+// ⚠ It is not a second statement of the rules — the mask is BUILT by calling
+// FxRectGated itself (with the memo off), so the skip and the paint cannot say
+// different things. What makes it safe within a pass is that everything the
+// gates read is already frozen: the Displays switches are user state, and every
+// electrical read comes out of the value cache.
+static PanelMask gFxDrawGateMask   = 0;
+static bool      gFxDrawGateMaskOn = false;
+
+static bool FxRectGated(int rectIndex) {
+    if (gFxDrawGateMaskOn && rectIndex >= 0 && rectIndex < kPanelRectCount)
+        return ((gFxDrawGateMask >> rectIndex) & 1) == 0;
+    EnsureRectDrivers();
+    // ⚠ IS THIS FACE EVEN ON THIS AEROPLANE — asked FIRST, and deliberately
+    // ABOVE the master switch two lines down (2026-08-13). "Follow display
+    // brightness" is a tuning escape hatch that outranks every ELECTRICAL gate,
+    // because those are all about how strongly to paint; this one is not a gate
+    // in that sense at all. It is the per-rect twin of a stack's `family` scope,
+    // which nothing overrides either — and with the hatch off, a rect that does
+    // not exist here would otherwise paint the A330's third MCDU onto a patch of
+    // A3xx panel artwork, in the editor, which is where it would be believed.
+    if (rectIndex >= 0 && rectIndex < kPanelRectCount
+        && !((gRectsHere >> rectIndex) & 1)) return true;
+    if (FxDisplayUserFactor(rectIndex) <= 0.0f) return true;  // switched off
+    if (!gFxFollowBrightness) return false;    // the master outranks every gate
+
+    FxDriver* power = nullptr;
+    if (gFxDrawStack && gFxDrawStack->power.set()) power = &gFxDrawStack->power;
+    else if (rectIndex >= 0 && rectIndex < kPanelRectCount) power = &gRectPower[rectIndex];
+
+    if (power && power->set() && !FxDriverPowered(*power)) return true;
+    if (rectIndex >= 0 && rectIndex < kPanelRectCount) {
+        if (gRectBus[rectIndex].set() && !FxDriverPowered(gRectBus[rectIndex])) return true;
+        if (gRectCb[rectIndex].set()  && !FxDriverPowered(gRectCb[rectIndex]))  return true;
+    }
+    return false;
 }
 
 // `driveOut`, when asked for, receives the brightness value this rect resolves
@@ -6045,34 +6690,17 @@ static float FxRectFactor(int rectIndex, float* driveOut = nullptr) {
     // is dimming this" value. A ramp on a gated rect is moot — the rect draws
     // nothing at all — but an uninitialized float would not stay moot.
     if (driveOut) *driveOut = 1.0f;
+    if (FxRectGated(rectIndex)) return 0.0f;
+
+    // Nothing below reaches a driver without going through the line above first,
+    // which is where BuildRectDrivers is called from.
     const float user = FxDisplayUserFactor(rectIndex);
-    if (user <= 0.0f) return 0.0f;              // switched off: draw nothing at all
     if (!gFxFollowBrightness) return user;
-    if (!gRectDriversBuilt) BuildRectDrivers();
 
     FxDriver* bright = nullptr;
-    FxDriver* power  = nullptr;
     if (gFxDrawStack && gFxDrawStack->bright.set()) bright = &gFxDrawStack->bright;
     else if (rectIndex >= 0 && rectIndex < kPanelRectCount) bright = &gRectBright[rectIndex];
-    if (gFxDrawStack && gFxDrawStack->power.set())  power  = &gFxDrawStack->power;
-    else if (rectIndex >= 0 && rectIndex < kPanelRectCount) power  = &gRectPower[rectIndex];
 
-    // ⚠ THE GATES COME FIRST and are not what `follow` switches off. A target
-    // with follow = Off means "full strength whenever this is powered", so
-    // skipping them with it would leave the tint painted over a dead screen —
-    // the exact artifact the whole driver mechanism exists to remove.
-    //
-    // Three of them, and the difference between the first and the other two is
-    // not cosmetic. `power` may be OVERRIDDEN BY A STACK, because it is part of
-    // the authored look. The bus and the breaker are always the RECT's own: they
-    // are facts about the aircraft's electrical state, and a look that could opt
-    // out of them would eventually be authored by accident. Any one of the three
-    // failing is a hard zero — a screen with no power is off, not dim.
-    if (power && power->set() && !FxDriverPowered(*power)) return 0.0f;
-    if (rectIndex >= 0 && rectIndex < kPanelRectCount) {
-        if (gRectBus[rectIndex].set() && !FxDriverPowered(gRectBus[rectIndex])) return 0.0f;
-        if (gRectCb[rectIndex].set()  && !FxDriverPowered(gRectCb[rectIndex]))  return 0.0f;
-    }
     // ⚠ Per LAYER, not per stack. A color correction that should stay put while
     // the knob comes down and a backlight wash that must follow it are two layers
     // of the same target, and this is the line that lets them differ.
@@ -6107,6 +6735,42 @@ static float FxRectFactor(int rectIndex, float* driveOut = nullptr) {
     return user * FxShapeFactor(*bright, FxShapeFor(gFxDrawLayer, gFxDrawStack), norm);
 }
 
+// WHICH rects of this target are not gated shut right now? (2026-08-10; it
+// answered "any?" as a bool until the memo below made the whole set free.)
+//
+// A layer costs a texture bind, a blend func, a blend EQUATION and a begin/end
+// block BEFORE the first quad — all of it per layer, none of it recoverable once
+// spent — and every one of those is wasted on a target whose rects are all
+// switched off or unpowered. That is not a rare state: it is the whole cockpit
+// with the Displays tab's effect switches off, every driven readout on a dark
+// aircraft, and the six DUs plus both DCDUs whenever the DC bus is down.
+//
+// ⚠ The gates are asked of the RECTS, through FxRectGated, so this can never be
+// stricter than the paint that follows it. What it must NOT do is fold in
+// anything per-layer: a layer with `follow` off draws at full strength through a
+// knob that is at zero, so testing the brightness FACTOR here would skip exactly
+// the layers §8f exists for. Gates only.
+//
+// ⚠ gFxDrawStack must already point at the stack — a stack may override `power`,
+// and asking without it would consult the rect's own source instead.
+//
+// The mask is PanelTargetMask's, which is now the same resolved member list
+// PaintPanelTarget walks, so "the rects this skips over" and "the rects that
+// would have been painted" are one set by construction.
+//
+// ⚠ Zero means "skip this target entirely" — the old bool's `false`. Returning
+// the SET rather than the answer is what lets the same walk serve the per-quad
+// question too (gFxDrawGateMask): the caller arms it around the stack's layers,
+// so nothing pays for the gates twice. ⚠ It must therefore be built with the
+// memo OFF, or it would answer out of the previous stack's mask; DrawPanelFx
+// arms only after this returns.
+static PanelMask FxTargetGateMask(int target) {
+    PanelMask src = PanelTargetMask(target), out = 0;
+    for (int i = 0; src; ++i, src >>= 1)
+        if ((src & 1) && !FxRectGated(i)) out |= (PanelMask)1 << i;
+    return out;
+}
+
 // The lit pass. Not a knob: pass 1 puts down nothing visible on these faces and
 // pass 2 replaces the digits, measured in-sim 2026-07-31.
 static const int kFxPass = 2;
@@ -6122,26 +6786,69 @@ static const int kFxPass = 2;
 // four equation-based modes on a driver with no glBlendEquation. Drawing them
 // additively instead would be worse than not drawing them: a mode named
 // "Darken" that brightens is a bug report about the wrong thing.
+//
+// ---- the redundant-state memo (2026-08-10) ----------------------------------
+// §8j named the ~24 blend-equation switches through the Vulkan→GL bridge as the
+// next suspect if the compositor ever measures, and said no RESTRUCTURING removes
+// them: they are per layer, and broadest-first (§8b) forbids sorting the stacks
+// by mode. Both halves of that are still true — but a good third of the calls ask
+// for the state that is already set, and those are removable without moving a
+// single layer. The equation and the func are tracked SEPARATELY because they
+// change on different layers: five of the eight modes are plain GL_FUNC_ADD, and
+// Add/Burn/Subtract all want (GL_ONE, GL_ONE). On the shipped 24 layers that is
+// ~19 of 48 calls that never reach the bridge.
+//
+// ⚠ It records what WE set, so it is only valid while nothing else can set it —
+// i.e. between DrawPanelFx's PushBlendFunc and PopBlendFunc, which is also the
+// only window SetFxBlend is ever called in. It is armed and dropped there, by
+// FxForgetBlendState, and outside that window the very first layer of the next
+// pass sets both halves unconditionally. X-Plane owns this state between passes
+// (XPLMSetGraphicsState sets a func of its own when it enables blending, and in
+// a dev build the probe's multiply runs after us in the same frame), and a memo
+// that outlived one pass would skip a call the GL state no longer matches: the
+// whole cockpit blended with someone else's operator, which is the failure
+// PopBlendFunc exists to prevent, arriving from the other end.
+static bool gFxBlendKnown = false;
+static GLenum gFxBlendSrc = GL_ONE, gFxBlendDst = GL_ZERO, gFxBlendEq = GL_FUNC_ADD;
+
+static void FxForgetBlendState() { gFxBlendKnown = false; }
+
 static bool SetFxBlend(GLenum src, GLenum dst, GLenum eq) {
-    if (PfnBlendEquationSeparate seps = GlBlendEquationSeparate()) {
-        seps(eq, GL_FUNC_ADD);             // alpha always plain add — see above
-    } else if (PfnBlendEquation one = GlBlendEquation()) {
-        one(eq);
-    } else if (eq != GL_FUNC_ADD) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            Log("panel fx: glBlendEquation is unavailable on this driver — "
-                "Subtract, Burn, Darken and Lighten layers are being SKIPPED. "
-                "The other four modes are unaffected.");
+    // ⚠ Read before anything below can update it: every test in here asks "is
+    // this what the LAST layer left set", and an unarmed memo must set both.
+    const bool known = gFxBlendKnown;
+
+    if (!known || eq != gFxBlendEq) {
+        if (PfnBlendEquationSeparate seps = GlBlendEquationSeparate()) {
+            seps(eq, GL_FUNC_ADD);         // alpha always plain add — see above
+        } else if (PfnBlendEquation one = GlBlendEquation()) {
+            one(eq);
+        } else if (eq != GL_FUNC_ADD) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                Log("panel fx: glBlendEquation is unavailable on this driver — "
+                    "Subtract, Burn, Darken and Lighten layers are being SKIPPED. "
+                    "The other four modes are unaffected.");
+            }
+            // ⚠ Nothing was set and nothing is recorded: this path leaves the
+            // state exactly as the previous layer left it, so the memo is still
+            // describing it correctly.
+            return false;
         }
-        return false;
+        gFxBlendEq = eq;
     }
 
-    if (PfnBlendFuncSeparate sep = GlBlendFuncSeparate())
-        sep(src, dst, GL_ZERO, GL_ONE);
-    else
-        glBlendFunc(src, dst);
+    if (!known || src != gFxBlendSrc || dst != gFxBlendDst) {
+        if (PfnBlendFuncSeparate sep = GlBlendFuncSeparate())
+            sep(src, dst, GL_ZERO, GL_ONE);
+        else
+            glBlendFunc(src, dst);
+        gFxBlendSrc = src;
+        gFxBlendDst = dst;
+    }
+
+    gFxBlendKnown = true;
     return true;
 }
 
@@ -6406,6 +7113,19 @@ static const std::vector<int>& FxDrawOrder() {
 }
 
 static void DrawPanelFx() {
+    // ⚠ THE AIRCRAFT GATE, and it is FIRST — above the ambient sampler, which is
+    // otherwise deliberately above every early-out. The rect table is a map of
+    // the A3xx panel atlas and nothing else; painted into another aircraft's
+    // panel texture those coordinates land on whatever art happens to be there.
+    // This shipped: only stacks carrying an explicit `family` scope were checked
+    // (and against a family that was itself stale off the last ToLiss), so the
+    // four unscoped stacks — the six DUs, both MCDUs, both DCDUs, the ISIS —
+    // composited over every aircraft in the sim.
+    //
+    // The caller checks this too. That is not redundancy for its own sake: the
+    // caller's check is what stops the work, this one is what makes the rule
+    // true for whoever calls DrawPanelFx next.
+    if (!gIsToLiss) return;
     if (!gFxEnabled || gFxStacks.empty()) return;
 
     // ⚠ The overlay folder is NOT polled from here (2026-08-04). Picking up a
@@ -6416,20 +7136,48 @@ static void DrawPanelFx() {
     // shipped install's overlays only change when the installer replaces them.
     // The initial scan moved to LoadPanelFx, off this thread entirely.
 
+    // ---- per-frame bookkeeping, ABOVE the early-out ------------------------
+    // ⚠ These two run whether or not anything is drawn, and that is deliberate:
+    // both are things that go wrong by NOT running. They cost three dataref reads
+    // and an exp() between them.
+
     // How much daylight is in this cockpit, for the day/night blend. One read
     // and one exponential step per pass, ahead of everything that uses it.
+    // ⚠ Stopping while the effects are off would leave a stale blend to resume
+    // from, and the resume is a fade — the "first sample snaps" artifact of §8e,
+    // arriving whenever a user switches the effects back on at noon.
     FxSampleAmbient();
 
 #if PHOTON_DEV
     // Drop a held brightness pin whose pane stopped being drawn. See
     // FxHoldDriveOverride — a pin with no off state needs somewhere that always
     // runs to take it back, and this is the only per-frame path the pin affects.
+    // ⚠ A watchdog behind an early-out is not a watchdog.
     FxExpireDriveOverride();
 #endif
+
+    // ⚠ NOTHING BELOW THIS LINE HAPPENS WHEN THE USER HAS THE EFFECTS OFF
+    // (2026-08-10). Every rect's factor was already zero in that state, so the
+    // pass drew nothing — but it drew nothing the expensive way: it still sorted
+    // the stacks, took the graphics state, and paid a texture bind, a blend
+    // equation, a winding query and a begin/end block for each of ~24 layers, all
+    // to emit no vertices at all. Both effect switches off is a state a user
+    // chooses precisely to stop paying for this.
+    //
+    // Pure — flags and static masks, no dataref read — so it is not itself
+    // something to be careful about calling. The per-STACK version of the same
+    // question is FxTargetGateMask, in the loop below; this one only answers
+    // "is any rect on the panel switched on at all".
+    if (!FxUserDrawableMask()) return;
 
     // Every driver value this pass reads, read once. Scoped to the pass — see
     // FxDriverRaw for why the Dev panes must keep reading through to the sim.
     FxValueCacheBegin();
+
+    // Which rect table this pass paints from, likewise read once — see the note
+    // on gFxPassRects. Ask PanelRects() for it while the pin is still null, so
+    // the one read that decides it is the ordinary one.
+    gFxPassRects = PanelRects();
 
     // ONE texture unit for the whole pass, whether or not any layer has an
     // image: a solid layer binds the 1x1 white texture instead, which modulates
@@ -6441,6 +7189,12 @@ static void DrawPanelFx() {
     XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0);
     PushBlendFunc();                       // AFTER XPLMSetGraphicsState — see above
 
+    // ⚠ Whatever the blend state is now, it is not ours: the call above sets a
+    // func of its own when it enables blending. The memo in SetFxBlend is only
+    // ever a record of what THIS pass set, so it starts every pass empty and is
+    // dropped again below the pop.
+    FxForgetBlendState();
+
     // The texture env is not part of XPLMSetGraphicsState and is shared state
     // like the blend func, so it gets the same save/restore. MODULATE is the GL
     // default and is what makes "the image tints with the layer color" true.
@@ -6448,25 +7202,68 @@ static void DrawPanelFx() {
     glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &savedEnv);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
+    // One winding query for every batch below, rather than one each. Legal here
+    // and illegal a few lines further in — glGetIntegerv between glBegin and
+    // glEnd raises GL_INVALID_OPERATION — which is why it is the batch's by
+    // default and only borrowed for a scope that owns every draw inside it.
+    PanelQuadWindingHold winding;
+
     const std::vector<int>& order = FxDrawOrder();
     for (size_t n = 0; n < order.size(); ++n) {
         FxStack& stack = gFxStacks[order[n]];
+        // ⚠ FIRST, above everything, and above gFxDrawStack being set: a stack
+        // scoped to another aircraft family is not dimmed to nothing here, it is
+        // not this cockpit's stack at all. Nothing below may run for it — not the
+        // gate walk, not a driver read, not a GL call.
+        //
+        // Deliberately NOT folded into FxTargetGateMask. That answers "which of
+        // this target's RECTS can paint", and its answer is held for the stack's
+        // layers and read per quad; this is a property of the STACK and would be
+        // re-asked ~70 times a pass for an answer that cannot change inside one.
+        if (!FxStackFamilyAllows(stack)) continue;
         // Which stack is being drawn, for the per-rect brightness lookup. Not a
         // parameter because PanelPaintFn is a plain function pointer and the
         // probe shares it — the same reason gFxAlpha and gFxTile are globals.
+        //
+        // ⚠ Set BEFORE the skip below, which consults it for a stack's `power`
+        // override, and cleared after it however the iteration ends.
         gFxDrawStack = &stack;
-        for (size_t i = 0; i < stack.layers.size(); ++i) {
-            const FxLayer& layer = stack.layers[i];
-            // The opacity test moved INTO DrawFxLayer, which is the only place
-            // that knows the day-blended value — see the note there.
-            if (layer.enabled) DrawFxLayer(layer, stack.target);
+        // Which rects of this target can paint at all — everything not switched
+        // off, unpowered, off the bus or behind a pulled breaker. Empty means
+        // nothing in the target can, and skipping HERE rather than inside the
+        // quad loop is the point: it is the per-LAYER GL that this saves, and
+        // that is spent before the first quad is reached.
+        //
+        // ⚠ Computed with the memo off (this walk is what fills it), then held
+        // for the stack's layers so the per-quad path re-reads no gate, and
+        // dropped again under the last of them — one stack's answer must never
+        // be read by the next, and nothing outside this loop may read it at all.
+        const PanelMask drawable = FxTargetGateMask(stack.target);
+        if (drawable) {
+            gFxDrawGateMask   = drawable;
+            gFxDrawGateMaskOn = true;
+            for (size_t i = 0; i < stack.layers.size(); ++i) {
+                const FxLayer& layer = stack.layers[i];
+                // ⚠ The LAYER's own scope, after the stack's and before anything
+                // else — a layer scoped to another family is not dimmed to
+                // nothing here, it is not part of this cockpit's look at all, and
+                // nothing below may run for it. It NARROWS: this loop is only
+                // reached on a stack the aircraft already passed.
+                if (!FxLayerFamilyAllows(layer)) continue;
+                // The opacity test moved INTO DrawFxLayer, which is the only place
+                // that knows the day-blended value — see the note there.
+                if (layer.enabled) DrawFxLayer(layer, stack.target);
+            }
+            gFxDrawGateMaskOn = false;
         }
         gFxDrawStack = nullptr;
     }
 
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, savedEnv);
     PopBlendFunc();
+    FxForgetBlendState();                  // the state is X-Plane's again
     FxValueCacheEnd();                     // the Dev panes read live again
+    gFxPassRects = nullptr;                // and read the resolution live again
     gFxAlpha = 1.0f;
     gFxTile  = 1.0f;
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -6476,6 +7273,18 @@ static void DrawPanelFx() {
 // FX compositor, and — in a dev build only — the probe. Reading it top to bottom,
 // everything before the `#if` runs in a release `.xpl`.
 static int PanelPassDraw(XPLMDrawingPhase, int, void* refcon) {
+    // ⚠ ABOVE EVERYTHING, including the render-type read: on any aircraft that is
+    // not a ToLiss this callback costs one bool test and touches no GL at all.
+    // It covers the probe as well as the compositor, deliberately — the probe
+    // paints from the same A3xx rect table, so on another cockpit its magenta is
+    // the same bug with a dev build's name on it.
+    //
+    // The callback stays REGISTERED rather than being unregistered per aircraft:
+    // ReseatPanelPass early-returns when nothing is registered, so a pass torn
+    // down for a Cessna would never come back for the ToLiss loaded after it —
+    // a silent, whole-session loss of the effect, traded for a branch per frame.
+    if (!gIsToLiss) return 1;
+
     const int slot = (int)(intptr_t)refcon;
 
     // Record which passes actually run. 0 = 2-d panel, 1 = 3-d non-lit,
@@ -7329,10 +8138,38 @@ static const int kDbgWireOrder[kDbgParamCount] = { 0, 1, 2, 3, 4, 8, 5, 6, 7 };
 // vector round trip loses yaw at the poles, so editing pitch through 90 degrees
 // would silently reset yaw; and an angle pair cannot express a non-unit vector,
 // which is the bug class that made the interior's cones inert.
+// One profile branch of a READ-ONLY light. A shipping OBJ emits the same lamp
+// once per look, each copy behind an ANIM_hide on the category dataref, so
+// "what colour is the map spot" has as many answers as the category has values
+// and only one of them is on screen. The info manifest carries them all.
+//
+// ⚠ THE POSITION IN THIS LIST IS THE DATAREF VALUE. variants[2] is what draws
+// when ToLissPhoton/interior/<category> reads 2 — the same contract
+// build_objs.branch_gate emits the gates from — so nothing matches on the
+// profile NAME, which is carried for display only.
+struct DbgVariant {
+    std::string profile;                 // int_old | int_new | int_led, for the label
+    float       rgb[3] = { 0.0f, 0.0f, 0.0f };
+    float       alpha = 1.0f, size = 1.0f, cone = 1.0f;
+    int         index = 0;               // the rheostat slot can be profile-conditioned
+};
+
 struct DbgLight {
     int         n = 0;
     std::string name, fixture, category, cls, source;
     int         index = 0;
+    // ⚠ READ-ONLY LIGHTS ARE A DIFFERENT THING IN THE SAME LIST. They come from
+    // an INFO manifest — the metadata a PLAIN build drops beside the installable
+    // OBJ — so their values are what that OBJ bakes and NOTHING can move them:
+    // the lights bind their real datarefs, not ToLissPhoton/debug/light/*. The
+    // flag is per-light rather than per-session because the two debug-capable
+    // targets are built independently, so an interior tuned with --debug can sit
+    // beside read-only screens. Everything that WRITES has to ask (the editor
+    // disables its knobs, the tuning file skips them) — a knob that silently
+    // does nothing is the exact failure this whole tab exists to avoid.
+    bool        readOnly = false;
+    std::vector<DbgVariant> variants;    // read-only lights only; see DbgVariant
+    int         shown = 0;               // which variant is in v[] right now
     // >0 marks the SIMPLIFIED (`optimize: boost <f>`) copy of a main panel
     // flood: v[4] holds the authored UNBOOSTED size and the live size is
     // v[4] x gDbgFloodBoost, so one knob drives every simplified flood at once.
@@ -7362,6 +8199,20 @@ static std::string gDbgTarget;           // "cockpit" | "screens"
 static std::string gDbgNote;             // last thing that happened
 static bool  gDbgPosTunable = false;
 static bool  gDbgScanned    = false;     // have we looked for a manifest yet
+// No TUNABLE light in this session — every manifest found was an info one, so
+// the tab is an inspector. Separate from the per-light flag: this is what hides
+// the toolbar of things that only mean something to a debug OBJ (isolate, mark,
+// the slot probe, the markers, Save tuning), all of which drive datarefs a
+// shipping OBJ does not bind.
+static bool  gDbgReadOnly   = false;
+// Which profile branch the read-only view shows: -1 follows the live category
+// dataref, >= 0 pins one so the eras can be compared without touching the
+// aircraft's actual setting.
+static int   gDbgVariantPreview = -1;
+// Branch labels for that picker, taken from the light with the most variants —
+// the manifest's own profile names, which is the vocabulary of the .phdsl the
+// reader is about to go and edit.
+static std::vector<std::string> gDbgVariantLabels;
 static int   gDbgMarkerDots = 0;         // 0 = this OBJ has no markers baked in
 static int   gDbgSel       = -1;
 static bool  gDbgIsolate   = false;      // black out everything but the selection
@@ -7729,11 +8580,159 @@ static void  WriteDbgCompareFloat(void*, float v)  { gDbgCompare = v >= 0.5f ? 1
 // merged into one list (2026-08-09; before the bases, both numbered from 0 and
 // the newest manifest won). A per-slot collision can now only come from a stale
 // pre-base OBJ; the duplicate-slot log below still catches it.
+// Which branch of a read-only light is actually DRAWING right now.
+//
+// ⚠ THE CATEGORY DATAREF'S VALUE IS THE BRANCH INDEX. That is not an assumption
+// about this manifest, it is the contract the OBJ's own gates are generated
+// from (build_objs.branch_gate hides branch i for every value that is not i),
+// so indexing the list directly is the SAME rule the renderer follows. Matching
+// on profile names instead would put a third spelling of `int_led` in a third
+// file, and this project has already been bitten by a light identified by its
+// name rather than by what drives it.
+static int DbgLiveBranch(const DbgLight& l) {
+    if (l.category.empty()) return 0;      // screens, and any `profile:`-fixed fixture
+    for (int i = 0; i < NINT; ++i)
+        if (l.category == kIntCategories[i].key) return gIntValues[i];
+    return 0;
+}
+
+// Copy the live (or pinned) branch's values into the working array, for every
+// read-only light. Cheap enough to run per frame, which is what keeps the
+// numbers on screen honest when the profile is changed from the Cockpit tab
+// while the Lights tab is open.
+static void DbgApplyVariants() {
+    for (size_t i = 0; i < gDbgLights.size(); ++i) {
+        DbgLight& l = gDbgLights[i];
+        if (!l.readOnly || l.variants.empty()) continue;
+        int want = (gDbgVariantPreview >= 0) ? gDbgVariantPreview : DbgLiveBranch(l);
+        if (want < 0) want = 0;
+        if (want >= (int)l.variants.size()) want = (int)l.variants.size() - 1;
+        const DbgVariant& v = l.variants[(size_t)want];
+        l.shown = want;
+        l.index = v.index;
+        for (int k = 0; k < 3; ++k) l.v[k] = v.rgb[k];
+        l.v[3] = v.alpha;
+        l.v[4] = v.size;
+        l.v[8] = v.cone;
+        // ⚠ base[] tracks v[], so a read-only light can never read as EDITED.
+        // Switching branch changes what is DRAWN, not what is authored, and the
+        // tuning file's dirty check and edit count must both stay blind to it —
+        // otherwise merely looking at a light would offer to save it.
+        for (int k = 0; k < kDbgParamCount; ++k) l.base[k] = l.v[k];
+    }
+}
+
+// Parse ONE manifest into gDbgLights, merged with whatever is there already.
+// `readOnly` says which kind was found: a `--debug` build's manifest describes
+// lights bound to ToLissPhoton/debug/light/*, an info manifest describes the
+// installable OBJ's own baked values and drives nothing at all.
+static bool DbgReadManifest(const fs::path& p, const char* label, bool readOnly) {
+    std::error_code ec;
+    if (!fs::exists(p, ec)) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) { Log("light editor: manifest unreadable: " + p.string()); return false; }
+    std::stringstream ss; ss << f.rdbuf();
+    json::Value root;
+    json::Parser parser(ss.str());
+    if (!parser.value(root) || root.type != json::Value::Obj) {
+        Log("light editor: could not parse " + p.string());
+        return false;
+    }
+    if (!gDbgManifest.empty()) gDbgManifest += " + ";
+    gDbgManifest += p.filename().string();
+    if (!gDbgTarget.empty()) gDbgTarget += "+";
+    gDbgTarget += label;
+
+    bool posTunable = false;
+    if (const json::Value* v = root.find("pos_tunable")) posTunable = v->i != 0;
+    gDbgPosTunable = gDbgPosTunable || posTunable;
+    int markerDots = 0;
+    if (const json::Value* v = root.find("marker_dots")) markerDots = (int)v->i;
+    if (markerDots > 0) {
+        if (gDbgMarkerDots == 0) gDbgMarkerDots = markerDots;
+        else if (gDbgMarkerDots != markerDots)
+            Log("light editor: the two manifests disagree on marker_dots ("
+                + std::to_string(gDbgMarkerDots) + " vs "
+                + std::to_string(markerDots) + ") - the marker array is strided "
+                "by the first, so the other OBJ's markers land on the wrong "
+                "lights. Rebuild both debug OBJs from one tree.");
+    }
+
+    const json::Value* lights = root.find("lights");
+    if (!lights || lights->type != json::Value::Arr) return true;
+    for (size_t i = 0; i < lights->arr.size(); ++i) {
+        const json::Value& e = lights->arr[i];
+        if (e.type != json::Value::Obj) continue;
+        DbgLight l;
+        l.n = (int)gDbgLights.size();
+        l.posTunable = posTunable;
+        l.readOnly = readOnly;
+        if (const json::Value* v = e.find("n"))        l.n = (int)v->i;
+        if (const json::Value* v = e.find("name"))     l.name = v->s;
+        if (const json::Value* v = e.find("fixture"))  l.fixture = v->s;
+        if (const json::Value* v = e.find("category")) l.category = v->s;
+        if (const json::Value* v = e.find("class"))    l.cls = v->s;
+        if (const json::Value* v = e.find("source"))   l.source = v->s;
+        if (const json::Value* v = e.find("index"))    l.index = (int)v->i;
+        if (const json::Value* v = e.find("boost"))    l.boost = (float)v->num();
+        if (l.boost > 0.0f) gDbgFloodBoostSeed = l.boost;
+        if (const json::Value* v = e.find("pos"))
+            for (int k = 0; k < 3; ++k)
+                if (const json::Value* c = v->at((size_t)k)) l.pos[k] = (float)c->num();
+        if (const json::Value* v = e.find("rgb"))
+            for (int k = 0; k < 3; ++k)
+                if (const json::Value* c = v->at((size_t)k)) l.v[k] = (float)c->num();
+        l.v[3] = 1.0f;                                // alpha: the rheostat scales it
+        if (const json::Value* v = e.find("size")) l.v[4] = (float)v->num(1.0);
+        if (const json::Value* v = e.find("dir"))
+            for (int k = 0; k < 3; ++k)
+                if (const json::Value* c = v->at((size_t)k)) l.v[5 + k] = (float)c->num();
+        l.v[8] = 1.0f;
+        if (const json::Value* v = e.find("cone")) l.v[8] = (float)v->num(1.0);
+        // An info row keeps rgb/alpha/size/cone per PROFILE BRANCH instead of
+        // once, because a shipping OBJ emits the light once per look. The flat
+        // fields read above stay the fallback: a manifest with no `variants`
+        // (or a light with an empty list) still shows something.
+        if (const json::Value* vs = e.find("variants")) {
+            if (vs->type == json::Value::Arr) {
+                for (size_t k = 0; k < vs->arr.size(); ++k) {
+                    const json::Value& ve = vs->arr[k];
+                    if (ve.type != json::Value::Obj) continue;
+                    DbgVariant dv;
+                    if (const json::Value* v = ve.find("profile")) dv.profile = v->s;
+                    if (const json::Value* v = ve.find("rgb"))
+                        for (int q = 0; q < 3; ++q)
+                            if (const json::Value* c = v->at((size_t)q))
+                                dv.rgb[q] = (float)c->num();
+                    if (const json::Value* v = ve.find("alpha")) dv.alpha = (float)v->num(1.0);
+                    if (const json::Value* v = ve.find("size"))  dv.size  = (float)v->num(1.0);
+                    if (const json::Value* v = ve.find("cone"))  dv.cone  = (float)v->num(1.0);
+                    if (const json::Value* v = ve.find("index")) dv.index = (int)v->i;
+                    l.variants.push_back(dv);
+                }
+            }
+            if (l.variants.size() > gDbgVariantLabels.size()) {
+                gDbgVariantLabels.clear();
+                for (size_t k = 0; k < l.variants.size(); ++k)
+                    gDbgVariantLabels.push_back(l.variants[k].profile);
+            }
+        }
+
+        DbgDirToAim(&l.v[5], &l.pitch, &l.yaw);
+        l.basePitch = l.pitch; l.baseYaw = l.yaw;
+        for (int k = 0; k < kDbgParamCount; ++k) l.base[k] = l.v[k];
+        gDbgLights.push_back(l);
+    }
+    return true;
+}
+
 static void DbgLoadManifest() {
     gDbgLights.clear();
     gDbgManifest.clear();
     gDbgTarget.clear();
+    gDbgVariantLabels.clear();
     gDbgPosTunable = false;
+    gDbgReadOnly = false;
     gDbgMarkerDots = 0;
     gDbgMarkStride = kDbgMarkDots;
     gDbgSel = -1;
@@ -7749,83 +8748,28 @@ static void DbgLoadManifest() {
     if (!path[0]) { gDbgNote = "no aircraft loaded"; return; }
     const fs::path objs = fs::path(path).parent_path() / "objects";
 
-    struct Candidate { const char* label; const char* file; };
+    struct Candidate { const char* label; const char* debugFile; const char* infoFile; };
     static const Candidate kCandidates[] = {
-        { "cockpit", "lights_inn.debug.json" },
-        { "screens", "lights_screens.debug.json" },
+        { "cockpit", "lights_inn.debug.json",     "lights_inn.info.json" },
+        { "screens", "lights_screens.debug.json", "lights_screens.info.json" },
     };
-    for (int c = 0; c < 2; ++c) {
-        const fs::path p = objs / kCandidates[c].file;
-        std::error_code ec;
-        if (!fs::exists(p, ec)) continue;
-        std::ifstream f(p, std::ios::binary);
-        if (!f) { Log("light editor: manifest unreadable: " + p.string()); continue; }
-        std::stringstream ss; ss << f.rdbuf();
-        json::Value root;
-        json::Parser parser(ss.str());
-        if (!parser.value(root) || root.type != json::Value::Obj) {
-            Log("light editor: could not parse " + p.string());
-            continue;
-        }
-        if (!gDbgManifest.empty()) gDbgManifest += " + ";
-        gDbgManifest += p.filename().string();
-        if (!gDbgTarget.empty()) gDbgTarget += "+";
-        gDbgTarget += kCandidates[c].label;
-
-        bool posTunable = false;
-        if (const json::Value* v = root.find("pos_tunable")) posTunable = v->i != 0;
-        gDbgPosTunable = gDbgPosTunable || posTunable;
-        int markerDots = 0;
-        if (const json::Value* v = root.find("marker_dots")) markerDots = (int)v->i;
-        if (markerDots > 0) {
-            if (gDbgMarkerDots == 0) gDbgMarkerDots = markerDots;
-            else if (gDbgMarkerDots != markerDots)
-                Log("light editor: the two manifests disagree on marker_dots ("
-                    + std::to_string(gDbgMarkerDots) + " vs "
-                    + std::to_string(markerDots) + ") - the marker array is strided "
-                    "by the first, so the other OBJ's markers land on the wrong "
-                    "lights. Rebuild both debug OBJs from one tree.");
-        }
-
-        const json::Value* lights = root.find("lights");
-        if (!lights || lights->type != json::Value::Arr) continue;
-        for (size_t i = 0; i < lights->arr.size(); ++i) {
-            const json::Value& e = lights->arr[i];
-            if (e.type != json::Value::Obj) continue;
-            DbgLight l;
-            l.n = (int)gDbgLights.size();
-            l.posTunable = posTunable;
-            if (const json::Value* v = e.find("n"))        l.n = (int)v->i;
-            if (const json::Value* v = e.find("name"))     l.name = v->s;
-            if (const json::Value* v = e.find("fixture"))  l.fixture = v->s;
-            if (const json::Value* v = e.find("category")) l.category = v->s;
-            if (const json::Value* v = e.find("class"))    l.cls = v->s;
-            if (const json::Value* v = e.find("source"))   l.source = v->s;
-            if (const json::Value* v = e.find("index"))    l.index = (int)v->i;
-            if (const json::Value* v = e.find("boost"))    l.boost = (float)v->num();
-            if (l.boost > 0.0f) gDbgFloodBoostSeed = l.boost;
-            if (const json::Value* v = e.find("pos"))
-                for (int k = 0; k < 3; ++k)
-                    if (const json::Value* c = v->at((size_t)k)) l.pos[k] = (float)c->num();
-            if (const json::Value* v = e.find("rgb"))
-                for (int k = 0; k < 3; ++k)
-                    if (const json::Value* c = v->at((size_t)k)) l.v[k] = (float)c->num();
-            l.v[3] = 1.0f;                                // alpha: the rheostat scales it
-            if (const json::Value* v = e.find("size")) l.v[4] = (float)v->num(1.0);
-            if (const json::Value* v = e.find("dir"))
-                for (int k = 0; k < 3; ++k)
-                    if (const json::Value* c = v->at((size_t)k)) l.v[5 + k] = (float)c->num();
-            l.v[8] = 1.0f;
-            if (const json::Value* v = e.find("cone")) l.v[8] = (float)v->num(1.0);
-
-            DbgDirToAim(&l.v[5], &l.pitch, &l.yaw);
-            l.basePitch = l.pitch; l.baseYaw = l.yaw;
-            for (int k = 0; k < kDbgParamCount; ++k) l.base[k] = l.v[k];
-            gDbgLights.push_back(l);
-        }
-    }
+    // ⚠ TUNABLE FIRST, AND PER TARGET. build_objs.py writes exactly one manifest
+    // per target and deletes the other, so which file is present IS the answer
+    // to "can this OBJ be driven" — there is nothing to infer. Falling back per
+    // target rather than per session is what lets an interior built --debug sit
+    // beside stock screens: the interior's knobs work, the screens' are shown
+    // disabled, and neither is quietly the other.
+    bool haveDebug[2] = { false, false };
+    for (int c = 0; c < 2; ++c)
+        haveDebug[c] = DbgReadManifest(objs / kCandidates[c].debugFile,
+                                       kCandidates[c].label, false);
+    for (int c = 0; c < 2; ++c)
+        if (!haveDebug[c])
+            DbgReadManifest(objs / kCandidates[c].infoFile,
+                            kCandidates[c].label, true);
+    gDbgReadOnly = !haveDebug[0] && !haveDebug[1];
     if (gDbgManifest.empty()) {
-        gDbgNote = "no debug OBJ installed";
+        gDbgNote = "no light manifest installed";
         return;
     }
     gDbgFloodBoost = gDbgFloodBoostSeed;
@@ -7856,13 +8800,24 @@ static void DbgLoadManifest() {
     }
     if (!gDbgLights.empty()) gDbgSel = gDbgLights[0].n;
     gDbgNote = std::to_string(gDbgLights.size()) + " lights from " + gDbgManifest;
-    Log("light editor: " + gDbgNote + (gDbgPosTunable ? " (position tunable)" : ""));
+    Log("light editor: " + gDbgNote + (gDbgPosTunable ? " (position tunable)" : "")
+        + (gDbgReadOnly ? " - READ-ONLY (no debug OBJ; values are what the "
+                          "installed OBJ bakes)" : ""));
+    // Seed v[] from the branch that is drawing, before anything reads it.
+    DbgApplyVariants();
     // ⚠ LAST, and only here. A saved session is a set of EDITS, so every light
     // has to be seeded from the manifest first — those baked values are what the
     // records are checked against before being applied. It also overwrites
     // gDbgNote, deliberately: "restored 6 tuned lights" is the more surprising
     // half of what just happened.
-    DbgLoadTuning();
+    //
+    // ⚠ NOT in a purely read-only session. A tuning file records edits made
+    // against a DEBUG OBJ; the OBJ installed now bakes the authored values and
+    // ignores those datarefs, so applying the records would put numbers on
+    // screen that nothing in the cockpit is rendering — an inspector that lies
+    // is worse than no inspector. (DbgApplyTuningRecord also skips read-only
+    // lights one by one, which is what covers the mixed case.)
+    if (!gDbgReadOnly) DbgLoadTuning();
 }
 
 // Registered at XPluginStart, before any OBJ loads: an OBJ binds dataref NAMES at
@@ -8516,6 +9471,34 @@ static int PanelTargetByName(const std::string& name) {
 // no-image marker; an empty tail would be indistinguishable from a truncated
 // line. A layer written before images existed simply ends after the opacity, so
 // the two extra reads fail and the defaults (no image, tile 1) stand.
+// One family scope, written. Shared by a target's `family` line and a layer's
+// `lfamily` line — one rule in one place, the writing counterpart of
+// FxFamilyAllows. `what` names the thing in the log and nothing else.
+//
+// ⚠ NOTHING IS WRITTEN FOR AN UNSCOPED MASK, which is what keeps a file whose
+// stacks and layers all paint everywhere byte-identical to what every previous
+// version wrote — the same rule tfollow/day/ramp/lcurve follow.
+//
+// ⚠ An empty NAME LIST would be a bare `family` line, which reads back as a scope
+// naming nothing. The only mask that produces one is kFxFamilyUnrecognized — a
+// scope this build could not parse — so the line is dropped and said out loud
+// rather than written malformed.
+static void FxWriteFamilyLine(std::string& out, const char* key,
+                              unsigned families, const std::string& what) {
+    if (families == kFxFamilyNone) return;
+    const std::string names = FxFamilyMaskNames(families);
+    if (names.empty()) {
+        Log("panel fx: " + what + " had a family scope this build cannot name - "
+            "dropping it from the file rather than writing a line that reads back "
+            "as 'no families'");
+        return;
+    }
+    out += key;
+    out += " ";
+    out += names;
+    out += "\n";
+}
+
 static std::string SerializeFxStacks() {
     std::string out;
     char buf[512];
@@ -8533,6 +9516,11 @@ static std::string SerializeFxStacks() {
         // the global ones. Parsing dispatches on the key alone, and a per-stack
         // line spelled "follow" would be read as the master switch by any file
         // whose lines are ever reordered.  -1 = inherit, and is not written.
+        // ⚠ Written only when the stack is scoped — see FxWriteFamilyLine, which
+        // also carries the layer's `lfamily`.
+        FxWriteFamilyLine(out, "family", gFxStacks[s].families,
+                          std::string("target '")
+                            + PanelTargetName(gFxStacks[s].target) + "'");
         if (gFxStacks[s].follow != kFxInherit) {
             std::snprintf(buf, sizeof(buf), "tfollow %d\n", gFxStacks[s].follow);
             out += buf;
@@ -8590,6 +9578,14 @@ static std::string SerializeFxStacks() {
                 std::snprintf(buf, sizeof(buf), "lfollow %d\n", l.follow);
                 out += buf;
             }
+            // ⚠ `lfamily`, not `family`: parsing dispatches on the key alone, so
+            // a layer's scope spelled the same as its target's would be read as
+            // the TARGET's by any file whose lines are ever reordered — and it
+            // would silently widen the target to whatever the last layer named.
+            // Same reason lfollow/lcurve carry the l.
+            FxWriteFamilyLine(out, "lfamily", l.families,
+                              std::string("a layer of '")
+                                + PanelTargetName(gFxStacks[s].target) + "'");
             // ⚠ The COUNT comes first and the pairs follow on the same line. A
             // curve is one thing - a knot on a line of its own would be a shape
             // that can be truncated into a different, perfectly valid shape by
@@ -8611,6 +9607,38 @@ static std::string SerializeFxStacks() {
         }
     }
     return out;
+}
+
+// The rest of a `family` / `lfamily` line, as a mask. Shared by both keys for the
+// same reason FxWriteFamilyLine is: two readers of one syntax drift, and the way
+// this one would drift is a layer scope that fails OPEN where the target scope
+// fails closed.
+//
+// ⚠ ASSEMBLED IN A LOCAL AND RETURNED WHOLE, so the caller adopts it in one
+// assignment. A mask built up in place as the tokens are read would leave a scope
+// set to whatever prefix parsed if a name were misspelled halfway along — a
+// NARROWER scope than was authored, silently.
+//
+// ⚠ An all-unknown line comes back as kFxFamilyUnrecognized: scoped to NOTHING
+// rather than falling back to unrestricted. Both readings are defensible and this
+// one fails closed — the alternative quietly restores exactly the
+// paint-on-the-wrong-cockpit behavior the line was added to stop, and does it on
+// the aircraft the author cannot see. `unrecognized` is reported so each caller
+// can name what it was reading; a typo in a SHIPPED file is caught at build time
+// anyway, by a test that walks panelfx.txt for names the plugin does not know.
+static unsigned FxReadFamilyList(std::istream& in, bool* unrecognized) {
+    unsigned mask = kFxFamilyNone;
+    std::string name;
+    int unknown = 0;
+    while (in >> name) {
+        const unsigned bit = FxFamilyBitForName(name);
+        if (bit) mask |= bit;
+        else { ++unknown; Log("panel fx: unknown family '" + name + "'"); }
+    }
+    const bool bad = (mask == kFxFamilyNone && unknown > 0);
+    if (bad) mask = kFxFamilyUnrecognized;       // scoped to nothing, not to all
+    if (unrecognized) *unrecognized = bad;
+    return mask;
 }
 
 // Replaces the whole stack list. `dropped` counts targets whose name no longer
@@ -8642,11 +9670,27 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
             in >> gFxAmbientLo >> gFxAmbientHi;
             float tau = gFxAmbientTau;
             if (in >> tau) gFxAmbientTau = tau;
+        } else if (key == "ambientsun") {
+            // The sun gate's two ends, in degrees of sun pitch. Into locals,
+            // then adopted whole — the ramp rule: operator>> zeroes its target
+            // on failure, and a short line would otherwise leave one end of
+            // the gate at 0 degrees.
+            float lo = 0.0f, hi = 0.0f;
+            if (in >> lo >> hi) { gFxAmbientSunLo = lo; gFxAmbientSunHi = hi; }
         } else if (key == "ambientref") {
             FxDriver d;
             in >> d.dref >> d.index;
             if (d.dref == "-") d.dref.clear();        // the explicit "no override"
             gFxAmbientSource = d;
+        } else if (key == "family") {
+            if (gFxStacks.empty()) continue;          // a scope before any target
+            bool bad = false;
+            gFxStacks.back().families = FxReadFamilyList(in, &bad);
+            if (bad)
+                Log("panel fx: target '"
+                    + std::string(PanelTargetName(gFxStacks.back().target))
+                    + "' names no family this build knows - it will not draw on "
+                      "ANY aircraft until the line is fixed");
         } else if (key == "tfollow" || key == "tcurve") {
             if (gFxStacks.empty()) continue;          // a switch before any target
             int v = kFxInherit; in >> v;
@@ -8654,7 +9698,7 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
             if (key == "tfollow") gFxStacks.back().follow = tri;
             else                  gFxStacks.back().curve  = tri;
         } else if (key == "day" || key == "ramp" || key == "lfollow"
-                   || key == "lcurve") {
+                   || key == "lcurve" || key == "lfamily") {
             // ⚠ These attach to the LAST LAYER, not the last target — they are
             // written directly under the layer line they belong to. A file where
             // one appears before any layer is malformed rather than ambiguous, so
@@ -8679,6 +9723,16 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
                     Log("panel fx: ramp line needs three floats - the layer keeps "
                         "one color across the knob");
                 }
+            } else if (key == "lfamily") {
+                // Adopted in ONE assignment out of the shared reader — see
+                // FxReadFamilyList for why the mask is never built up in place.
+                bool bad = false;
+                l.families = FxReadFamilyList(in, &bad);
+                if (bad)
+                    Log("panel fx: a layer of '"
+                        + std::string(PanelTargetName(gFxStacks.back().target))
+                        + "' names no family this build knows - it will not draw "
+                          "on ANY aircraft until the line is fixed");
             } else if (key == "lcurve") {
                 // ⚠ All or nothing. A table read into the layer as the stream
                 // fails would be a DIFFERENT SHAPE that is still perfectly
@@ -8779,6 +9833,12 @@ static void SavePanelFx() {
     f << "# target <name>\n";
     f << "# bright <dataref> <index> <lo> <hi> <floor>   (optional, per target)\n";
     f << "# power  <dataref> <index> <above>             (optional, per target)\n";
+    f << "# family <a3xx|a330> [...]     (optional, per target; absent = every\n";
+    f << "#                               aircraft. Names which cockpits this\n";
+    f << "#                               target may paint on -- the rect table is\n";
+    f << "#                               A3xx-derived and a look tuned to A3xx\n";
+    f << "#                               artwork is wrong on an A330 even where\n";
+    f << "#                               the rect lands.)\n";
     f << "# tfollow 0|1  /  tcurve 0|1   (optional, per target; absent = inherit)\n";
     f << "# layer <blend> <enabled> <r> <g> <b> <opacity> <tile> <image|->\n";
     f << "#   day <r> <g> <b> <opacity>  (optional, per LAYER: the daylight half)\n";
@@ -8786,6 +9846,9 @@ static void SavePanelFx() {
     f << "#                               dark knob; the layer's own color is\n";
     f << "#                               the color at a full one)\n";
     f << "#   lfollow 0|1                (optional, per LAYER; absent = inherit)\n";
+    f << "#   lfamily <a3xx|a330> [...]  (optional, per LAYER: the same scope as\n";
+    f << "#                               `family` above, one level in. Narrows\n";
+    f << "#                               the target's -- it cannot widen it.)\n";
     f << "#   lcurve <n> <x0> <y0> ...   (optional, per LAYER: its own response\n";
     f << "#                               curve, overriding tcurve for that layer)\n";
     f << "enabled " << (gFxEnabled ? 1 : 0) << "\n";
@@ -8797,6 +9860,10 @@ static void SavePanelFx() {
     char amb[128];
     std::snprintf(amb, sizeof(amb), "ambient %.4f %.4f %.4f\n",
                   gFxAmbientLo, gFxAmbientHi, gFxAmbientTau);
+    f << amb;
+    // The sun gate, always written for the same reason as the line above.
+    std::snprintf(amb, sizeof(amb), "ambientsun %.2f %.2f\n",
+                  gFxAmbientSunLo, gFxAmbientSunHi);
     f << amb;
     if (gFxAmbientSource.set())
         f << "ambientref " << gFxAmbientSource.dref << " "
@@ -9060,6 +10127,13 @@ static void LogPanelFx() {
         + (gFxFollowBrightness ? "ON" : "off (nothing below is dimmed OR gated)")
         + ", response curve = " + (gFxCurve ? "ON" : "off (raw dataref)")
         + "; each target may override, resolved per target below");
+    // ⚠ Which cockpit this dump was taken in. Every family scope below is read
+    // against it, so a dump without it cannot be read afterwards: a target that
+    // paints nothing and a target scoped elsewhere are the same page of text.
+    Log(std::string("panel fx: aircraft family = ")
+        + (gFxFamily == kFxFamilyNone ? "unknown (scoped targets and layers draw "
+                                        "nothing here)"
+                                      : FxFamilyMaskNames(gFxFamily)));
     const std::vector<int> order = FxDrawOrder();
     for (size_t n = 0; n < order.size(); ++n) {
         const size_t s = (size_t)order[n];
@@ -9076,11 +10150,16 @@ static void LogPanelFx() {
             + "  [follow " + (follows ? "on" : "OFF - full strength when powered")
             + (gFxStacks[s].follow == kFxInherit ? " (inherited)" : " (target)")
             + ", curve " + (curves ? "on" : "off - linear")
-            + (gFxStacks[s].curve == kFxInherit ? " (inherited)" : " (target)") + "]");
+            + (gFxStacks[s].curve == kFxInherit ? " (inherited)" : " (target)")
+            + (gFxStacks[s].families == kFxFamilyNone
+                   ? ""
+                   : ", aircraft " + FxFamilyMaskNames(gFxStacks[s].families)
+                     + (FxStackFamilyAllows(gFxStacks[s]) ? "" : " - NOT DRAWN HERE"))
+            + "]");
         // The live factor per member rect, because a stack that looks wrong in
         // the cockpit is at least as likely to be a mis-guessed dataref as a
         // mis-set color, and the two are indistinguishable from a screenshot.
-        if (!gRectDriversBuilt) BuildRectDrivers();
+        EnsureRectDrivers();
         const PanelMask mask = PanelTargetMask(gFxStacks[s].target);
         for (int i = 0; i < kPanelRectCount; ++i) {
             if (!(mask & ((PanelMask)1 << i))) continue;
@@ -9095,8 +10174,13 @@ static void LogPanelFx() {
             // assume", and those need opposite fixes.
             char buf[768];
             std::snprintf(buf, sizeof(buf),
-                          "panel fx:   %-14s x%.2f  bright=%s  power=%s  bus=%s  cb=%s",
-                          kPanelRectsHi[i].name, f,
+                          "panel fx:   %-14s%s x%.2f  bright=%s  power=%s  bus=%s  cb=%s",
+                          kPanelRectsHi[i].name,
+                          // ⚠ Named here too. This row reads x0.00 with four
+                          // perfectly healthy drivers beside it, and a dump is
+                          // read away from the aircraft that produced it.
+                          ((gRectsHere >> i) & 1) ? "" : " [not on this aircraft]",
+                          f,
                           FxDriverState(br, false, shape).c_str(),
                           FxDriverState(pw, true, shape).c_str(),
                           // The bus and breaker are never a stack's to override,
@@ -9114,6 +10198,12 @@ static void LogPanelFx() {
                           l.color[0], l.color[1], l.color[2], l.opacity,
                           l.tile, l.tex.empty() ? "-" : l.tex.c_str());
             Log(buf);
+            // ⚠ Same argument as the ramp and the curve, one step earlier: a
+            // scoped layer is invisible in the line above, and "this layer is
+            // missing" is exactly what a scope produces on the other family.
+            if (l.families != kFxFamilyNone)
+                Log("panel fx:     aircraft " + FxFamilyMaskNames(l.families)
+                    + " only" + (FxLayerFamilyAllows(l) ? "" : " - NOT DRAWN HERE"));
             // Same argument as the curve below: a ramp is invisible in the layer
             // line above, and "wrong at one end of the knob" is precisely the
             // report a ramp explains.
@@ -9569,8 +10659,85 @@ static bool FxTriCombo(const char* label, int& tri, bool inherited,
     return changed;
 }
 
+// Which aircraft this target is allowed to paint on: one checkbox per family plus
+// the implicit "all of them" when none is ticked.
+//
+// ⚠ Its own row above the sources, not a third entry in the tri-state pair below.
+// The two down there answer "how does this face behave"; this one answers "is this
+// face even here", and reading it as a behavior is how someone talks themselves
+// into scoping a look instead of fixing it. The live warning underneath is the
+// half that matters: a stack that is not painting because it is scoped elsewhere
+// is otherwise indistinguishable from one whose drivers are all reading zero.
+// ⚠ ONE row helper for BOTH levels (2026-08-13). A stack and a layer carry the
+// same mask and it means the same thing, so they get the same control; a second
+// copy for the layer would be the pane where "no boxes ticked" quietly came to
+// mean something else. `skipped` is the tooltip on the live warning and is the
+// only text that differs — the two are skipped at different points in the pass
+// and a reader chasing "why is nothing painting" needs to know which.
+//
+// Returns true when the mask changed; the caller decides what a change costs
+// (the target pane saves, the layer pane journals it as an edit).
+static bool FxFamilyRow(const char* id, unsigned& families, const char* help,
+                        const char* skipped) {
+    ImGui::PushID(id);                       // the row helper rule — scope the row
+    ImGui::TextUnformatted("Aircraft");
+    if (ImGui::IsItemHovered()) UiTooltip("%s", help);
+    unsigned mask = families;
+    bool changed = false;
+    for (int i = 0; i < kFxFamilyCount; ++i) {
+        ImGui::SameLine();
+        bool on = (mask & kFxFamilyNames[i].bit) != 0;
+        if (ImGui::Checkbox(kFxFamilyNames[i].name, &on)) {
+            if (on) mask |= kFxFamilyNames[i].bit;
+            else    mask &= ~kFxFamilyNames[i].bit;
+            changed = true;
+        }
+    }
+    // ⚠ Every box unticked means UNRESTRICTED, and that is the honest reading of
+    // the control: "no aircraft named" is how the absent line is spelled.
+    // Clearing to kFxFamilyUnrecognized instead would let the editor author
+    // something that draws nowhere, which nothing in the pane could explain.
+    if (changed) families = mask;
+    ImGui::SameLine();
+    if (families == kFxFamilyNone) {
+        ImGui::TextDisabled("(every aircraft)");
+    } else if (!FxFamilyAllows(families)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "- NOT drawn on this aircraft");
+        if (ImGui::IsItemHovered())
+            UiTooltip("The loaded aircraft resolved to family \"%s\", which this "
+                      "does not name. %s",
+                      gFxFamily == kFxFamilyNone
+                          ? "unknown" : FxFamilyMaskNames(gFxFamily).c_str(),
+                      skipped);
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+static void FxFamilyEditor(FxStack& stack) {
+    if (FxFamilyRow("family", stack.families,
+                    "Which cockpits this target may paint on. Nothing ticked = every "
+                    "aircraft, which is what every target did before this existed.\n"
+                    "The rect table is derived from the A3xx panel. ToLiss reuses one "
+                    "atlas layout across the fleet, so the six DUs, the ISIS and both "
+                    "DCDUs land on an A330 too — but a look tuned to A3xx artwork can "
+                    "still be wrong there even when the rect is right, and the "
+                    "overhead readouts have no A330 counterpart at all.\n"
+                    "A single layer that is only right on one family does not need a "
+                    "scope here — each layer carries one of its own.",
+                    "The whole target is skipped before any of its layers are "
+                    "drawn, so nothing below is being applied."))
+        SavePanelFx();
+}
+
 static void BuildFxSourcePane(FxStack& stack) {
-    if (!gRectDriversBuilt) BuildRectDrivers();
+    EnsureRectDrivers();
+    // ⚠ ABOVE the collapsing header, not inside it. The sources fold away because
+    // they are set once and then ignored; a scope that is silently excluding the
+    // aircraft you are looking at must not be behind a fold, or the pane answers
+    // "why is nothing painting" with a closed section.
+    FxFamilyEditor(stack);
     if (!ImGui::CollapsingHeader("Brightness / power sources")) return;
 
     ImGui::Indent(8.0f);
@@ -9689,6 +10856,13 @@ static void BuildFxSourcePane(FxStack& stack) {
         "tint comes up and down with the knob. POWER asks whether the unit is on "
         "at all, and it is a hard on/off - not a dim. Both are looked up PER FACE "
         "in the built-in table, which is why a group can follow six knobs at once.");
+    // Said here because the table below is the one place it shows: a row whose
+    // dataref name is not the one in the source table is not a bug, it is the
+    // A330's row. Without this the reader's first move is to grep for a name that
+    // is right there in plugin.cpp under a family scope.
+    ImGui::TextDisabled("Rows marked for one aircraft family override the shared "
+                        "one - the FCU's integral lighting is a different dataref "
+                        "on an A330, so this table can change with the aeroplane.");
     if (overridden)
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
                            "This target overrides the built-in %s below, so every "
@@ -9782,8 +10956,16 @@ static void BuildFxSourcePane(FxStack& stack) {
             // It also names WHICH switch, because the screen/other split is per
             // RECT: a group target can span both, so "the switch is off" is not
             // answerable for a stack, only for a row.
+            //
+            // ⚠ "Not on this aircraft" is FIRST, matching FxRectGated, and it is
+            // the one cause here that is not a fault: the A330's third MCDU has
+            // no A3xx face, so on an A3xx that row is not a driver problem to go
+            // and fix. Reported as anything else it would send a reader to the
+            // dataref tables for a rect that is behaving perfectly.
             const float userF = FxDisplayUserFactor(i);
-            if (userF <= 0.0f)
+            if (!((gRectsHere >> i) & 1))
+                ImGui::TextColored(kGated, "x0.00 not on this aircraft");
+            else if (userF <= 0.0f)
                 ImGui::TextColored(kGated, "x0.00 Displays: %s off",
                                    PanelRectIsScreen(i) ? "screens" : "other readouts");
             else if (f >= 0.999f) ImGui::TextDisabled("x1.00");
@@ -9865,7 +11047,7 @@ static void BuildFxSourcePane(FxStack& stack) {
 // marker on a six-member group would otherwise be a number pretending to speak
 // for six.
 static bool FxCurveLiveX(FxStack& stack, float* outX, const char** outRect) {
-    if (!gRectDriversBuilt) BuildRectDrivers();
+    EnsureRectDrivers();
     FxDriver* d    = nullptr;
     const char* nm = "override";
     if (stack.bright.set()) {
@@ -10149,6 +11331,41 @@ static bool FxCurveEditor(const char* id, FxCurve& curve,
 static void BuildFxLayerExtrasRow(FxLayer& layer, FxStack& stack,
                                   bool* dirty, std::string* what) {
     ImGui::Indent(24.0f);
+
+    // ---- which aircraft is this layer part of the look on? ------------------
+    // ⚠ FIRST, and on a line of its own, for the same reason the target's copy
+    // is above the sources fold: everything under it is a question about how the
+    // layer behaves, and this one asks whether it is here at all. A layer that is
+    // scoped away and one whose opacity is zero look identical in the cockpit.
+    if (FxFamilyRow("lfamily", layer.families,
+                    "Which cockpits this LAYER is part of the look on. Nothing "
+                    "ticked = every aircraft, which is what every layer written "
+                    "before this reads as.\n"
+                    "This is for the case where two families share a target and "
+                    "differ in one layer - the same rects, the same order, one "
+                    "correction that is only right on one of them. Two stacks "
+                    "cannot say that: a stack IS its target.\n"
+                    "It narrows the target's scope and cannot widen it. A layer "
+                    "naming an aircraft its target excludes draws nowhere.",
+                    "Its target is drawn here; this layer is skipped.")) {
+        *dirty = true; *what = "change layer aircraft scope";
+    }
+
+    // ⚠ Said where it is authored, not left to be discovered in the cockpit. A
+    // layer scoped to a family the TARGET excludes is not a narrower look, it is
+    // a layer that draws on no aircraft at all — and the row above says "NOT
+    // drawn on this aircraft" only about the one that happens to be loaded.
+    if (layer.families != kFxFamilyNone && stack.families != kFxFamilyNone
+        && !(layer.families & stack.families)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
+                           "This layer names no aircraft the target allows - it "
+                           "draws NOWHERE.");
+        UiItemTooltip("The target is scoped to \"%s\" and this layer to \"%s\", "
+                      "and a layer scope narrows rather than widens. Widen the "
+                      "target's scope, or match this one to it.",
+                      FxFamilyMaskNames(stack.families).c_str(),
+                      FxFamilyMaskNames(layer.families).c_str());
+    }
 
     // ---- does this layer follow the brightness knob? ------------------------
     if (FxTriCombo("dims", layer.follow, FxStackFollows(&stack),
@@ -10702,6 +11919,30 @@ static void BuildFxAmbientPane() {
                   "aircraft banks, and every screen in the cockpit would shift "
                   "color with it. 0 disables the smoothing entirely.");
 
+    // The sun gate's two ends. Same row shape as "night at"/"day at", but these
+    // are degrees of sun elevation, not source readings — and the live value
+    // sits beside them for the same reason every driver row shows one: a blend
+    // held at night by the gate reads exactly like a blend that is broken.
+    const float sunGate = FxAmbientSunGate();   // also resolves the ref
+    ImGui::SetNextItemWidth(100.0f);
+    if (ImGui::InputFloat("sun night below", &gFxAmbientSunLo, 0.0f, 0.0f, "%.1f deg")) SavePanelFx();
+    UiItemTooltip("Sun elevation at and below which the blend is held at night, "
+                  "whatever the cockpit light level reads. The light level is "
+                  "computed from the light sources, not from the picture, so a "
+                  "red-heavy dome lamp reads as daylight without this. Set BOTH "
+                  "ends to -90 to hold the gate open (off).");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100.0f);
+    if (ImGui::InputFloat("day above", &gFxAmbientSunHi, 0.0f, 0.0f, "%.1f deg")) SavePanelFx();
+    UiItemTooltip("Sun elevation above which the gate is fully open and the "
+                  "light level alone decides. Between the two ends the gate is "
+                  "a smoothstep; equal ends make it a hard switch.");
+    ImGui::SameLine();
+    if (gFxSunPitchRef)
+        ImGui::TextDisabled("sun %.1f deg -> x%.2f", XPLMGetDataf(gFxSunPitchRef), sunGate);
+    else
+        ImGui::TextDisabled("sun: unresolved (gate open)");
+
     // Which dataref is being read, and the escape hatch to change it. Same shape
     // as the driver editor, and for the same reason: the built-in choice is a
     // reading of ToLiss's binary plus the sim's own documentation, not a measurement.
@@ -10842,7 +12083,7 @@ static std::string gFxDriveRefused;        // names, for the tooltip
 // dim one target's screen while every other target's tint swept without its
 // screen following — which reads as the write being broken.
 static void FxDriveTheAircraft(float t) {
-    if (!gRectDriversBuilt) BuildRectDrivers();
+    EnsureRectDrivers();
 
     XPLMDataRef seenRef[128];
     int         seenIdx[128];
@@ -11010,7 +12251,7 @@ static void BuildFxDrivePane() {
     // pinned, and a slider that visibly does nothing on one face of a group is
     // otherwise indistinguishable from a pin that is not working at all.
     if (gFxSelectedTarget >= 0) {
-        if (!gRectDriversBuilt) BuildRectDrivers();
+        EnsureRectDrivers();
         const int si = FxStackIndex(gFxSelectedTarget);
         FxDriver* over = (si >= 0 && gFxStacks[si].bright.set())
                        ? &gFxStacks[si].bright : nullptr;
@@ -11435,6 +12676,12 @@ static fs::path DbgTuningFilePath() {
 }
 
 static bool DbgLightChanged(const DbgLight& l) {
+    // ⚠ A read-only light is never "changed". Its v[] tracks whichever profile
+    // branch is drawing (DbgApplyVariants keeps base[] equal to it), so this
+    // would be false anyway — but stating it here is what makes the tuning file
+    // structurally unable to record a light nobody can edit, whatever a future
+    // caller does to v[].
+    if (l.readOnly) return false;
     for (int i = 0; i < kDbgParamCount; ++i)
         if (l.v[i] != l.base[i]) return true;
     for (int i = 0; i < 3; ++i)
@@ -11590,6 +12837,11 @@ static void DbgApplyTuningRecord(const DbgTuningRecord& r, int& ok, int& stale, 
     DbgLight* target = nullptr;
     for (size_t i = 0; i < gDbgLights.size(); ++i) {
         DbgLight& l = gDbgLights[i];
+        // ⚠ Read-only lights are not restore targets. In a MIXED session (one
+        // target built --debug, the other not) a record's fixture+name can match
+        // a light from the info manifest, and applying it would show a tuned
+        // value for a light whose OBJ is rendering the authored one.
+        if (l.readOnly) continue;
         if (l.name == r.name && l.fixture == r.fixture) { target = &l; break; }
     }
     if (!target) { ++gone; return; }
@@ -11766,7 +13018,25 @@ static void BuildLightEditor(DbgLight& l) {
                       "AUTHORED size; the shared multiplier scales it live and "
                       "writes back as `optimize: boost <f>` in the DSL.");
     }
-    if (l.source == "du") {
+    // Which of the OBJ's profile branches these numbers came from, and whether
+    // it is the one on screen. Said HERE rather than only on the toolbar,
+    // because "the map spot is warm white" is a claim about a branch and reading
+    // it off the wrong one is how a light gets mis-tuned.
+    if (l.readOnly && l.variants.size() > 1) {
+        const int live = DbgLiveBranch(l);
+        const int shown = l.shown;
+        ImGui::TextDisabled("branch %d of %d: %s%s", shown + 1,
+                            (int)l.variants.size(),
+                            l.variants[(size_t)shown].profile.c_str(),
+                            shown == live ? "  (drawing now)" : "  (preview only)");
+        if (ImGui::IsItemHovered())
+            UiTooltip("This OBJ bakes the light once per look, each behind an "
+                      "ANIM_hide on ToLissPhoton/interior/%s, and that dataref "
+                      "(= %d now) picks which one draws. The values below are "
+                      "the branch named here.",
+                      l.category.c_str(), live);
+    }
+    if (l.source == "du" && !l.readOnly) {
         ImGui::Checkbox("Edit all screens together", &gDbgScreensLink);
         if (ImGui::IsItemHovered())
             UiTooltip("The six screen-glow lights are one design in six places, "
@@ -11775,10 +13045,17 @@ static void BuildLightEditor(DbgLight& l) {
                       "Position stays per-light. Untick to tune one screen alone.");
     }
 
+    // ⚠ DISABLED, NOT HIDDEN, and the tooltips stay reachable
+    // (ImGuiHoveredFlags_AllowWhenDisabled below). A read-only light's numbers
+    // are the whole point of the pane — hiding the controls would hide them —
+    // but a live-looking slider that silently snaps back is the class of thing
+    // this window is meant to expose, not commit.
+    ImGui::BeginDisabled(l.readOnly);
+
     const bool sizeDriven = (l.source == "du");
     ImGui::ColorEdit3("color", l.v);
     ImGui::SliderFloat("brightness", &l.v[3], 0.0f, 1.0f, "x%.3f");
-    if (ImGui::IsItemHovered()) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         if (sizeDriven)
             UiTooltip("The light's alpha, and for a screen glow that is a "
                       "CONSTANT: the DU knob drives size instead (%s[%d] = "
@@ -11793,7 +13070,7 @@ static void BuildLightEditor(DbgLight& l) {
                       l.source.c_str(), l.index, (double)DbgRheostat(l));
     }
     ImGui::SliderFloat("size", &l.v[4], 0.0f, 8.0f, "%.3f m");
-    if (ImGui::IsItemHovered()) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         if (sizeDriven)
             UiTooltip("How far the pool reaches AT A SCREEN TURNED FULLY UP - "
                       "this is the driven slot for a screen glow, scaled live "
@@ -11813,13 +13090,13 @@ static void BuildLightEditor(DbgLight& l) {
     } else {
         bool aimed = false;
         aimed |= ImGui::SliderFloat("pitch", &l.pitch, -90.0f, 90.0f, "%.1f deg");
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             UiTooltip("Degrees above horizontal. 0 level, +90 straight up, "
                       "-90 straight down.");
         ImGui::SameLine();
         ImGui::TextDisabled("%s", DbgPitchWord(l.pitch));
         aimed |= ImGui::SliderFloat("yaw", &l.yaw, -180.0f, 180.0f, "%.1f deg");
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             UiTooltip("0 forward, 90 right, 180 aft, -90 left.");
         ImGui::SameLine();
         ImGui::TextDisabled("%s", DbgYawWord(l.yaw));
@@ -11835,26 +13112,31 @@ static void BuildLightEditor(DbgLight& l) {
         // way to answer "which way does the sim think this points". Sweeping an
         // angle is not clean: an interpolated arc through a cockpit full of
         // surfaces can be read several ways, and has been.
-        ImGui::TextUnformatted("aim");
-        static const struct { const char* label; float pitch, yaw; } kPresets[] = {
-            { "Fwd", 0.0f, 0.0f },   { "Aft", 0.0f, 180.0f },
-            { "Left", 0.0f, -90.0f },{ "Right", 0.0f, 90.0f },
-            { "Up", 90.0f, 0.0f },   { "Down", -90.0f, 0.0f },
-        };
-        for (int i = 0; i < 6; ++i) {
-            ImGui::SameLine();
-            if (ImGui::SmallButton(kPresets[i].label)) {
-                l.pitch = kPresets[i].pitch;
-                l.yaw   = kPresets[i].yaw;
-                DbgAimToDir(l.pitch, l.yaw, &l.v[5]);
-                gDbgNote = std::string("aim ") + kPresets[i].label;
+        // Not offered read-only: a preset is an EXPERIMENT ("point it up, see
+        // what moves"), and one that cannot move anything is not a disabled
+        // control so much as a misleading one.
+        if (!l.readOnly) {
+            ImGui::TextUnformatted("aim");
+            static const struct { const char* label; float pitch, yaw; } kPresets[] = {
+                { "Fwd", 0.0f, 0.0f },   { "Aft", 0.0f, 180.0f },
+                { "Left", 0.0f, -90.0f },{ "Right", 0.0f, 90.0f },
+                { "Up", 90.0f, 0.0f },   { "Down", -90.0f, 0.0f },
+            };
+            for (int i = 0; i < 6; ++i) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(kPresets[i].label)) {
+                    l.pitch = kPresets[i].pitch;
+                    l.yaw   = kPresets[i].yaw;
+                    DbgAimToDir(l.pitch, l.yaw, &l.v[5]);
+                    gDbgNote = std::string("aim ") + kPresets[i].label;
+                }
             }
         }
 
         float spread = DbgConeToSpread(l.v[8]);
         if (ImGui::SliderFloat("spread", &spread, 0.5f, 89.5f, "%.1f deg"))
             l.v[8] = DbgSpreadToCone(spread);
-        if (ImGui::IsItemHovered())
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             UiTooltip("Half-angle of the cone. Stored as cos(spread), which "
                       "is why the DSL's `cone:` runs backwards - bigger is "
                       "narrower. Prefer `spread:` when writing it back.");
@@ -11875,32 +13157,49 @@ static void BuildLightEditor(DbgLight& l) {
         ImGui::SliderFloat("y (up+)",    &l.off[1], -kDbgPosRange, kDbgPosRange, "%.3f m");
         ImGui::SliderFloat("z (aft+)",   &l.off[2], -kDbgPosRange, kDbgPosRange, "%.3f m");
     } else {
-        ImGui::TextDisabled("position is not tunable in this OBJ - rebuild with "
-                            "--debug to get the ANIM_trans wrappers");
+        // Read-only OR a --no-debug-pos build: either way there are no
+        // ANIM_trans wrappers to drive. The coordinate is still worth printing —
+        // for an inspector it is half of what one comes here to read, and a
+        // spill light's origin is not where its pool looks brightest.
+        ImGui::SeparatorText("position");
+        ImGui::TextDisabled("baked %.3f %.3f %.3f",
+                            (double)l.pos[0], (double)l.pos[1], (double)l.pos[2]);
+        ImGui::TextDisabled("not movable in this OBJ - rebuild with --debug "
+                            "(deploy.ps1 -Dev -DebugObjs) for the ANIM_trans "
+                            "wrappers");
     }
 
+    ImGui::EndDisabled();
+
     ImGui::Separator();
-    if (ImGui::Button("Revert this light")) {
-        for (int i = 0; i < kDbgParamCount; ++i) l.v[i] = l.base[i];
-        for (int i = 0; i < 3; ++i) l.off[i] = l.baseOff[i];
-        l.pitch = l.basePitch; l.yaw = l.baseYaw;
-        gDbgNote = "reverted " + l.name;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Revert all")) {
-        for (size_t i = 0; i < gDbgLights.size(); ++i) {
-            DbgLight& o = gDbgLights[i];
-            for (int k = 0; k < kDbgParamCount; ++k) o.v[k] = o.base[k];
-            for (int k = 0; k < 3; ++k) o.off[k] = o.baseOff[k];
-            o.pitch = o.basePitch; o.yaw = o.baseYaw;
+    // The two Reverts are the tuner's undo, so they have nothing to say about a
+    // light that cannot be tuned. "Log DSL" is the opposite: printing the
+    // authored values into the log is exactly what an inspector is for, and it
+    // is the one button that stays.
+    if (!l.readOnly) {
+        if (ImGui::Button("Revert this light")) {
+            for (int i = 0; i < kDbgParamCount; ++i) l.v[i] = l.base[i];
+            for (int i = 0; i < 3; ++i) l.off[i] = l.baseOff[i];
+            l.pitch = l.basePitch; l.yaw = l.baseYaw;
+            gDbgNote = "reverted " + l.name;
         }
-        gDbgFloodBoost = gDbgFloodBoostSeed;
-        gDbgNote = "reverted every light to the OBJ's baked values";
+        ImGui::SameLine();
+        if (ImGui::Button("Revert all")) {
+            for (size_t i = 0; i < gDbgLights.size(); ++i) {
+                DbgLight& o = gDbgLights[i];
+                if (o.readOnly) continue;
+                for (int k = 0; k < kDbgParamCount; ++k) o.v[k] = o.base[k];
+                for (int k = 0; k < 3; ++k) o.off[k] = o.baseOff[k];
+                o.pitch = o.basePitch; o.yaw = o.baseYaw;
+            }
+            gDbgFloodBoost = gDbgFloodBoostSeed;
+            gDbgNote = "reverted every light to the OBJ's baked values";
+        }
+        if (ImGui::IsItemHovered())
+            UiTooltip("Back to what the OBJ bakes, for every light - the "
+                      "clean slate to start a tuning pass from.");
+        ImGui::SameLine();
     }
-    if (ImGui::IsItemHovered())
-        UiTooltip("Back to what the OBJ bakes, for every light - the "
-                  "clean slate to start a tuning pass from.");
-    ImGui::SameLine();
     if (ImGui::Button("Log DSL")) DbgLogDsl(l);
     if (ImGui::IsItemHovered())
         UiTooltip("Print this light in .phdsl shape to the Log tab - the "
@@ -11912,10 +13211,10 @@ static void BuildLightEditor(DbgLight& l) {
     // they did to the selected light lands on the other five the same frame.
     // Everything but position is shared: the baked pos and the live offset are
     // the one per-light attribute of a screen-glow light.
-    if (gDbgScreensLink && l.source == "du") {
+    if (gDbgScreensLink && l.source == "du" && !l.readOnly) {
         for (size_t i = 0; i < gDbgLights.size(); ++i) {
             DbgLight& o = gDbgLights[i];
-            if (o.n == l.n || o.source != "du") continue;
+            if (o.n == l.n || o.source != "du" || o.readOnly) continue;
             for (int k = 0; k < kDbgParamCount; ++k) o.v[k] = l.v[k];
             o.pitch = l.pitch; o.yaw = l.yaw;
         }
@@ -11942,7 +13241,16 @@ static void BuildDevCockpitTuning() {
     if (!gDbgOwnsRefs) {
         UiHint("Another plugin owns ToLissPhoton/debug/light/* - see the Lights "
                "tab for who and why.");
-    } else if (!boosted) {
+    } else if (gDbgReadOnly || !boosted) {
+        // ⚠ gDbgReadOnly is checked FIRST and separately from `boosted`: an info
+        // manifest carries the boost rows too, so the count alone is satisfied
+        // and the slider would appear over an OBJ that bakes the factor and
+        // reads no dataref at all. It would move nothing, which on this
+        // particular knob is indistinguishable from the "Use simplified
+        // lighting" gate below being off.
+        if (gDbgReadOnly && boosted)
+            ImGui::TextDisabled("authored: optimize: boost %.2f, on %d light(s)",
+                                (double)gDbgFloodBoostSeed, boosted);
         UiHint("Needs a DEBUG interior OBJ, which emits the simplified floods as "
                "tunable lights:\n"
                "    src\\native\\deploy.ps1 -Dev -DebugObjs   (or Build tab > "
@@ -11993,113 +13301,175 @@ static void BuildLightsTab() {
         return;
     }
 
+    // Read-only lights follow the live profile, so this has to run before the
+    // values are drawn — the era can be changed from the Cockpit tab with this
+    // tab open, and a stale colour here would be read as the manifest being
+    // wrong rather than as it being last frame's.
+    DbgApplyVariants();
+
     if (ImGui::Button("Reload manifest")) DbgLoadManifest();
     if (ImGui::IsItemHovered())
-        UiTooltip("Re-read lights_inn.debug.json + lights_screens.debug.json "
-                  "from the loaded aircraft (both are merged - they live on "
-                  "separate dataref slots). Needed after every --debug "
-                  "rebuild that changes the light LIST; editing values "
-                  "needs nothing.");
-    ImGui::SameLine();
-    const int edits = DbgTuningEditCount();
-    char saveLabel[64];
-    std::snprintf(saveLabel, sizeof(saveLabel), "Save tuning (%d)###savetuning", edits);
-    if (ImGui::Button(saveLabel)) DbgSaveTuning(false);
-    if (ImGui::IsItemHovered())
-        UiTooltip("Write every edited light - plus the simplified-flood "
-                  "multiplier - in .phdsl shape to the file named below.\n"
-                  "This also happens BY ITSELF when the aircraft reloads and "
-                  "when the sim shuts down, and the file is read back on the "
-                  "next load, so a session is not lost by closing X-Plane. "
-                  "Transcribe it into src/lights/*.phdsl when the look is "
-                  "settled - a rebuild is what makes it permanent.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Isolate", &gDbgIsolate);
-    if (ImGui::IsItemHovered())
-        UiTooltip("Black out every light but the selected one. The fastest "
-                  "answer to \"which lamp is that?\".");
-    ImGui::SameLine();
-    ImGui::Checkbox("Mark", &gDbgMark);
-    if (ImGui::IsItemHovered())
-        UiTooltip("Paint the selected light magenta - nothing in a cockpit "
-                  "is that color.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Blink", &gDbgBlink);
-    ImGui::SameLine();
-    bool compare = gDbgCompare != 0;
-    if (ImGui::Checkbox("Tunable", &compare)) gDbgCompare = compare ? 1 : 0;
-    if (ImGui::IsItemHovered())
-        UiTooltip("On: the tunable copies. Off: the ORIGINAL light lines, "
-                  "which this window cannot touch.\nThe only way to tell a "
-                  "bad LIGHT_SPILL_CUSTOM conversion apart from bad "
-                  "authored values - they look identical in the cockpit.");
+        UiTooltip("Re-read the light manifests from the loaded aircraft. Each "
+                  "debug-capable target has two: a `.debug.json` beside a "
+                  "--debug OBJ, whose lights this window DRIVES, and a "
+                  "`.info.json` beside the normal one, which it can only show. "
+                  "A build writes one and deletes the other, and both targets "
+                  "are merged. Needed after a rebuild that changes the light "
+                  "LIST; editing values needs nothing.");
 
-    if (gDbgMarkerDots > 0) {
+    if (gDbgReadOnly) {
         ImGui::SameLine();
-        bool markers = gDbgShowMarkers != 0;
-        if (ImGui::Checkbox("Markers", &markers))
-            gDbgShowMarkers = markers ? (gDbgSel >= 0 ? gDbgSel + 1 : -1) : 0;
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "read-only");
         if (ImGui::IsItemHovered())
-            UiTooltip("Draw the light's origin (green), its aim (amber) and "
-                      "the cone rim (blue) as billboards.\nA spill light is "
-                      "invisible in air and the bright part of its pool is "
-                      "not its origin, so this is the only way to see where "
-                      "one actually is.");
-        if (markers) {
+            UiTooltip("No debug OBJ is installed, so these lights bind their "
+                      "real datarefs and nothing here can move them. What is "
+                      "shown is exactly what the installed OBJ bakes.\n\n"
+                      "To TUNE instead:  src\\native\\deploy.ps1 -Dev -DebugObjs");
+        // The branch picker, only where there is more than one branch to pick.
+        // It changes what this WINDOW shows and never what the aircraft draws —
+        // said in the tooltip, because a picker beside a live value reads as a
+        // control over it.
+        if (gDbgVariantLabels.size() > 1) {
             ImGui::SameLine();
-            if (ImGui::SmallButton(gDbgShowMarkers < 0 ? "all" : "selected"))
-                gDbgShowMarkers = gDbgShowMarkers < 0 ? (gDbgSel + 1) : -1;
-            // Size and reach live next to the switch that turned the markers on:
-            // a marker too small to see and a marker that is not drawn look
-            // exactly alike, so the fix has to be where that confusion happens.
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f);
-            ImGui::SliderFloat("size", &gDbgMarkerSize, 0.01f, 0.30f, "%.3f m");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f);
-            ImGui::SliderFloat("reach", &gDbgMarkerReach, 0.05f, 3.00f, "%.2f m");
+            ImGui::SetNextItemWidth(150.0f);
+            std::string preview = "live";
+            if (gDbgVariantPreview >= 0
+                && gDbgVariantPreview < (int)gDbgVariantLabels.size())
+                preview = gDbgVariantLabels[(size_t)gDbgVariantPreview];
+            if (ImGui::BeginCombo("branch", preview.c_str())) {
+                if (ImGui::Selectable("live", gDbgVariantPreview < 0))
+                    gDbgVariantPreview = -1;
+                for (size_t i = 0; i < gDbgVariantLabels.size(); ++i)
+                    if (ImGui::Selectable(gDbgVariantLabels[i].c_str(),
+                                          gDbgVariantPreview == (int)i))
+                        gDbgVariantPreview = (int)i;
+                ImGui::EndCombo();
+            }
             if (ImGui::IsItemHovered())
-                UiTooltip("How far the arrow and the cone ring are drawn. "
-                          "The right length depends entirely on the light - "
-                          "a 20 cm arrow is unreadable next to a pool of "
-                          "light a meter across.");
+                UiTooltip("Which profile branch to READ. A shipping OBJ carries "
+                          "every look and the category dataref picks between "
+                          "them, so 'live' follows the aircraft's current "
+                          "setting and the named entries let you compare eras "
+                          "without changing it. This moves nothing in the "
+                          "cockpit.");
         }
     }
 
-    // ---- the slot probe ----------------------------------------------------
-    // Its own row because it is not a knob: while it runs, every value on this
-    // page is bypassed and the cockpit is showing one slot of the baseline.
-    ImGui::Separator();
-    ImGui::TextUnformatted("Probe");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("off")) gDbgProbe = -1;
-    for (int k = 0; k < kDbgParamCount; ++k) {
+    // ⚠ EVERYTHING BELOW DRIVES ToLissPhoton/debug/light/* AND NOTHING ELSE, so
+    // in a read-only session there is no OBJ at the other end of any of it:
+    // isolate, mark, blink, the A/B compare, the markers and the slot probe all
+    // write params that a shipping OBJ never reads, and Save tuning would write
+    // a file recording edits nobody can make. Hidden rather than disabled — a
+    // greyed-out row of six switches invites the question "what would these do",
+    // and the honest answer is "nothing, ever, in this build".
+    if (!gDbgReadOnly) {
         ImGui::SameLine();
-        char id[8];
-        std::snprintf(id, sizeof(id), "%d", k);
-        const bool on = gDbgProbe == k;
-        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.7f, 1.0f));
-        if (ImGui::SmallButton(id)) gDbgProbe = on ? -1 : k;
-        if (on) ImGui::PopStyleColor();
+        const int edits = DbgTuningEditCount();
+        char saveLabel[64];
+        std::snprintf(saveLabel, sizeof(saveLabel), "Save tuning (%d)###savetuning", edits);
+        if (ImGui::Button(saveLabel)) DbgSaveTuning(false);
+        if (ImGui::IsItemHovered())
+            UiTooltip("Write every edited light - plus the simplified-flood "
+                      "multiplier - in .phdsl shape to the file named below.\n"
+                      "This also happens BY ITSELF when the aircraft reloads and "
+                      "when the sim shuts down, and the file is read back on the "
+                      "next load, so a session is not lost by closing X-Plane. "
+                      "Transcribe it into src/lights/*.phdsl when the look is "
+                      "settled - a rebuild is what makes it permanent.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Isolate", &gDbgIsolate);
+        if (ImGui::IsItemHovered())
+            UiTooltip("Black out every light but the selected one. The fastest "
+                      "answer to \"which lamp is that?\".");
+        ImGui::SameLine();
+        ImGui::Checkbox("Mark", &gDbgMark);
+        if (ImGui::IsItemHovered())
+            UiTooltip("Paint the selected light magenta - nothing in a cockpit "
+                      "is that color.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Blink", &gDbgBlink);
+        ImGui::SameLine();
+        bool compare = gDbgCompare != 0;
+        if (ImGui::Checkbox("Tunable", &compare)) gDbgCompare = compare ? 1 : 0;
+        if (ImGui::IsItemHovered())
+            UiTooltip("On: the tunable copies. Off: the ORIGINAL light lines, "
+                      "which this window cannot touch.\nThe only way to tell a "
+                      "bad LIGHT_SPILL_CUSTOM conversion apart from bad "
+                      "authored values - they look identical in the cockpit.");
+
+        if (gDbgMarkerDots > 0) {
+            ImGui::SameLine();
+            bool markers = gDbgShowMarkers != 0;
+            if (ImGui::Checkbox("Markers", &markers))
+                gDbgShowMarkers = markers ? (gDbgSel >= 0 ? gDbgSel + 1 : -1) : 0;
+            if (ImGui::IsItemHovered())
+                UiTooltip("Draw the light's origin (green), its aim (amber) and "
+                          "the cone rim (blue) as billboards.\nA spill light is "
+                          "invisible in air and the bright part of its pool is "
+                          "not its origin, so this is the only way to see where "
+                          "one actually is.");
+            if (markers) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(gDbgShowMarkers < 0 ? "all" : "selected"))
+                    gDbgShowMarkers = gDbgShowMarkers < 0 ? (gDbgSel + 1) : -1;
+                // Size and reach live next to the switch that turned the markers on:
+                // a marker too small to see and a marker that is not drawn look
+                // exactly alike, so the fix has to be where that confusion happens.
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SliderFloat("size", &gDbgMarkerSize, 0.01f, 0.30f, "%.3f m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f);
+                ImGui::SliderFloat("reach", &gDbgMarkerReach, 0.05f, 3.00f, "%.2f m");
+                if (ImGui::IsItemHovered())
+                    UiTooltip("How far the arrow and the cone ring are drawn. "
+                              "The right length depends entirely on the light - "
+                              "a 20 cm arrow is unreadable next to a pool of "
+                              "light a meter across.");
+            }
+        }
+
+        // ---- the slot probe ------------------------------------------------
+        // Its own row because it is not a knob: while it runs, every value on
+        // this page is bypassed and the cockpit is showing one slot of the
+        // baseline.
+        ImGui::Separator();
+        ImGui::TextUnformatted("Probe");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("off")) gDbgProbe = -1;
+        for (int k = 0; k < kDbgParamCount; ++k) {
+            ImGui::SameLine();
+            char id[8];
+            std::snprintf(id, sizeof(id), "%d", k);
+            const bool on = gDbgProbe == k;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.7f, 1.0f));
+            if (ImGui::SmallButton(id)) gDbgProbe = on ? -1 : k;
+            if (on) ImGui::PopStyleColor();
+        }
+        if (gDbgProbe >= 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 1.0f, 1.0f),
+                               "slot %d = %g -> expect: %s   (every other light is "
+                               "blacked out, and this page is bypassed)",
+                               gDbgProbe, (double)kDbgProbeValue,
+                               kDbgProbeExpect[gDbgProbe]);
+        else
+            UiHint("Sends a fixed baseline with ONE of the nine floats set, so whatever "
+                   "the sim does is caused by that slot and nothing else. Nine clicks "
+                   "map our array onto X-Plane's parameters with no inference - which is "
+                   "how the wire order was measured. Probe one slot at a time BEFORE "
+                   "hypothesizing: three earlier explanations were all wrong.");
     }
-    if (gDbgProbe >= 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 1.0f, 1.0f),
-                           "slot %d = %g -> expect: %s   (every other light is "
-                           "blacked out, and this page is bypassed)",
-                           gDbgProbe, (double)kDbgProbeValue,
-                           kDbgProbeExpect[gDbgProbe]);
-    else
-        UiHint("Sends a fixed baseline with ONE of the nine floats set, so whatever "
-               "the sim does is caused by that slot and nothing else. Nine clicks "
-               "map our array onto X-Plane's parameters with no inference - which is "
-               "how the wire order was measured. Probe one slot at a time BEFORE "
-               "hypothesizing: three earlier explanations were all wrong.");
 
     if (gDbgLights.empty()) {
-        UiHint("No debug lights. Build the OBJs in their tunable shape first:\n"
-               "    src\\native\\deploy.ps1 -Dev -DebugObjs\n"
-               "(or per target: build/build_objs.py build --target interior "
-               "--debug --write, same for screens)\nthen Reload manifest. %s",
+        // No manifest of EITHER kind, which on a dev machine means the OBJs
+        // predate this mechanism: a plain build now drops the read-only one, so
+        // the ordinary rebuild is the fix and --debug is only for tuning.
+        UiHint("No lights. Rebuild the cockpit and screens OBJs so they carry a "
+               "light manifest:\n"
+               "    src\\native\\deploy.ps1 -Dev              (read-only, "
+               "installable OBJs)\n"
+               "    src\\native\\deploy.ps1 -Dev -DebugObjs   (tunable)\n"
+               "then Reload manifest. %s",
                gDbgNote.empty() ? "" : ("(" + gDbgNote + ")").c_str());
         return;
     }
@@ -12108,25 +13478,37 @@ static void BuildLightsTab() {
                         (int)gDbgLights.size(),
                         gDbgPosTunable ? ", position tunable" : "");
     if (!gDbgNote.empty()) { ImGui::SameLine(); ImGui::TextDisabled("| %s", gDbgNote.c_str()); }
+    if (gDbgReadOnly)
+        UiHint("These are the values the installed OBJ bakes - what the aircraft "
+               "is drawing, not a copy this window drives. To change one, edit "
+               "src/lights/*.phdsl and re-deploy, or deploy with -DebugObjs to "
+               "tune it live first.");
 
     // ⚠ The destination, spelled out. It moves depending on whether the Build
     // tab knows the repo, and a file written somewhere the user is not looking
     // is the same as no file at all — which is the failure this whole mechanism
     // was added to stop happening twice.
-    const std::string tuningPath = DbgTuningFilePath().string();
-    ImGui::TextDisabled("tuning file: %s", tuningPath.c_str());
-    if (ImGui::IsItemHovered())
-        UiTooltip("Saved here automatically on aircraft reload and sim shutdown, "
-                  "and read back on the next load. Set the repo path on the "
-                  "Build tab to have it land in .scratch/ instead, where it is "
-                  "beside the .phdsl you will transcribe it into.");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Forget saved")) DbgForgetTuning();
-    if (ImGui::IsItemHovered())
-        UiTooltip("Delete that file, so the next aircraft load shows the OBJ's "
-                  "authored values with nothing layered on top. Do this once a "
-                  "session has been transcribed into the .phdsl - otherwise the "
-                  "saved copy keeps being restored over a rebuild.");
+    //
+    // Not shown read-only: nothing here writes that file and DbgLoadManifest
+    // deliberately does not read it back, so naming it would only invite
+    // "Forget saved" to be clicked on a session whose values it has no bearing
+    // on — and that button deletes another session's work.
+    if (!gDbgReadOnly) {
+        const std::string tuningPath = DbgTuningFilePath().string();
+        ImGui::TextDisabled("tuning file: %s", tuningPath.c_str());
+        if (ImGui::IsItemHovered())
+            UiTooltip("Saved here automatically on aircraft reload and sim shutdown, "
+                      "and read back on the next load. Set the repo path on the "
+                      "Build tab to have it land in .scratch/ instead, where it is "
+                      "beside the .phdsl you will transcribe it into.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Forget saved")) DbgForgetTuning();
+        if (ImGui::IsItemHovered())
+            UiTooltip("Delete that file, so the next aircraft load shows the OBJ's "
+                      "authored values with nothing layered on top. Do this once a "
+                      "session has been transcribed into the .phdsl - otherwise the "
+                      "saved copy keeps being restored over a rebuild.");
+    }
     ImGui::Separator();
 
     ImGui::BeginChild("dbg_tree", ImVec2(260.0f, 0.0f), ImGuiChildFlags_Borders);

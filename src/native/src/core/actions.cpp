@@ -13,6 +13,7 @@
 #include "core/patch_glow.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
+#include "core/progress.h"
 #include "core/version.h"
 
 namespace photon {
@@ -228,6 +229,235 @@ bool PluginIsCurrent(const std::string& xplaneRootUtf8) {
 
 namespace {
 
+// ─── the progress plan ───────────────────────────────────────────────────────
+// The step names. ⚠ ONE SPELLING EACH, because `Plan::Begin` matches BY NAME and a
+// typo is not an error — it is a step that silently never lights up, on a bar that
+// still looks plausible. `ProgressStepNames()` below is what the test walks.
+constexpr char kStepPlugin[] = "Plugin";
+constexpr char kStepPluginData[] = "Plugin data";
+constexpr char kStepExteriorObj[] = "Exterior lights";
+constexpr char kStepGlow[] = "Skin glow";
+constexpr char kStepRealWings[] = "RealWings wingtips";
+constexpr char kStepScreens[] = "Display glow";
+constexpr char kStepInteriorObj[] = "Cockpit lights";
+constexpr char kStepInteriorTex[] = "Cockpit textures";
+constexpr char kStepLiveries[] = "Livery overrides";
+constexpr char kStepInteriorAcf[] = "Cockpit spot lights";
+constexpr char kStepManifest[] = "Manifest";
+constexpr char kStepRestore[] = "Restoring originals";
+constexpr char kStepRemove[] = "Removing added files";
+
+// A few phases are real work with nothing to size — a directory walk, a JSON write.
+// They are in the plan anyway so the step exists and the name is reportable; the
+// magnitude is measured (1.5-9.4 ms for the livery scan) and deliberately small.
+constexpr double kMsLiveryScan = 8.0;
+constexpr double kMsManifest = 2.0;
+
+// The bar's driver: the plan, plus the callback that publishes it.
+//
+// ⚠ EVERY PHASE MUST Begin AND Finish, INCLUDING ONES IT SKIPS. `Finish` banks the
+// step's whole estimate, so a phase that returns early without it leaves its cost
+// unbanked forever and the bar can never pass (total - that step) / total. The
+// `Skip` helper is the one-liner for the branch that does nothing.
+struct Reporter {
+    progress::Plan plan;
+    const Options* opts = nullptr;
+
+    void Publish(const std::string& step) const {
+        if (opts != nullptr && opts->progress != nullptr) {
+            opts->progress(plan.Fraction(), step, opts->progressUserData);
+        }
+    }
+    void Begin(const char* step) {
+        plan.Begin(step);
+        Publish(step);
+    }
+    void Finish(const char* step) {
+        plan.Finish();
+        Publish(step);
+    }
+    void Skip(const char* step) {
+        plan.Begin(step);
+        plan.Finish();
+        Publish(step);
+    }
+    // Hand to a patcher so an eleven-second scan animates instead of sitting still.
+    progress::StepProgress Sub(const char* step) {
+        return [this, step](double f) {
+            plan.Within(f);
+            Publish(step);
+        };
+    }
+};
+
+// Total `.acf` bytes in the aircraft folder. ⚠ NOT `patch_acf*::AcfFiles()`, which
+// READS every candidate to find the block it needs — the whole point of planning
+// from sizes is that it costs nothing, and calling the finder here would pay the
+// 9 MB read twice per run to predict the cost of paying it once.
+std::uint64_t AcfBytes(const fs::path& aircraftDir) {
+    return progress::BytesOfFilesWithExt(fsutil::PathToUtf8(aircraftDir), ".acf");
+}
+
+// ⚠ A DRY RUN DOES NOT COPY, SO IT MUST NOT BE PRICED AS IF IT DID. Every write
+// here is `if (!dryRun) WriteOrThrow(dest, CopyBytes(src))` — one guard covering the
+// READ as well as the write — so a dry run skips both halves of a copy and pays only
+// for the scans and parses, which run either way. Left unmodelled, the 59 MB cockpit
+// texture copy is more than half an interior plan that never happens, and the bar
+// crawls to ~40% and jumps. Measured: `interior:textures` does not reach 1 ms on a
+// dry run, against ~390 ms predicted for a real one.
+double CopyMs(std::uint64_t bytes, bool dryRun) {
+    return dryRun ? 0.0 : progress::MsForCopy(bytes);
+}
+
+progress::Plan BuildInstallPlan(const Options& opts, const fs::path& aircraftDir,
+                                const fs::path& objects) {
+    progress::Plan plan;
+    const std::string objectsUtf8 = fsutil::PathToUtf8(objects);
+    const bool dry = opts.dryRun;
+
+    // The plugin: both sides are read to compare, then one may be written.
+    std::uint64_t pluginBytes = 0;
+    try {
+        for (const auto& kv : payload::PluginFiles()) {
+            pluginBytes += progress::FileSizeOrZero(kv.second);
+        }
+    } catch (const payload::PayloadError&) {
+    }
+    // ⚠ The compare reads both sides even in a dry run; only the write is skipped.
+    plan.Add(kStepPlugin,
+             progress::MsForCopy(pluginBytes) + CopyMs(pluginBytes, dry));
+
+    std::uint64_t dataBytes = 0;
+    try {
+        for (const auto& kv : payload::PluginDataFiles()) {
+            dataBytes += progress::FileSizeOrZero(kv.second);
+        }
+    } catch (const payload::PayloadError&) {
+    }
+    plan.Add(kStepPluginData, CopyMs(2 * dataBytes, dry));
+
+    // The exterior OBJ: back up what is there, write ours over it.
+    const Airframe* af = AirframeByKey(opts.airframeKey);
+    std::uint64_t extBytes = 0;
+    if (af != nullptr) {
+        extBytes += progress::FileSizeOrZero(
+            fsutil::PathToUtf8(objects / af->objName));
+        try {
+            extBytes += progress::FileSizeOrZero(
+                payload::ObjPath(opts.wing, opts.airframeKey));
+        } catch (const payload::PayloadError&) {
+        }
+    }
+    plan.Add(kStepExteriorObj, CopyMs(2 * extBytes, dry));
+
+    // ⚠ THE BIGGEST STEP IN THE INSTALLER, AND ONLY ONE AIRFRAME HAS IT. The glow
+    // redirect reads every `.obj` in objects/ to find its targets: 1,597 MB on the
+    // A330-900, the only airframe in `GlowRedirect()`. It is ~97% of that install
+    // and 0% of every other, which is why the plan is per-run and not a table.
+    if (GlowIndicesFor(opts.airframeKey) != nullptr) {
+        plan.Add(kStepGlow, progress::MsForObjScan(progress::BytesOfFilesWithExt(
+                                objectsUtf8, ".obj")));
+    }
+
+    // ⚠ Same rule: `Install` enters this on the wing alone, so the plan prices it on
+    // the wing alone. An airframe with no RealWings folder is a zero-byte estimate,
+    // not an absent step.
+    if (opts.wing == "realwings") {
+        const std::string rwDir = RealWingsDir(opts.airframeKey);
+        const std::uint64_t b =
+            rwDir.empty() ? 0
+                          : progress::BytesOfFilesWithExt(
+                                fsutil::PathToUtf8(objects /
+                                                   fsutil::PathFromUtf8(rwDir)),
+                                ".obj", /*recursive=*/true);
+        plan.Add(kStepRealWings, progress::MsForObjPatch(b));
+    }
+
+    if (AirframeHasScreens(opts.airframeKey) &&
+        payload::ScreensAvailable(opts.airframeKey)) {
+        std::uint64_t b = 0;
+        try {
+            b = progress::FileSizeOrZero(
+                payload::ScreensObjPath(opts.airframeKey));
+        } catch (const payload::PayloadError&) {
+        }
+        // The `.acf` parse happens either way; only its write is skipped.
+        plan.Add(kStepScreens,
+                 CopyMs(2 * b, dry) + progress::MsForAcfAttach(AcfBytes(aircraftDir)));
+    }
+
+    if (opts.interior && AirframeHasInterior(opts.airframeKey)) {
+        std::uint64_t objBytes = 0;
+        std::uint64_t texBytes = 0;
+        try {
+            objBytes = progress::FileSizeOrZero(payload::InteriorObjPath());
+            for (const auto& kv : payload::InteriorTextureFiles()) {
+                // Our copy in, plus the stock one backed up on the way — a first
+                // install pays both and a reinstall only the first, so this is the
+                // ceiling. Over-estimating makes the bar lag; under-estimating makes
+                // it stall at a step's ceiling, which reads far worse.
+                texBytes += progress::FileSizeOrZero(kv.second);
+                texBytes += progress::FileSizeOrZero(
+                    fsutil::PathToUtf8(objects / fsutil::PathFromUtf8(kv.first)));
+            }
+        } catch (const payload::PayloadError&) {
+        }
+        plan.Add(kStepInteriorObj, CopyMs(2 * objBytes, dry));
+        plan.Add(kStepInteriorTex, CopyMs(2 * texBytes, dry));
+        plan.Add(kStepLiveries, kMsLiveryScan);
+        plan.Add(kStepInteriorAcf, progress::MsForAcfSpots(AcfBytes(aircraftDir)));
+    }
+
+    plan.Add(kStepManifest, kMsManifest);
+    return plan;
+}
+
+progress::Plan BuildUninstallPlan(const manifest::Manifest& m,
+                                  const fs::path& aircraftDir,
+                                  const fs::path& objects,
+                                  const fs::path& backupDir, bool dryRun) {
+    progress::Plan plan;
+
+    // Restoring reads each backup and writes it back over the installed file.
+    std::uint64_t restoreBytes = 0;
+    for (const std::string& rel : m.backedUp) {
+        restoreBytes += progress::FileSizeOrZero(
+            fsutil::PathToUtf8(backupDir / fsutil::PathFromUtf8(rel)));
+    }
+    plan.Add(kStepRestore, CopyMs(2 * restoreBytes, dryRun));
+    // Deletes are metadata operations, not copies — cheap, but a real step.
+    plan.Add(kStepRemove, kMsManifest);
+
+    if (m.realwingsPatched && !m.realwingsDir.empty()) {
+        plan.Add(kStepRealWings, progress::MsForObjPatch(
+                                     progress::BytesOfFilesWithExt(
+                                         m.realwingsDir, ".obj",
+                                         /*recursive=*/true)));
+    }
+    // ⚠ THE CONDITION MUST BE THE RUN'S, NOT A NARROWER ONE. This read
+    // `m.screens.installed && !m.screens.acfPatched.empty()` while `Uninstall`
+    // enters the step on `m.screens.installed` alone — so an install that wrote the
+    // OBJ but attached no `.acf` row entered a step the plan had never priced, and
+    // the bar had a dead spot exactly where the detach happens. Found by the
+    // unpriced-step hook on its first run; invisible to every arithmetic check,
+    // because an unpriced step is missing from the denominator too.
+    if (m.screens.installed) {
+        plan.Add(kStepScreens, progress::MsForAcfAttach(AcfBytes(aircraftDir)));
+    }
+    if (m.interior.installed) {
+        std::uint64_t liveryBytes = 0;
+        for (const std::string& rel : m.interior.liveriesPatched) {
+            liveryBytes += progress::FileSizeOrZero(fsutil::PathToUtf8(
+                backupDir / "liveries" / fsutil::PathFromUtf8(LiveryBackupName(rel))));
+        }
+        plan.Add(kStepLiveries, kMsLiveryScan + CopyMs(2 * liveryBytes, dryRun));
+        plan.Add(kStepInteriorAcf, progress::MsForAcfSpots(AcfBytes(aircraftDir)));
+    }
+    (void)objects;
+    plan.Add(kStepManifest, kMsManifest);
+    return plan;
+}
+
 // The plugin's runtime data (`panelfx.txt`, `overlays/`).
 //
 // ⚠ A SYMLINK IS LEFT ALONE. A dev keeps `panelfx.txt` symlinked at their repo copy
@@ -286,16 +516,21 @@ std::vector<std::string> InstallPluginData(const fs::path& pluginRoot, Log& log,
 // it is no glow at all — which is why the attach result is its own step rather than
 // folded into the OBJ's.
 std::vector<std::string> InstallScreens(const fs::path& objects,
+                                        const std::string& airframeKey,
                                         manifest::Manifest& m, Log& log,
-                                        bool dryRun) {
+                                        bool dryRun, Reporter& rep) {
     std::vector<std::string> steps;
     const fs::path aircraftDir = objects.parent_path();
 
     if (!Contains(m.screens.added, kScreensObj)) {
         m.screens.added.emplace_back(kScreensObj);
     }
+    // ⚠ The airframe key is what picks the OBJ. Every airframe writes the same
+    // FILENAME into its own objects/ folder, so a wrong key here is invisible on
+    // disk and shows up only as six lights in the wrong part of the cockpit.
     const std::string text =
-        marker::Inject(payload::ScreensObjText(), kPhotonVersion, "screens");
+        marker::Inject(payload::ScreensObjText(airframeKey), kPhotonVersion,
+                       "screens");
     const fs::path target = objects / kScreensObj;
     log.Write("writing " + fsutil::PathToUtf8(target) + " (" +
               std::to_string(text.size()) + " bytes)");
@@ -304,7 +539,7 @@ std::vector<std::string> InstallScreens(const fs::path& objects,
                     fsutil::PathToUtf8(objects.filename()));
 
     const auto res = patch_acf_screens::Run(fsutil::PathToUtf8(aircraftDir), false,
-                                            dryRun);
+                                            dryRun, rep.Sub(kStepScreens));
     LogLines(log, "acf screens", res.log);
     m.screens.acfPatched = BaseNames(res.touched);
     if (!m.screens.acfPatched.empty()) {
@@ -328,11 +563,13 @@ std::vector<std::string> InstallScreens(const fs::path& objects,
 std::vector<std::string> InstallInterior(const Options& opts,
                                          const fs::path& objects,
                                          const fs::path& backupDir,
-                                         manifest::Manifest& m, Log& log) {
+                                         manifest::Manifest& m, Log& log,
+                                         Reporter& rep) {
     std::vector<std::string> steps;
     const fs::path aircraftDir = objects.parent_path();
     const bool dryRun = opts.dryRun;
 
+    rep.Begin(kStepInteriorObj);
     // 1. the OBJ. Inject anchors on POINT_COUNTS, which lights_inn.obj has.
     const fs::path target = objects / kInteriorObj;
     if (BackupOnce(target, backupDir, m, &m.interior.added, log, dryRun) ==
@@ -350,12 +587,19 @@ std::vector<std::string> InstallInterior(const Options& opts,
                     " (interior lights, mod by Gus) → " +
                     fsutil::PathToUtf8(objects.filename()));
 
+    rep.Finish(kStepInteriorObj);
+    rep.Begin(kStepInteriorTex);
     // 2. the textures. ⚠ NINE replace a stock file and are restored from backup on
     //    uninstall; TWO have no stock counterpart, so they go in `added` and are
     //    DELETED instead — BackupOnce would only log "nothing to back up" and leave
     //    them orphaned in the aircraft folder forever.
     const auto textures = payload::InteriorTextureFiles();
     const int total = static_cast<int>(textures.size());
+    std::uint64_t totalTexBytes = 0;
+    for (const auto& kv : textures) {
+        totalTexBytes += progress::FileSizeOrZero(kv.second);
+    }
+    std::uint64_t copied = 0;
     int i = 0;
     for (const auto& kv : textures) {
         ++i;
@@ -371,13 +615,22 @@ std::vector<std::string> InstallInterior(const Options& opts,
             // uninstall, since a backup that was never taken cannot restore it.
             BackupOnce(dest, backupDir, m, &m.interior.added, log, dryRun);
         }
-        if (opts.progress) opts.progress(i, total, kv.first, opts.progressUserData);
         if (!dryRun) WriteOrThrow(dest, CopyBytes(fsutil::PathFromUtf8(kv.second)));
+        // ⚠ AFTER THE WRITE, and weighted by BYTES rather than by file: this set
+        // runs from 47 KB (walls_bottom_LIT) to 16 MB (knobs_LIT), so one step per
+        // file would race through eight of eleven and then appear to hang.
+        copied += progress::FileSizeOrZero(kv.second);
+        rep.Sub(kStepInteriorTex)(totalTexBytes > 0
+                                      ? static_cast<double>(copied) /
+                                            static_cast<double>(totalTexBytes)
+                                      : 1.0);
     }
     steps.push_back("Installed " + std::to_string(total) +
                     " interior texture(s) → " +
                     fsutil::PathToUtf8(objects.filename()));
 
+    rep.Finish(kStepInteriorTex);
+    rep.Begin(kStepLiveries);
     // 3. the livery scan.
     const auto overrides = InteriorLiveryOverrides(aircraftDir);
     int cleared = 0;
@@ -409,8 +662,11 @@ std::vector<std::string> InstallInterior(const Options& opts,
     steps.push_back("Note: re-run the installer after adding liveries to cover "
                     "them too");
 
+    rep.Finish(kStepLiveries);
+    rep.Begin(kStepInteriorAcf);
     // 4. the .acf cockpit spots, all four files per airframe.
-    const auto res = patch_acf::Run(fsutil::PathToUtf8(aircraftDir), false, dryRun);
+    const auto res = patch_acf::Run(fsutil::PathToUtf8(aircraftDir), false, dryRun,
+                                    rep.Sub(kStepInteriorAcf));
     LogLines(log, "acf", res.log);
     m.interior.acfPatched = BaseNames(res.touched);
     if (!m.interior.acfPatched.empty()) {
@@ -422,6 +678,7 @@ std::vector<std::string> InstallInterior(const Options& opts,
                         "they were");
     }
 
+    rep.Finish(kStepInteriorAcf);
     m.interior.installed = true;
     m.interior.version = kPhotonVersion;
     m.interior.airframe = opts.airframeKey;
@@ -548,6 +805,13 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     manifest::Manifest m = manifest::Read(objectsUtf8);
     m.present = true;
 
+    // ⚠ THE WHOLE PLAN BEFORE ANY WORK. Sizes only, so it costs microseconds even
+    // where it is pricing an eleven-second scan — and a denominator that grew as the
+    // run proceeded would walk the bar backwards. See core/progress.h.
+    Reporter rep;
+    rep.opts = &opts;
+    rep.plan = BuildInstallPlan(opts, aircraftDir, objects);
+
     // ⚠ THE PLUGIN GOES FIRST. Its `.xpl` is the one artifact X-Plane locks while
     // loaded — Windows keeps a loaded module memory-mapped and refuses to overwrite
     // it — so on a running sim this is the step that fails. Doing it before we touch
@@ -558,6 +822,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     const fs::path pluginRoot = fsutil::PathFromUtf8(opts.xplaneRoot) / "Resources" /
                                 "plugins" / kPluginFolder;
     const auto arches = payload::PluginArches();
+    rep.Begin(kStepPlugin);
     bool wrotePlugin = false;
     for (const auto& kv : payload::PluginFiles()) {
         const fs::path dest = pluginRoot / fsutil::PathFromUtf8(kv.first);
@@ -582,13 +847,18 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
                         Join(arches, ", ") + "] — kept");
     }
 
+    rep.Finish(kStepPlugin);
+
     // The plugin's runtime data goes in right after the binary. Plain data files, so
     // unlike the `.xpl` they are never locked by a running sim and this step cannot
     // be the one that fails.
+    rep.Begin(kStepPluginData);
     for (std::string& s : InstallPluginData(pluginRoot, log, dryRun)) {
         steps.push_back(std::move(s));
     }
+    rep.Finish(kStepPluginData);
 
+    rep.Begin(kStepExteriorObj);
     const fs::path target = objects / af->objName;
     switch (BackupOnce(target, backupDir, m, &m.added, log, dryRun)) {
         case Backup::kRecorded:
@@ -614,14 +884,20 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     if (!dryRun) WriteOrThrow(target, objText);
     steps.push_back(std::string("Installed ") + af->objName + " (" + opts.wing +
                     " wing variant) → " + fsutil::PathToUtf8(objects.filename()));
+    rep.Finish(kStepExteriorObj);
 
     // Redirect ToLiss's skin-glow LIT-texture regions to Photon's own dataref so the
     // painted skin flashes in lockstep with the LED billboards. Each affected mesh
     // OBJ is backed up once before patching; uninstall restores it via the existing
     // backed_up list, so there is no extra bookkeeping and no `.bak` sibling.
     if (GlowIndicesFor(opts.airframeKey) != nullptr) {
-        for (const std::string& f :
-             patch_glow::TargetFiles(objectsUtf8, opts.airframeKey)) {
+        rep.Begin(kStepGlow);
+        // ⚠ SCANNED ONCE AND PASSED ON. This reads every `.obj` in the aircraft —
+        // 1,597 MB on the A330-900 — and `patch_glow::Run` used to do the identical
+        // scan again immediately afterwards, which was 11.1 s of an 11.5 s install.
+        const std::vector<std::string> glowTargets = patch_glow::TargetFiles(
+            objectsUtf8, opts.airframeKey, false, rep.Sub(kStepGlow));
+        for (const std::string& f : glowTargets) {
             const fs::path p = fsutil::PathFromUtf8(f);
             // ⚠ nullptr: the glow pass PATCHES these meshes in place rather than
             // writing one of ours over them, so a missing source means nothing
@@ -635,13 +911,14 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
                                 kBackupDirName);
             }
         }
-        const auto res =
-            patch_glow::Run(objectsUtf8, opts.airframeKey, false, dryRun);
+        const auto res = patch_glow::Run(objectsUtf8, opts.airframeKey, false,
+                                         dryRun, &glowTargets);
         LogLines(log, "glow", res.log);
         if (res.regions > 0) {
             steps.push_back("Redirected " + std::to_string(res.regions) +
                             " skin-glow region(s) to Photon dataref");
         }
+        rep.Finish(kStepGlow);
     }
 
     // Capture any prior RealWings patch state BEFORE clearing it, so a switch away
@@ -652,6 +929,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     m.realwingsDir.clear();
 
     if (opts.wing == "realwings") {
+        rep.Begin(kStepRealWings);
         const fs::path rwDir =
             objects / fsutil::PathFromUtf8(RealWingsDir(opts.airframeKey));
         std::error_code ec;
@@ -668,7 +946,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
             try {
                 const auto res = patch_realwings::Run(
                     fsutil::PathToUtf8(rwDir), payload::RealWingsPatchData(),
-                    opts.airframeKey, dryRun);
+                    opts.airframeKey, dryRun, rep.Sub(kStepRealWings));
                 LogLines(log, "realwings", res.log);
                 m.realwingsDir = fsutil::PathToUtf8(rwDir);
                 m.realwingsPatched = true;
@@ -684,6 +962,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
                             " — continuing with base install only");
             log.Write("realwings dir missing: " + fsutil::PathToUtf8(rwDir), "WARN");
         }
+        rep.Finish(kStepRealWings);
     } else if (wasRealwings && !oldRwDir.empty()) {
         // ⚠ Switching from a RealWings install to stock/durantula: the new
         // `lights_out` OBJ carries its OWN wingtip nav/strobe (those fixtures are
@@ -708,14 +987,17 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
         }
     }
 
-    // Display glow — part of the BASE install on the A3xx, not an opt-in. It works
-    // on a stock cockpit, so it does not belong behind the interior's opt-in;
-    // whether the glow is VISIBLE is a runtime choice on the Displays tab.
+    // Display glow — part of the BASE install, not an opt-in. It works on a stock
+    // cockpit, so it does not belong behind the interior's opt-in; whether the
+    // glow is VISIBLE is a runtime choice on the Displays tab.
     if (AirframeHasScreens(opts.airframeKey)) {
-        if (payload::ScreensAvailable()) {
-            for (std::string& s : InstallScreens(objects, m, log, dryRun)) {
+        if (payload::ScreensAvailable(opts.airframeKey)) {
+            rep.Begin(kStepScreens);
+            for (std::string& s :
+                 InstallScreens(objects, opts.airframeKey, m, log, dryRun, rep)) {
                 steps.push_back(std::move(s));
             }
+            rep.Finish(kStepScreens);
         } else {
             log.Write("no screen-glow OBJ in this build — skipping display glow",
                       "WARN");
@@ -730,12 +1012,13 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
                             "skipped");
         } else {
             for (std::string& s :
-                 InstallInterior(opts, objects, backupDir, m, log)) {
+                 InstallInterior(opts, objects, backupDir, m, log, rep)) {
                 steps.push_back(std::move(s));
             }
         }
     }
 
+    rep.Begin(kStepManifest);
     m.version = kPhotonVersion;
     m.wing = opts.wing;
     m.installedAt = NowIso8601Seconds();
@@ -744,6 +1027,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
         if (!manifest::Write(objectsUtf8, m, err)) throw ActionError(err);
     }
     steps.push_back("Wrote install manifest");
+    rep.Finish(kStepManifest);
     return steps;
 }
 
@@ -760,8 +1044,17 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
     }
     std::vector<std::string> steps;
 
+    // Same rule as Install: the whole plan first, from the manifest and from sizes.
+    Reporter rep;
+    rep.opts = &opts;
+    rep.plan = BuildUninstallPlan(m, aircraftDir, objects, backupDir, dryRun);
+
     // ⚠ `backed_up[]` RESTORES. The added[] lists below DELETE.
-    for (const std::string& rel : m.backedUp) {
+    rep.Begin(kStepRestore);
+    for (std::size_t ri = 0; ri < m.backedUp.size(); ++ri) {
+        rep.Sub(kStepRestore)(static_cast<double>(ri) /
+                              (m.backedUp.empty() ? 1.0 : m.backedUp.size()));
+        const std::string& rel = m.backedUp[ri];
         const fs::path src = backupDir / fsutil::PathFromUtf8(rel);
         const fs::path dest = objects / fsutil::PathFromUtf8(rel);
         std::error_code ec;
@@ -777,10 +1070,13 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         steps.push_back("Restored original " + rel);
     }
 
+    rep.Finish(kStepRestore);
+
     // ⚠ THE MIRROR OF THE LOOP ABOVE, and normally empty: a file we wrote that had
     // no stock original is ours alone, so it is DELETED rather than restored.
     // UNGATED, unlike the interior and screens lists — there is no per-axis flag to
     // hang it on, and an entry here means an exterior install already happened.
+    rep.Begin(kStepRemove);
     for (const std::string& rel : m.added) {
         const fs::path f = objects / fsutil::PathFromUtf8(rel);
         std::error_code ec;
@@ -792,7 +1088,10 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         }
     }
 
+    rep.Finish(kStepRemove);
+
     if (m.realwingsPatched && !m.realwingsDir.empty()) {
+        rep.Begin(kStepRealWings);
         std::error_code ec;
         if (fs::is_directory(fsutil::PathFromUtf8(m.realwingsDir), ec) && !ec) {
             try {
@@ -813,6 +1112,7 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
             steps.push_back("RealWings mod folder no longer present — nothing to "
                             "reverse");
         }
+        rep.Finish(kStepRealWings);
     }
 
     // ── display glow ─────────────────────────────────────────────────────────
@@ -823,9 +1123,11 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
     // behind by the reverse order is invisible until the user wonders why their
     // `.acf` differs from stock.
     if (m.screens.installed) {
+        rep.Begin(kStepScreens);
         if (!m.screens.acfPatched.empty()) {
             const auto res = patch_acf_screens::Run(fsutil::PathToUtf8(aircraftDir),
-                                                    true, dryRun);
+                                                    true, dryRun,
+                                                    rep.Sub(kStepScreens));
             LogLines(log, "acf screens", res.log);
             steps.push_back("Detached the display-glow OBJ from " +
                             std::to_string(res.touched.size()) + " .acf file(s)");
@@ -840,12 +1142,14 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
                 steps.push_back("Removed added file " + name);
             }
         }
+        rep.Finish(kStepScreens);
     }
 
     // ── interior ─────────────────────────────────────────────────────────────
     // The OBJ and the nine stock-replacing textures are already restored by the
     // backed_up loop above. What remains is what a backup cannot express.
     if (m.interior.installed) {
+        rep.Begin(kStepLiveries);
         // 1. Files we ADDED, which never had a stock original to restore. These must
         //    be deleted or they linger in the aircraft folder forever.
         for (const std::string& name : m.interior.added) {
@@ -882,17 +1186,21 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         // 3. ⚠ The `.acf` spot patch, reversed by WRITING STOCK VALUES BACK rather
         //    than restoring a snapshot — so other mods' edits to the same file
         //    (Durantula rewrites 312 lines of it) survive.
+        rep.Finish(kStepLiveries);
+        rep.Begin(kStepInteriorAcf);
         if (!m.interior.acfPatched.empty()) {
-            const auto res =
-                patch_acf::Run(fsutil::PathToUtf8(aircraftDir), true, dryRun);
+            const auto res = patch_acf::Run(fsutil::PathToUtf8(aircraftDir), true,
+                                            dryRun, rep.Sub(kStepInteriorAcf));
             LogLines(log, "acf", res.log);
             steps.push_back("Restored stock cockpit spot lights in " +
                             std::to_string(res.touched.size()) + " .acf file(s)");
         }
 
         if (!dryRun) fsutil::RemoveDirIfEmpty(backupDir / "liveries");
+        rep.Finish(kStepInteriorAcf);
     }
 
+    rep.Begin(kStepManifest);
     log.Write("removing " + fsutil::PathToUtf8(backupDir));
     if (!dryRun) {
         for (const std::string& rel : m.backedUp) {
@@ -904,6 +1212,7 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         fsutil::RemoveDirIfEmpty(backupDir);   // only succeeds if now empty
     }
     steps.push_back(std::string("Removed ") + kBackupDirName + " and manifest");
+    rep.Finish(kStepManifest);
 
     if (opts.removePlugin) {
         const fs::path pluginRoot = fsutil::PathFromUtf8(opts.xplaneRoot) /

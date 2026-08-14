@@ -12,11 +12,15 @@
 
   What it does, in order:
     1. (-Test only) the unit suite -- python -m unittest discover -s tests
-    2. the overlay starter images   -- build/make_overlays.py
-    3. the aircraft OBJs, into the live install
+    2. the overlay images           -- build/make_overlays.py, then copied into
+                                       the plugin folder. Steps 1-2 run BEFORE
+                                       the sim-is-running check, so an overlay
+                                       edit reaches a RUNNING X-Plane (below).
+    3. the X-Plane-is-running check -- everything past here needs it closed
+    4. the aircraft OBJs, into the live install
                                     -- build/build_objs.py build --target all --write
-    4. the plugin                   -- cmake configure + build
-    5. copies the .xpl + overlays into X-Plane, and links panelfx.txt back here
+    5. the plugin                   -- cmake configure + build
+    6. copies the .xpl into X-Plane, and links panelfx.txt back here
 
   Options:
     -XPlaneRoot <path>   X-Plane 12 folder (default: the Steam install). Exported
@@ -39,8 +43,12 @@
                          debug lights draw at seed colors and ignore every knob.
                          Re-run without -DebugObjs to put the real OBJs back.
     -Test                run the unit suite first and stop if it fails (~10 s).
-    -NoObjs              skip steps 2-3; plugin only.
-    -NoBuild             skip step 4; just copy the already-built .xpl.
+                         Ahead of the overlay copy too, so a failing suite means
+                         nothing at all reached the sim.
+    -NoObjs              skip the OBJ build and the overlay REGENERATION; the
+                         overlays already in src/native/overlays are still
+                         copied in. Plugin only, otherwise.
+    -NoBuild             skip step 5; just copy the already-built .xpl.
     -Config <cfg>        build config (default: Release)
     -Target <t>          what to hand build_objs.py (default: all = exterior +
                          interior + screens). `both` omits the screens OBJ.
@@ -51,8 +59,17 @@
   The two plugin builds go to SEPARATE folders (build/ and build-dev/), so
   switching between them is a copy rather than a full rebuild.
 
-  Notes: X-Plane must be CLOSED (a loaded .xpl is locked and can't be
-  overwritten), and that is checked BEFORE any work so a refusal costs nothing.
+  Notes: X-Plane must be CLOSED for steps 3-6 (a loaded .xpl is locked and can't
+  be overwritten), and that is checked before any of them so a refusal costs a
+  test run at worst rather than a full compile.
+
+  THE OVERLAY IMAGES ARE THE ONE EXCEPTION and that is why they run first: the
+  plugin reads each one into a texture ONCE and closes the file, so replacing
+  them under a running sim locks nothing and loses nothing -- click "Rescan
+  images" on the Dev window's Panel FX tab to see the new bytes without a
+  restart. A deploy with the sim open therefore updates the overlays and THEN
+  refuses, deliberately: that is the supported way to push an edited overlay
+  without quitting.
   Windows/win_x64 only.
 #>
 [CmdletBinding()]
@@ -121,41 +138,93 @@ function Invoke-RepoPython {
     } finally { Pop-Location }
 }
 
-# Checked FIRST, before cmake and before anything is written. These used to sit
-# after the build, so a run with the sim open spent a full compile to reach a
+# The Panel FX overlay images, into the plugin folder beside the .xpl.
+#
+# Copied by NAME, never as a folder mirror: the same folder is where you drop
+# your own images, and a Copy-Item of the whole tree with -Force is one typo away
+# from deleting them. The corollary is that deleting an image HERE leaves the
+# installed copy behind -- remove that one by hand.
+#
+# ⚠ A file that will not copy WARNS and the rest still go. This deliberately runs
+# against a live sim, so "the paint program I am editing it in has it open" is a
+# normal thing to hit, and it must not cost the other five images or the deploy.
+function Copy-Overlays {
+    param([string] $Root)
+    $src = Join-Path $here 'overlays'
+    if (-not (Test-Path $src)) { return 0 }
+    $dst = Join-Path $Root 'Resources\plugins\ToLissPhoton\overlays'
+    New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    $ok = 0
+    foreach ($f in (Get-ChildItem $src -File)) {
+        try {
+            Copy-Item $f.FullName (Join-Path $dst $f.Name) -Force -ErrorAction Stop
+            $ok++
+        } catch {
+            Write-Host ("           {0} NOT copied: {1}" -f $f.Name, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+    Write-Host ("Overlays: {0} image(s) -> {1}" -f $ok, $dst) -ForegroundColor Cyan
+    return $ok
+}
+
+# Checked FIRST, before cmake and before anything is written. This used to sit
+# after the build, so a run with a bad path spent a full compile to reach a
 # refusal it could have made in a millisecond.
 if (-not (Test-Path (Join-Path $XPlaneRoot 'Resources\plugins'))) {
     throw "not an X-Plane 12 folder (no Resources\plugins): $XPlaneRoot  (pass -XPlaneRoot)"
-}
-if (Get-Process -Name 'X-Plane' -ErrorAction SilentlyContinue) {
-    throw "X-Plane is running. Close it fully, then re-run - a loaded .xpl is locked and cannot be overwritten."
 }
 # build_objs.py --write finds X-Plane by its own rules ($XPLANE_ROOT -> the
 # repo's Log.txt symlink -> the Steam default). Exporting -XPlaneRoot is what
 # stops a deploy from putting the .xpl in one install and the OBJs in another.
 $env:XPLANE_ROOT = $XPlaneRoot
 
-if ($Test -or -not $NoObjs) {
-    $py = Find-Python
-    if ($Test) {
-        Invoke-RepoPython $py @('-m','unittest','discover','-s','tests') "Running tests..."
+$py = $null
+if ($Test -or -not $NoObjs) { $py = Find-Python }
+
+# ⚠ Ahead of the overlays, not just ahead of the build: -Test means "run the
+# suite first and stop if it fails", and that is only a gate if NOTHING has
+# reached the sim by the time it fires. The cost is that -Test with the sim open
+# pays ~10 s before the refusal below, which is the trade that keeps the gate
+# honest.
+if ($Test) {
+    Invoke-RepoPython $py @('-m','unittest','discover','-s','tests') "Running tests..."
+}
+
+# ---- the one part that is safe under a RUNNING sim -------------------------
+# The plugin reads each overlay into a texture ONCE and closes the file, and the
+# folder is not polled (see DrawPanelFx) -- so nothing holds these open and
+# replacing them mid-session locks nothing. That is why they land BEFORE the
+# running check rather than with the rest of the copies: a deploy with X-Plane up
+# is the supported way to push an edited overlay, picked up by "Rescan images" on
+# the Dev window's Panel FX tab. Everything below the check writes a file the sim
+# has open.
+if (-not $NoObjs) {
+    Invoke-RepoPython $py @('build/make_overlays.py') "Generating overlay images..."
+}
+$overlayCount = Copy-Overlays $XPlaneRoot
+
+if (Get-Process -Name 'X-Plane' -ErrorAction SilentlyContinue) {
+    # Say what DID land. Otherwise the red line reads as "nothing happened", and
+    # the whole reason the overlays moved above this check is that something did.
+    if ($overlayCount -gt 0) {
+        Write-Host ("The {0} overlay image(s) ARE updated and need no restart - hit `"Rescan images`" on the Dev window's Panel FX tab." -f $overlayCount) -ForegroundColor Yellow
     }
-    if (-not $NoObjs) {
-        # Before the copy below, which seeds these into the plugin folder.
-        Invoke-RepoPython $py @('build/make_overlays.py') "Generating overlay images..."
-        # --write installs each OBJ into the live aircraft as well as dist/.
-        # Default target is `all`: `both` silently omits the screens OBJ, which
-        # is what makes an edited screens fixture look like it did not rebuild.
-        # --debug only applies to the debug-capable targets (interior, screens);
-        # cmd_build scopes it, so the exterior stays a normal build either way.
-        $objArgs = @('build/build_objs.py','build','--target',$Target,'--wing',$Wing,'--write')
-        if ($DebugObjs) {
-            $objArgs += '--debug'
-            Write-Host "DEBUG OBJs - interior + screens lights are live-tunable. Not installable, never ship dist/ from this state." -ForegroundColor Yellow
-        }
-        Invoke-RepoPython $py $objArgs `
-            "Building OBJs ($Target, $Wing$(if ($DebugObjs) { ', DEBUG' })) into $XPlaneRoot..."
+    throw "X-Plane is running. Close it fully, then re-run - the plugin and the OBJs cannot be written while the sim holds them open."
+}
+
+if (-not $NoObjs) {
+    # --write installs each OBJ into the live aircraft as well as dist/.
+    # Default target is `all`: `both` silently omits the screens OBJ, which
+    # is what makes an edited screens fixture look like it did not rebuild.
+    # --debug only applies to the debug-capable targets (interior, screens);
+    # cmd_build scopes it, so the exterior stays a normal build either way.
+    $objArgs = @('build/build_objs.py','build','--target',$Target,'--wing',$Wing,'--write')
+    if ($DebugObjs) {
+        $objArgs += '--debug'
+        Write-Host "DEBUG OBJs - interior + screens lights are live-tunable. Not installable, never ship dist/ from this state." -ForegroundColor Yellow
     }
+    Invoke-RepoPython $py $objArgs `
+        "Building OBJs ($Target, $Wing$(if ($DebugObjs) { ', DEBUG' })) into $XPlaneRoot..."
 }
 
 if (-not $NoBuild) {
@@ -186,21 +255,8 @@ $info = Get-Item $dst
 Write-Host ("deployed -> {0}" -f $dst) -ForegroundColor Green
 Write-Host ("           {0:N0} bytes, {1}" -f $info.Length, $info.LastWriteTime)
 
-# Starter overlay images for the Panel FX compositor. Copied by NAME, never as a
-# folder mirror: the same folder is where you drop your own images, and a
-# Copy-Item of the whole tree with -Force is one typo away from deleting them.
-# Regenerate the generated ones with `python build/make_overlays.py`.
-$overlaySrc = Join-Path $here 'overlays'
-if (Test-Path $overlaySrc) {
-    $overlayDst = Join-Path $XPlaneRoot 'Resources\plugins\ToLissPhoton\overlays'
-    New-Item -ItemType Directory -Force -Path $overlayDst | Out-Null
-    $n = 0
-    Get-ChildItem $overlaySrc -File | ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $overlayDst $_.Name) -Force
-        $n++
-    }
-    Write-Host ("           {0} starter overlay image(s) -> {1}" -f $n, $overlayDst)
-}
+# The overlay images were copied ABOVE, before the running check -- they are the
+# only thing here that can be written to a live sim. See Copy-Overlays.
 
 # The Panel FX layer definition, as a SYMLINK back into the repo.
 #
@@ -257,6 +313,7 @@ if ($Dev) {
 Write-Host ""
 Write-Host "Deployed:" -ForegroundColor Green
 Write-Host ("  plugin   {0} build -> {1}" -f $(if ($Dev) { 'DEV' } else { 'release' }), $XPlaneRoot)
+Write-Host ("  overlays {0} image(s) -> the plugin folder{1}" -f $overlayCount, $(if ($NoObjs) { ' (not regenerated: -NoObjs)' } else { '' }))
 if ($NoObjs) {
     Write-Host "  OBJs     SKIPPED (-NoObjs) - the aircraft lights in the sim are whatever was there before"
 } else {

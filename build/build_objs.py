@@ -71,7 +71,11 @@ OBJ_TARGETS = {
              "screens": "lights_screens.obj"},
     "a321": {"exterior": "lights_out321_XP12.obj", "interior": "lights_inn.obj",
              "screens": "lights_screens.obj"},
-    "a339": {"exterior": "ExternalLights_XP12.obj"},
+    # No "interior" key — decision #14 keeps the A330-900 out of the cockpit mod
+    # entirely. It DOES carry "screens": the six display-glow lights need only the
+    # DU positions and AirbusFBW/DUBrightness, both of which this airframe has.
+    "a339": {"exterior": "ExternalLights_XP12.obj",
+             "screens": "lights_screens.obj"},
 }
 
 TARGETS = ("exterior", "interior", "screens")
@@ -150,6 +154,21 @@ DEBUG_MANIFESTS = {
     "screens": "lights_screens.debug.json",
 }
 DEBUG_MANIFEST = DEBUG_MANIFESTS["interior"]   # back-compat alias
+# The read-only twin, written by a PLAIN build of the same targets (2026-08-10).
+# A `--debug` OBJ is the only way to CHANGE a light, but it is a poor way to LOOK
+# at one: it is not installable, it drops the category gates, and getting it takes
+# a redeploy. So a normal build drops the same metadata beside the normal OBJ and
+# the Dev window's Lights tab reads it when no debug manifest is there, showing
+# every light read-only. Exactly one of the two exists at a time — each build
+# writes its own and deletes the other's — so the tab can tell "inspectable" from
+# "tunable" by which file it found, and neither can be stale.
+#
+# ⚠ DEV-ONLY DATA THAT NOTHING SHIPS. It lands in dist/ and, under --write, in the
+# installed aircraft; make_release.py stages OBJs by NAME and so never picks it up.
+INFO_MANIFESTS = {
+    "interior": "lights_inn.info.json",
+    "screens": "lights_screens.info.json",
+}
 # Where each target's dataref slots begin, out of the DEBUG_MAX_LIGHTS pool.
 # Bases exist so two debug OBJs never fight over a slot (2026-08-09; before this,
 # both numbered from 0 and only one could be driven at a time). The interior
@@ -542,6 +561,13 @@ class Emitter:
         # ruling them out is worth keeping one flag away.
         self.debug_pos = bool(debug_pos) and self.debug
         self.debug_lights = []  # manifest rows, filled during emit() when debug
+        # The read-only manifest, filled during emit() when NOT debug (see
+        # INFO_MANIFESTS). One row per physical light, as in debug_lights — but a
+        # plain build renders each light once per PROFILE branch, so a row
+        # accumulates a `variants` list instead of one set of values, and
+        # _info_index is what recognizes the same light coming round again.
+        self.info_lights = []
+        self._info_index = {}
         self.nonunit_dirs = {}  # light type -> (dir, length); see check_unit_dir
         self.annotate = annotate  # emit "# @fixture|gi|li|side" tags (bootstrap)
         self.palettes = cfg["palettes"]
@@ -571,6 +597,106 @@ class Emitter:
     def dref(self, category):
         return f"ToLissPhoton/{self.target}/{category}"
 
+    def light_source(self, merged, cls, index):
+        """Which brightness knob a light rides, as `(source, index)`.
+
+        LIGHT_SPILL_CUSTOM has no INDEX slot, so without this a manifest light
+        would ignore the very rheostat it is identified by. Shared by BOTH
+        manifests deliberately: the debug and info rows describe the same lights
+        and a second copy of this rule would let them disagree about which knob
+        a lamp is on — the misidentification this project has already made
+        twice (see CLAUDE.md on `mainpnl`)."""
+        if self.target == "screens":
+            # Every screens light is on a display, never a rheostat, so this is
+            # decided by TARGET rather than by probing the light — a screen light
+            # declares `index:` (its AirbusFBW/DUBrightness slot) and would
+            # otherwise be misread as a panel rheostat by the branch below.
+            # ⚠ This index must agree with kScreenDU in src/native/src/plugin.cpp.
+            return "du", index
+        if "spill_dref" in merged:
+            # A spill that DECLARES an `index:` is on a rheostat like any other
+            # light; only an index-less one is on the map knob (int_spot3). Tested
+            # on declaration, not on the resolved value: `index` defaults to 0,
+            # itself a real rheostat (panel[0], the dome). A spill carries no light
+            # class, so "panel" is the default family.
+            return ("panel", index) if "index" in merged else ("map", 0)
+        if cls == "airplane_inst_sp":
+            return "inst", index
+        return "panel", index
+
+    def light_manifest_name(self, merged, boost):
+        """The name both manifests know a light by. ⚠ Identity in the tuning file
+        is FIXTURE + this, so it must not depend on the branch being rendered."""
+        label = merged.get("label")
+        name = merged.get("_type", "?") + (f"#{label}" if label else "")
+        return name + " (simplified)" if boost is not None else name
+
+    def manifest_slot(self, rows):
+        """The next dataref slot for `rows`, bounds-checked against this target's
+        window. Both manifests number from the same bases and in the same order,
+        so `slot 12` names one light whichever build you are looking at."""
+        base = DEBUG_SLOT_BASE[self.target]
+        # This target's slots end where the next base begins (or at the pool end).
+        above = [b for b in DEBUG_SLOT_BASE.values() if b > base]
+        limit = min(above) if above else DEBUG_MAX_LIGHTS
+        n = base + len(rows)
+        if n >= limit:
+            raise SystemExit(
+                f"{self.target!r} ran past its light-manifest slot window "
+                f"[{base}, {limit}) — move the bases apart in DEBUG_SLOT_BASE (and "
+                f"raise DEBUG_MAX_LIGHTS / kDbgMaxLights / DebugMaxLights together "
+                f"if the pool itself is full)")
+        return n
+
+    def info_row(self, merged, *, cls, pos, d, cone, rgb, index, size, alpha,
+                 category, fixture_name, mount, profile, side, group_index,
+                 light_index, boost=None):
+        """Record one light in the read-only INFO manifest (see INFO_MANIFESTS).
+
+        Called once per PROFILE BRANCH for the same physical light, because that
+        is how a shipping OBJ is built: N ANIM_hide-gated copies, one per look,
+        and the category dataref picks between them. So the row is created on the
+        first branch and every branch appends its resolved values to `variants`.
+
+        ⚠ VARIANT ORDER IS THE DATAREF VALUE — `variants[2]` is what draws when
+        the category reads 2 — which is the same contract branch_gate() emits the
+        gates from. The plugin indexes the list directly rather than matching
+        profile names, so nothing has to agree about spelling.
+
+        The row carries no `n` of its own beyond the shared slot numbering and no
+        ANIM_trans wrappers exist in a plain OBJ, so nothing here is drivable:
+        this is metadata for looking at, and the Lights tab shows it disabled."""
+        key = (fixture_name, side or "", group_index, light_index, boost is not None)
+        row = self._info_index.get(key)
+        if row is None:
+            source, idx = self.light_source(merged, cls, index)
+            row = {
+                "n": self.manifest_slot(self.info_lights),
+                "name": self.light_manifest_name(merged, boost),
+                "fixture": fixture_name,
+                "category": category,
+                "class": cls or "LIGHT_SPILL_CUSTOM",
+                "source": source,
+                "index": idx,
+                "mount": mount,
+                "pos": pos,
+                "dir": d,
+                "variants": [],
+            }
+            if boost is not None:
+                row["boost"] = boost
+            self._info_index[key] = row
+            self.info_lights.append(row)
+        _, idx = self.light_source(merged, cls, index)
+        row["variants"].append({
+            "profile": profile,
+            "rgb": rgb,
+            "alpha": alpha,
+            "size": size,
+            "cone": cone,
+            "index": idx,
+        })
+
     def debug_line(self, merged, *, original, cls, pos, d, cone, rgb, index, size,
                    category, fixture_name, mount, boost=None):
         """One light, re-expressed as a tunable LIGHT_SPILL_CUSTOM, plus the
@@ -589,45 +715,11 @@ class Emitter:
         `boost`, so the Dev window can drive the factor as one live multiplier
         across every simplified flood; the baked seed is size*boost so a
         plugin-absent load still shows the authored optimized look."""
-        base = DEBUG_SLOT_BASE[self.target]
-        # This target's slots end where the next base begins (or at the pool end).
-        above = [b for b in DEBUG_SLOT_BASE.values() if b > base]
-        limit = min(above) if above else DEBUG_MAX_LIGHTS
-        n = base + len(self.debug_lights)
-        if n >= limit:
-            raise SystemExit(
-                f"debug build: the {self.target!r} target ran past its slot window "
-                f"[{base}, {limit}) — move the bases apart in DEBUG_SLOT_BASE (and "
-                f"raise DEBUG_MAX_LIGHTS / kDbgMaxLights / DebugMaxLights together "
-                f"if the pool itself is full)")
-        if self.target == "screens":
-            # Every screens light is on a display, never a rheostat, so this is
-            # decided by TARGET rather than by probing the light — a screen light
-            # declares `index:` (its AirbusFBW/DUBrightness slot) and would
-            # otherwise be misread as a panel rheostat by the branch below.
-            # ⚠ This index must agree with kScreenDU in src/native/src/plugin.cpp.
-            source, idx = "du", index
-        elif "spill_dref" in merged:
-            # A spill that DECLARES an `index:` is on a rheostat like any other
-            # light; only an index-less one is on the map knob (int_spot3). Tested
-            # on declaration, not on the resolved value: `index` defaults to 0,
-            # itself a real rheostat (panel[0], the dome). A spill carries no light
-            # class, so "panel" is the default family.
-            if "index" in merged:
-                source, idx = "panel", index
-            else:
-                source, idx = "map", 0
-        elif cls == "airplane_inst_sp":
-            source, idx = "inst", index
-        else:
-            source, idx = "panel", index
-        label = merged.get("label")
-        name = merged.get("_type", "?") + (f"#{label}" if label else "")
-        if boost is not None:
-            name += " (simplified)"
+        n = self.manifest_slot(self.debug_lights)
+        source, idx = self.light_source(merged, cls, index)
         row = {
             "n": n,
-            "name": name,
+            "name": self.light_manifest_name(merged, boost),
             "fixture": fixture_name,
             "category": category,
             "class": cls or "LIGHT_SPILL_CUSTOM",
@@ -734,7 +826,7 @@ class Emitter:
 
     def light_line(self, light, *, profile, side, group, fixture, mirror,
                    fixture_name="", category="", mount=None, boost=1.0,
-                   optimized=False):
+                   optimized=False, group_index=0, light_index=0):
         # appearance from the light type; placement (position/dir) from the light
         tpl = self.types[light["type"]] if "type" in light else {}
         merged = {**tpl, **{k: v for k, v in light.items() if k != "type"}}
@@ -795,8 +887,12 @@ class Emitter:
         # which may modify them, and draws them UNMODIFIED if the dataref is not
         # found. So with the plugin absent this still draws at its baked alpha —
         # which is why alpha is baked conservatively (dim, not glaring).
+        # Hoisted out of the branch below because the info manifest wants it for
+        # every light: a LIGHT_PARAM bakes an INDEX where a spill bakes alpha, so
+        # 1.0 is what the non-spill classes effectively carry.
+        alpha = (self.field(merged.get("alpha", 1), profile, side)
+                 if "spill_dref" in merged else 1.0)
         if "spill_dref" in merged:
-            alpha = self.field(merged.get("alpha", 1), profile, side)
             nums = pos + rgb + [alpha, slot] + d + [cone]
             fields = [fmt(x) for x in nums]
             original = ("\tLIGHT_SPILL_CUSTOM\t" + " ".join(fields)
@@ -816,6 +912,16 @@ class Emitter:
                 index=index, size=self.field(merged.get("size", 1), profile, side),
                 category=category, fixture_name=fixture_name, mount=mount,
                 boost=boost if optimized else None)
+        # The read-only twin, from the same fully resolved values and on the same
+        # slot numbering — so a light is the same light in both manifests, and the
+        # Dev window's Lights tab is the same tab whichever one it found.
+        if self.target in INFO_MANIFESTS:
+            self.info_row(
+                merged, cls=cls, pos=pos, d=d, cone=cone, rgb=rgb, index=index,
+                size=self.field(merged.get("size", 1), profile, side), alpha=alpha,
+                category=category, fixture_name=fixture_name, mount=mount,
+                profile=profile, side=side, group_index=group_index,
+                light_index=light_index, boost=boost if optimized else None)
         return original
 
     def groups_of(self, fixture):
@@ -954,12 +1060,17 @@ class Emitter:
 
             # A debug light is a multi-line block, so split rather than assume one
             # line. reindent() recomputes depth from ANIM nesting later.
-            def render(light, into, boost=1.0, optimized=False):
+            # ⚠ li_idx is not decoration: it is half of the identity the INFO
+            # manifest merges a light's profile branches on (fixture, group,
+            # light, side, simplified-or-not). Nothing else distinguishes two
+            # lamps of the same type in one group — the names REPEAT.
+            def render(light, into, boost=1.0, optimized=False, li_idx=0):
                 emitted = self.light_line(
                     light, profile=profile, side=side,
                     group=g, fixture=fixture, mirror=mirror,
                     fixture_name=name, category=category or "", mount=mount,
-                    boost=boost, optimized=optimized)
+                    boost=boost, optimized=optimized,
+                    group_index=gi_idx, light_index=li_idx)
                 for sub in emitted.split("\n"):
                     into.append(gi + "\t" + sub.lstrip("\t"))
 
@@ -976,7 +1087,7 @@ class Emitter:
                 dest = body if opt is None else full
                 if self.annotate:
                     dest.append(f"{gi}\t# @{name}|{gi_idx}|{li_idx}|{side or 'c'}")
-                render(light, dest)
+                render(light, dest, li_idx=li_idx)
             # The boosted light appears TWICE — once at its authored size in the
             # stack, once scaled in the reduced set — because the two sets are
             # alternatives, not layers. A `drop` light appears once, in the stack
@@ -984,11 +1095,11 @@ class Emitter:
             # debug build's slot numbers run in text order (the stack first, then
             # its simplified copy) — the manifest is emitted in slot order and
             # the position/marker arrays index by slot.
-            for light in g["lights"]:
+            for li_idx, light in enumerate(g["lights"]):
                 opt = self.optimize_of(
                     light, f"{self.airframe} {name} {light.get('type', '?')}")
                 if opt and opt[0] == "boost":
-                    render(light, lean, boost=opt[1], optimized=True)
+                    render(light, lean, boost=opt[1], optimized=True, li_idx=li_idx)
             if full:
                 body.append(f"{gi}\tANIM_begin")
                 body.append(f"{gi}\t\t{self.optimize_gate(False)}")
@@ -1397,12 +1508,16 @@ def _write_live(airframe, src: Path):
     return True
 
 
-def _remove_manifest(path: Path):
-    """Delete a stale `<obj>.debug.json`, quietly if it was not there.
+def _remove_manifest(path: Path, why: str):
+    """Delete a stale `<obj>.debug.json` / `<obj>.info.json`, quietly if it was
+    not there.
 
-    Paired with the manifest write in cmd_build: a target built WITHOUT --debug
-    has to clear the manifest a previous --debug build left, or the dev Lights
-    tab drives datarefs the installed OBJ no longer binds."""
+    Paired with the manifest writes in cmd_build: EXACTLY ONE of the two exists
+    at a time, so each build clears the other's. A target built WITHOUT --debug
+    has to clear the debug manifest, or the dev Lights tab drives datarefs the
+    installed OBJ no longer binds; a --debug build has to clear the info
+    manifest, or the tab could show a read-only view of an OBJ that is in fact
+    tunable."""
     try:
         path.unlink()
     except FileNotFoundError:
@@ -1410,16 +1525,16 @@ def _remove_manifest(path: Path):
     except OSError as exc:                     # locked, read-only, gone mid-call
         print(f"  ! could not remove stale {path.name}: {exc}")
         return False
-    print(f"removed stale {_rel(path)} (this build is not a --debug one)")
+    print(f"removed stale {_rel(path)} ({why})")
     return True
 
 
-def _remove_live_manifest(airframe, name):
+def _remove_live_manifest(airframe, name, why: str):
     """The same, in the installed aircraft's objects/ folder."""
     objects, reason = _find_aircraft_dir(airframe)
     if objects is None:
         return False
-    return _remove_manifest(objects / name)
+    return _remove_manifest(objects / name, why)
 
 
 def _patch_realwings_after_build(targets, deploying):
@@ -1515,6 +1630,14 @@ def cmd_build(args):
                 print(f"wrote {_rel(mdest)} ({len(em.debug_lights)} lights)")
                 if args.write:
                     _write_live(af, mdest)
+                # This OBJ *is* tunable, so the read-only twin must go: left
+                # behind it would be the only manifest for a target the Lights
+                # tab would then present with every knob greyed out.
+                if tgt in INFO_MANIFESTS:
+                    why = "this build IS a --debug one"
+                    _remove_manifest(dest.with_name(INFO_MANIFESTS[tgt]), why)
+                    if args.write:
+                        _remove_live_manifest(af, INFO_MANIFESTS[tgt], why)
             elif tgt in DEBUG_MANIFESTS:
                 # ⚠ A PLAIN BUILD MUST TAKE THE OLD MANIFEST WITH IT. The manifest
                 # is what the Lights tab reads; the OBJ it describes has just been
@@ -1524,9 +1647,28 @@ def cmd_build(args):
                 # the light editor being broken rather than as "you are no longer
                 # running a debug OBJ". Deleting it is also what makes the tab's
                 # "no debug OBJ installed" line true.
-                _remove_manifest(dest.with_name(DEBUG_MANIFESTS[tgt]))
+                why = "this build is not a --debug one"
+                _remove_manifest(dest.with_name(DEBUG_MANIFESTS[tgt]), why)
                 if args.write:
-                    _remove_live_manifest(af, DEBUG_MANIFESTS[tgt])
+                    _remove_live_manifest(af, DEBUG_MANIFESTS[tgt], why)
+            # ...and the read-only twin takes its place, so a -Dev plugin can
+            # still SHOW every light of an installable OBJ. Written last so a
+            # target that is in DEBUG_MANIFESTS but not INFO_MANIFESTS (there is
+            # none today) simply skips it rather than falling down the elif.
+            if not debug and tgt in INFO_MANIFESTS:
+                idest = dest.with_name(INFO_MANIFESTS[tgt])
+                # pos_tunable is FALSE by construction: a plain OBJ bakes every
+                # coordinate and has no ANIM_trans wrappers, so the dev window
+                # must not offer X/Y/Z knobs. It is stated rather than omitted
+                # because the reader is the same one the debug manifest feeds.
+                blob = json.dumps({"version": 1, "mode": "info", "airframe": af,
+                                   "target": tgt, "obj": fname,
+                                   "pos_tunable": False,
+                                   "lights": em.info_lights}, indent=1)
+                atomic_write_bytes(idest, blob.encode("utf-8"))
+                print(f"wrote {_rel(idest)} ({len(em.info_lights)} lights, read-only)")
+                if args.write:
+                    _write_live(af, idest)
     if nonunit:
         print(f"note: {len(nonunit)} light type(s) have a non-unit `dir:`. X-Plane "
               f"compares `cone` against a\n  DOT PRODUCT with that vector, so aim and "

@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "core/progress.h"
+
 namespace photon {
 namespace patch_realwings {
 
@@ -119,7 +121,8 @@ struct RunResult {
 // cannot read. Otherwise a user could end up unable to undo a patch an older
 // installer applied successfully.
 RunResult Run(const std::string& rootUtf8, const PatchData& data,
-              const std::string& airframe, bool dryRun);
+              const std::string& airframe, bool dryRun,
+              const progress::StepProgress& onProgress = {});
 RunResult RunReverse(const std::string& rootUtf8, bool dryRun);
 
 }  // namespace patch_realwings

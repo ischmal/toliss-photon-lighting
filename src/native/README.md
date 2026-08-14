@@ -95,9 +95,10 @@ Needs CMake + a C++17 compiler. On this machine both ship inside **VS 18 Communi
 
 **`deploy.ps1` is the one command**, and that is the point of it: a change to the C++, to
 `lights.*.phdsl`, or to `build/make_overlays.py` all reach the sim the same way. It runs, in
-order, `build/make_overlays.py` → `build/build_objs.py build --target all --write` → cmake →
-the copies below. Any step failing stops the deploy, because a run that installs the `.xpl`
-but not the OBJs leaves the sim half-updated and looking like a lighting bug.
+order, `build/make_overlays.py` → **the overlay copy** → the X-Plane-is-running check →
+`build/build_objs.py build --target all --write` → cmake → the copies below. Any step
+failing stops the deploy, because a run that installs the `.xpl` but not the OBJs leaves the
+sim half-updated and looking like a lighting bug.
 
 ⚠ **`--target all`, not `both`** — `both` omits the screens OBJ, which is the documented way
 an edited screens fixture appears not to rebuild. Override with `-Target both` if you want
@@ -109,7 +110,17 @@ OBJ build targets the same sim — it locates X-Plane by its own rules otherwise
 this the two halves of a deploy can land in two different installs.
 
 It refuses to run while X-Plane is running — a loaded `.xpl` is locked — and that check
-happens **before** any work, so the refusal costs nothing rather than a full compile.
+happens **before** the OBJ build and the compile, so the refusal costs a `-Test` run at
+worst rather than a full compile.
+
+⚠ **The overlay images are the ONE thing that lands ahead of that check** (2026-08-10), and
+deliberately: the plugin reads each one into a texture once and closes the file, and the
+folder is not polled, so nothing holds them open and replacing them mid-session is safe. So
+`deploy.ps1` with the sim **up** is the supported way to push an edited overlay — it copies
+the images, says so, and then refuses the rest. `Rescan images` on the Panel FX tab picks up
+the new bytes without a restart; a shipping build has no rescan button, so there it waits
+for the next sim start. A file that will not copy (open in a paint program) warns and the
+others still go.
 
 The one thing it does **not** do is attach `lights_screens.obj` to the `.acf`; that belongs
 to `install.py`'s base install (or `build/patch_acf_screens.py`), and a ToLiss update reverts
@@ -127,33 +138,50 @@ macOS / Linux: `cmake -B build && cmake --build build`. Output lands in the fat-
 layout X-Plane expects — `build/ToLissPhoton/<arch>/ToLissPhoton.xpl`, arch =
 `win_x64 | mac_x64 | lin_x64` — and all three can sit side by side.
 
-## Running `photon-installer` while working on it
+## Running and testing `photon-installer`
 
-⚠ **The freshly built binary does NOT work where CMake leaves it.** It resolves its
-bundle from its own directory (`payload/`, then `data/`), and nothing stages one into
-the build tree — so a bare run out of `build/Release/` reports *"no bundled payload …
-this build is incomplete"*, which reads as a broken checkout rather than a missing
-step. That is what `--payload-dir` is for:
+**One command.** `deploy.ps1` puts the plugin and the OBJs into X-Plane;
+`run-installer.ps1` builds the thing users double-click and starts it.
 
 ```powershell
-python build\make_release.py --plugin-dir src\native\build\ToLissPhoton   # once
-& $cmake --build build --config Release --target photon-installer        # each edit
-..\..\src\native\build\Release\photon-installer.exe --payload-dir ..\..\release\payload --dry-run
+src\native\run-installer.ps1 -DryRun            # the GUI. THE usual one.
+src\native\run-installer.ps1 -Tui -DryRun       # the terminal installer
+src\native\run-installer.ps1 -Cli detect --json # a headless subcommand
+src\native\run-installer.ps1 -Payload -Test -DryRun   # restage + both suites first
 ```
 
-Stage the bundle **once**, then the loop is a rebuild. Restaging instead re-copies
-~58 MiB of interior textures every time, which is the whole reason the flag exists.
+⚠ **`-DryRun` is how you test an install.** Without it the installer writes to a
+real X-Plane install — it is the shipping tool, not a sandbox.
 
-`--payload-dir` is accepted by every mode — the interactive run and each subcommand —
-because it is handled before the two split apart. ⚠ **A path that is not a directory
-is refused by name** (exit 2), rather than falling through to the generic
-"this build is incomplete": that message would send you to re-download a bundle that
-is fine, over an argument you mistyped.
+⚠ **THE SCRIPT IS THE DOCUMENTATION.** These steps change as the installer is
+reshaped, and prose about them goes stale silently — so everything a run needs
+lives in `run-installer.ps1` and its header comment, and nothing here repeats it.
+**When the steps change, change the script.** What it exists to stop you having to
+remember:
 
-⚠ **Always start with `--dry-run`.** Without it the installer writes to a real
-X-Plane install — it is the shipping tool, not a sandbox. The interactive mode takes
-only `--dry-run`, `--xplane-root` and `--payload-dir`; anything else exits with a
-message rather than opening a full-screen UI over the top of it.
+| Trap | What the script does |
+|---|---|
+| A fresh binary has **no payload** and installing fails with "this build is incomplete" | passes `--payload-dir release\payload` when one is staged, and says so loudly when one is not |
+| Rust is installed but **not on `PATH`** (`%USERPROFILE%\.cargo\bin`) | adds it; "rustc: command not found" reads as *not installed* |
+| CMake is inside VS 18, not on `PATH` | finds it, same as `deploy.ps1` |
+| GUI and no-GUI builds share a tree → Slint recompiles on every flip | separate `build-gui/` and `build-core/` |
+| A cached `PHOTON_GUI=ON` silently makes a "plain" build need Rust | states the flag explicitly every configure |
+| A **GUI-subsystem process does not block the shell**, so `-Cli` would return before it ran | `Start-Process -Wait`, and propagates the exit code |
+| The `.xpl` needs the X-Plane SDK | configures `-DPHOTON_CORE_ONLY=ON`; the installer never needs it |
+
+Only the first Slint build is slow (it compiles from source); after that it is
+cached in `build-gui/` and a rebuild is seconds.
+
+### Doing it by hand
+
+Rarely necessary, and the script's header is the reference. The one flag worth
+knowing on its own is `--payload-dir`: it is accepted by **every** mode, because it
+is handled before the GUI/TUI/CLI split. Stage the bundle **once**
+(`python build\make_release.py --payload-only`) and the loop is a rebuild —
+restaging re-copies ~58 MiB of interior textures every time, which is why the flag
+exists. ⚠ A path that is not a directory is refused **by name** (exit 2) rather
+than falling through to "this build is incomplete", which would send you to
+re-download a bundle that is fine over an argument you mistyped.
 
 ## `PHOTON_DEV` — the one dev flag
 
@@ -201,6 +229,14 @@ window holding every knob: Exterior / Cockpit / Displays / Perf (the same four b
 shipping window uses, so a tuning pass never wonders whether a copy has drifted) · Panel FX ·
 Lights · History · Probe · Build · Log · ImGui demo.
 
+- **Lights** is the live light editor, and since 2026-08-10 it is also an **inspector**:
+  with no debug OBJ installed it reads the `*.info.json` manifest a *plain* build leaves
+  beside the normal OBJ and shows every cockpit and screen light read-only — the same
+  tree, the same numbers, knobs disabled. A build writes one manifest kind and deletes the
+  other, so which file is present decides the mode, per target. A read-only light shows
+  the profile branch that is actually drawing (`variants` is indexed by the category
+  dataref's value) and the toolbar's **branch** picker previews the other eras without
+  changing the aircraft. Full notes: `docs/dev-tools.md` § The Lights tab.
 - **Build** runs the repo's Python tooling without leaving the sim. It needs a repo path,
   persisted in `Output/preferences/ToLissPhoton_dev.txt` and seeded from `$PHOTON_REPO`.
 - ⚠ Commands run **detached on a worker thread**. A synchronous `std::system()` in a draw
@@ -279,7 +315,10 @@ vignette, scanline pattern or painted sheen works with every control the solid l
 Images live in `Resources/plugins/ToLissPhoton/overlays/` — the folder beside the `.xpl`,
 created on first use with a `README.txt` — and are picked by **name** from a combo on each
 layer's row. `deploy.ps1` seeds the repo's `src/native/overlays/` **by name**, never as a
-folder mirror, since that folder is also where you drop your own. Four of them are generated
+folder mirror, since that folder is also where you drop your own — and it does that copy
+**before** its X-Plane-is-running check, so a deploy pushes an edited overlay into a live
+sim. The cost of by-name is the other direction: an image you delete from the repo stays in
+the install until you delete it there too. Four of them are generated
 (`build/make_overlays.py`); the rest are hand-painted and cannot be regenerated.
 `Rescan images` in the Panel FX tab re-reads the folder without a restart.
 

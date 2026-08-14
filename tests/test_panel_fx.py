@@ -223,11 +223,23 @@ class PerTargetSwitchTests(unittest.TestCase):
         # ⚠ `follow` now resolves at the LAYER level (FxLayerFollows), so this
         # reads the layer-level call. The rule is the same one and applies to
         # both: every gate is evaluated before anything asks whether to dim.
+        #
+        # ⚠ The gates themselves moved into FxRectGated (2026-08-10) so the
+        # compositor can ask them of a whole target before spending any GL on it.
+        # The ORDER is what this pins, and it is now "gated first, then follow".
         body = self._fn("FxRectFactor")
-        gate = body.index("FxDriverPowered")
+        gate = body.index("FxRectGated")
         follow = body.index("FxLayerFollows")
         self.assertLess(gate, follow,
                         "the power gate must be evaluated before `follow`")
+        # And what FxRectGated tests must still be the gates, not the dimming.
+        gated = self._fn("FxRectGated")
+        self.assertIn("FxDriverPowered", gated)
+        self.assertNotIn("FxLayerFollows", gated,
+                         "FxRectGated must stay layer-independent — a layer with "
+                         "`follow` off draws at full strength through a dark "
+                         "knob, so a per-layer test here would skip exactly the "
+                         "layers the setting exists for")
 
     def test_a_layers_follow_inherits_from_its_stack_not_from_the_master(self):
         # Three levels — master, target, layer — and each Inherit resolves to the
@@ -450,6 +462,42 @@ class AmbientBlendTests(unittest.TestCase):
         # cockpit in its night look because one dataref went missing.
         self.assertRegex(self._fn("FxAmbientRawNow"),
                          r"return best < 0\.0f \? gFxAmbientRaw : best;")
+
+    def test_the_sun_gate_scales_the_target_before_the_smoothing(self):
+        # The cockpit light level is ANALYTIC — computed from the light sources,
+        # not from the rendered frame — so a red-heavy dome lamp reads as
+        # daylight through the MAX and swaps the screens to their day look at
+        # midnight. The sun gate multiplies the TARGET, inside the sampler, so
+        # dawn still arrives through the same smoothing as everything else and
+        # the manual pin (read in FxAmbientNow) still outranks it.
+        body = self._fn("FxSampleAmbient")
+        self.assertIn("target *= FxAmbientSunGate();", body)
+        self.assertLess(body.index("FxAmbientSunGate"),
+                        body.index("gFxAmbient = target"),
+                        "the gate must land before the first-sample snap, or a "
+                        "session's first frame escapes it")
+
+    def test_an_unresolved_sun_ref_holds_the_gate_open(self):
+        # Same house rule as the drivers and the source above: a missing dataref
+        # must not repaint the whole cockpit in its other look. Open means the
+        # light level alone decides — exactly the pre-gate behavior.
+        self.assertRegex(self._fn("FxAmbientSunGate"),
+                         r"if \(!gFxSunPitchRef\) return 1\.0f;")
+
+    def test_the_sun_gate_wire_line_round_trips(self):
+        # Written always (same reason as the ambient line: a file that omitted
+        # it would silently re-adopt the constants), and read into LOCALS
+        # adopted whole — the ramp rule: operator>> zeroes its target on
+        # failure, so a short line would otherwise leave one end of the gate at
+        # 0 degrees, which is a subtly different gate rather than a visibly
+        # broken one.
+        self.assertIn('"ambientsun %.2f %.2f\\n"', PLUGIN_CPP)
+        m = re.search(r'key == "ambientsun"(?:.*?\n)*?\s*\} else', PLUGIN_CPP)
+        self.assertIsNotNone(m)
+        self.assertRegex(m.group(0), r"float lo = 0\.0f, hi = 0\.0f;")
+        self.assertRegex(m.group(0),
+                         r"if \(in >> lo >> hi\) \{ gFxAmbientSunLo = lo; "
+                         r"gFxAmbientSunHi = hi; \}")
 
 
 class PerLayerWireTests(unittest.TestCase):
@@ -887,6 +935,313 @@ class BrightnessPinTests(unittest.TestCase):
         self.assertIn("drive(gFxStacks[s].bright)", body)
 
 
+class AircraftFamilyTests(unittest.TestCase):
+    """Which cockpits a stack may paint on (2026-08-11).
+
+    ⚠ THE BUG THIS CLOSES was not that the gating was wrong — there was none.
+    `PanelTargetByName` resolves against a compile-time table, so every stack in
+    `panelfx.txt` resolved and painted on whatever aircraft was loaded, and
+    `docs/fcu_tint_plan.md` §4's claim that non-A3xx targets "do not resolve and
+    the stacks are dropped with a log line" described behavior the code never had.
+
+    Every failure in here is silent in the sim in one of two opposite ways: a
+    scope that fails open paints A3xx artwork on somebody else's panel, and a
+    scope that fails closed makes a shipped effect vanish with nothing to see."""
+
+    def _fn(self, name):
+        m = re.search(r"static [\w:]+ %s\(.*?\n\}" % name, PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "%s moved or was renamed" % name)
+        return m.group(0)
+
+    def _shipped_stacks(self):
+        """[(target name, [family tokens]|None)] from the shipped panelfx.txt."""
+        out, cur = [], None
+        for raw in PANELFX.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#") or not line:
+                continue
+            if line.startswith("target "):
+                cur = [line[len("target "):].strip(), None]
+                out.append(cur)
+            elif line.startswith("family ") and cur is not None:
+                cur[1] = line[len("family "):].split()
+        return [(name, fams) for name, fams in out]
+
+    def _shipped_layer_scopes(self):
+        """[(target name, [family tokens])] for every `lfamily` line in the
+        shipped panelfx.txt. Separate from _shipped_stacks because a layer scope
+        is checked against a DIFFERENT rule — it has to be a subset of its
+        target's, which an unscoped target satisfies trivially."""
+        out, cur = [], None
+        for raw in PANELFX.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#") or not line:
+                continue
+            if line.startswith("target "):
+                cur = line[len("target "):].strip()
+            elif line.startswith("lfamily ") and cur is not None:
+                out.append((cur, line[len("lfamily "):].split()))
+        return out
+
+    def _known_family_names(self):
+        m = re.search(r"kFxFamilyNames\[\]\s*=\s*\{(.*?)\};", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "kFxFamilyNames moved or was renamed")
+        return set(re.findall(r'\{\s*"([^"]+)"', m.group(1)))
+
+    def test_an_unscoped_thing_still_draws_everywhere(self):
+        """The backward-compatibility guarantee. Every stack and every layer
+        authored before scoping existed has no `family`/`lfamily` line, and 0 has
+        to keep meaning "all" — otherwise landing this change blanks the entire
+        shipped look."""
+        self.assertRegex(
+            self._fn("FxFamilyAllows"),
+            r"families == kFxFamilyNone \|\| \(families & gFxFamily\) != 0")
+        # ...and all three carriers of a mask default to it.
+        for decl in (r"unsigned families = kFxFamilyNone;",):
+            self.assertGreaterEqual(len(re.findall(decl, PLUGIN_CPP)), 3,
+                                    "a stack, a layer and a driver row each "
+                                    "default to unrestricted")
+
+    def test_the_rule_is_stated_once(self):
+        """⚠ Three things carry a family mask — a stack, a layer and a row of the
+        built-in driver table — and they must all read it through FxFamilyAllows.
+        A second copy of `== kFxFamilyNone || & gFxFamily` is how one of the three
+        eventually fails OPEN on an aircraft nobody tests on."""
+        for wrapper in ("FxStackFamilyAllows", "FxLayerFamilyAllows"):
+            self.assertIn("FxFamilyAllows(", self._fn(wrapper),
+                          "%s restates the rule instead of calling it" % wrapper)
+        # The driver table asks the same question of a row rather than filtering
+        # on gFxFamily by hand.
+        self.assertIn("if (!FxFamilyAllows(p.families)) continue;",
+                      self._fn("BuildRectDrivers"))
+        # Nowhere else spells it out. (FxFamilyAllows itself is the definition.)
+        spelled = re.findall(r"== kFxFamilyNone \|\| \(\w+ & gFxFamily\)",
+                             PLUGIN_CPP)
+        self.assertEqual(len(spelled), 1,
+                         "the family test is written out %d times" % len(spelled))
+
+    def test_the_scope_is_written_only_when_set(self):
+        """A file whose stacks and layers all paint everywhere must be
+        byte-identical to what every previous version wrote, or this change
+        rewrites the shipped look on the first dev save."""
+        w = self._fn("FxWriteFamilyLine")
+        self.assertIn("if (families == kFxFamilyNone) return;", w)
+        # ⚠ And an unnameable mask (kFxFamilyUnrecognized — a scope this build
+        # could not parse) is DROPPED rather than written as a bare `family`,
+        # which would read back as a scope naming nothing.
+        self.assertIn("if (names.empty())", w)
+        # Both levels go through it, so neither can grow its own rule.
+        ser = self._fn("SerializeFxStacks")
+        self.assertIn('FxWriteFamilyLine(out, "family"', ser)
+        self.assertIn('FxWriteFamilyLine(out, "lfamily"', ser)
+
+    def test_the_a320_reports_A20N_and_is_still_a3xx(self):
+        """⚠ THE TRAP. The ToLiss A320's `.acf` carries `acf/_ICAO A20N`, not
+        A320 — so a family list built from the obvious A319/A320/A321 misses the
+        one aircraft this project is mostly used on, and every scoped stack
+        vanishes there and nowhere else. a319 = A319, a321 = A321, a339 = A339;
+        only the A320 in this hangar is a neo, and the other neo codes are listed
+        because the next ToLiss release may well ship one."""
+        body = self._fn("FxFamilyForIcao")
+        # Split at the A3xx return, so "the A3xx branch" is the text that can
+        # actually reach it rather than everything before the A330 constant —
+        # which the A330's own `if` line precedes.
+        a3xx_branch, _, a330_branch = body.partition("return kFxFamilyA3xx;")
+        for icao in ("A319", "A320", "A321", "A19N", "A20N", "A21N"):
+            self.assertIn('"%s"' % icao, a3xx_branch,
+                          "%s does not resolve to the A3xx family" % icao)
+        for icao in ("A338", "A339"):
+            self.assertIn('"%s"' % icao, a330_branch,
+                          "%s does not resolve to the A330 family" % icao)
+            self.assertNotIn('"%s"' % icao, a3xx_branch,
+                             "%s reaches the A3xx branch" % icao)
+
+    def test_an_unparseable_scope_draws_nowhere_rather_than_everywhere(self):
+        """⚠ 0 means "unrestricted", so a `family` line whose names this build
+        does not know CANNOT resolve to 0 — that would turn a scope we failed to
+        read into no scope at all, which is exactly the paint-on-the-wrong-cockpit
+        behavior the line exists to stop. The realistic way to reach it is a file
+        written by a later Photon that knows a family this build does not."""
+        self.assertRegex(PLUGIN_CPP,
+                         r"kFxFamilyUnrecognized\s*=\s*1u << 31")
+        self.assertIn("mask = kFxFamilyUnrecognized;",
+                      self._fn("FxReadFamilyList"),
+                      "an all-unknown family line falls back to unrestricted")
+
+    def test_the_scope_is_read_into_a_local_and_adopted_whole(self):
+        """The house rule ramp and lcurve both learned. A mask built up in place
+        would leave a scope set to whatever prefix parsed if one name were
+        misspelled halfway along — a NARROWER scope than was authored, silently.
+
+        ⚠ ONE reader for both keys, for the same reason FxWriteFamilyLine is one
+        writer: the way two would drift is a layer scope that fails OPEN where the
+        target scope fails closed."""
+        reader = self._fn("FxReadFamilyList")
+        self.assertIn("unsigned mask = kFxFamilyNone;", reader)
+        self.assertIn("return mask;", reader)
+        # Each caller adopts the answer in ONE assignment.
+        body = PLUGIN_CPP[PLUGIN_CPP.index("static void DeserializeFxStacks"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("gFxStacks.back().families = FxReadFamilyList(in, &bad);",
+                      body)
+        self.assertIn("l.families = FxReadFamilyList(in, &bad);", body)
+        self.assertNotIn("families |=", body)
+
+    def test_a_layer_carries_its_own_scope(self):
+        """⚠ THE LAYER LEVEL (2026-08-13). Two families can share a target and
+        differ in one layer — the same rects, the same order, one correction that
+        is only right on one of them — and two stacks cannot say that, because a
+        stack IS its target. The gate is in the layer loop, above the enabled
+        test, so a scoped-out layer costs no texture bind, no blend equation and
+        no quad."""
+        draw = self._fn("DrawPanelFx")
+        self.assertIn("if (!FxLayerFamilyAllows(layer)) continue;", draw)
+        # ⚠ After the STACK's gate: a layer scope narrows, it cannot widen.
+        self.assertLess(draw.index("FxStackFamilyAllows"),
+                        draw.index("FxLayerFamilyAllows"))
+        # ...and before anything is drawn for it.
+        self.assertLess(draw.index("FxLayerFamilyAllows"),
+                        draw.index("DrawFxLayer(layer"))
+
+    def test_the_layer_key_is_lfamily_not_family(self):
+        """Parsing dispatches on the key alone, so a layer scope spelled `family`
+        would be read as its TARGET's by any file whose lines are reordered — and
+        would silently widen the target to whatever the last layer named. Same
+        reason lfollow and lcurve carry the l."""
+        self.assertIn('key == "lfamily"', PLUGIN_CPP)
+        # It attaches to the last LAYER, like day/ramp/lfollow/lcurve, so it is
+        # read in that branch of the chain and not the target's.
+        chain = PLUGIN_CPP[PLUGIN_CPP.index('} else if (key == "day"'):]
+        chain = chain[:chain.index('} else if (key == "bright"')]
+        self.assertIn('key == "lfamily"', chain)
+
+    def test_a_source_row_may_be_scoped_and_the_table_is_rebuilt_for_it(self):
+        """⚠ The built-in driver table is per aircraft family now, so "has it
+        been built" is the wrong question — it belongs TO a family and the
+        aircraft changes under it. A table built for an A320 and read on an A330
+        is stale in the invisible way: every driver resolves, every value reads,
+        and one face follows another aeroplane's knob.
+
+        The rebuild is EnsureRectDrivers', not a call site's: six call sites is
+        six places to remember, and both directions of getting it wrong are
+        silent."""
+        ensure = self._fn("EnsureRectDrivers")
+        self.assertIn("gRectDriversFamily != gFxFamily", ensure)
+        self.assertIn("BuildRectDrivers()", ensure)
+        self.assertIn("gRectDriversFamily = gFxFamily;",
+                      self._fn("BuildRectDrivers"),
+                      "the table never records which family it was built for")
+        # ⚠ No call site may test the old flag by hand any more.
+        self.assertNotIn("if (!gRectDriversBuilt) BuildRectDrivers();", PLUGIN_CPP)
+        self.assertGreaterEqual(PLUGIN_CPP.count("EnsureRectDrivers();"), 6)
+
+    def test_the_family_is_re_resolved_on_the_1_hz_loop(self):
+        """⚠ The tripwire this project has learned three times, applied to a
+        VALUE rather than a handle: anything read once at aircraft-load time is
+        read before the thing that supplies it is necessarily ready. And it must
+        be unconditional — an `if (!gFxFamily)` guard would never re-run once one
+        aircraft resolved, so the next aircraft would keep the previous one's
+        family for the whole session."""
+        m = re.search(r"static float AutoLoop\(.*?\n\}", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("ResolveFxFamily();", m.group(0),
+                      "the family is resolved at aircraft load only")
+        self.assertNotIn("if (!gFxFamily) ResolveFxFamily();", m.group(0))
+        # ...and on the aircraft-load path too, so it is right on frame one.
+        # ⚠ Anchored on the DEFINITION (`() {`), not the name: there is a forward
+        # declaration above, and matching that instead reads the next unrelated
+        # function and fails for a reason that has nothing to do with the rule.
+        vis = re.search(r"static void UpdateMenuVisibility\(\) \{.*?\n\}",
+                        PLUGIN_CPP, re.S)
+        self.assertIsNotNone(vis)
+        self.assertIn("ResolveFxFamily();", vis.group(0))
+
+    def test_the_gate_is_asked_once_per_stack_not_once_per_quad(self):
+        """It is a property of the STACK and cannot change inside one pass, so it
+        belongs above the per-rect gate walk — not inside FxRectGated, which is
+        held for the stack's layers and consulted per quad."""
+        draw = self._fn("DrawPanelFx")
+        self.assertIn("if (!FxStackFamilyAllows(stack)) continue;", draw)
+        # ...and before the stack is published to the paint path at all.
+        self.assertLess(draw.index("FxStackFamilyAllows"),
+                        draw.index("gFxDrawStack = &stack;"))
+        self.assertNotIn("FxStackFamilyAllows", self._fn("FxRectGated"))
+
+    def test_every_family_named_in_the_shipped_file_is_one_the_plugin_knows(self):
+        """⚠ This is what keeps the fail-closed reader above from ever mattering
+        in a release: a typo'd family name means a shipped effect that draws on no
+        aircraft at all, and the cockpit cannot tell you which of the two it is."""
+        known = self._known_family_names()
+        for name, fams in self._shipped_stacks():
+            if fams is None:
+                continue
+            self.assertTrue(fams, "target %r has an empty family line" % name)
+            for f in fams:
+                self.assertIn(f, known,
+                              "target %r names family %r, which the plugin does "
+                              "not know — it would draw nowhere" % (name, f))
+        for name, fams in self._shipped_layer_scopes():
+            self.assertTrue(fams, "a layer of %r has an empty lfamily line" % name)
+            for f in fams:
+                self.assertIn(f, known,
+                              "a layer of %r names family %r, which the plugin "
+                              "does not know — it would draw nowhere" % (name, f))
+
+    def test_no_shipped_layer_is_scoped_outside_its_target(self):
+        """⚠ A layer scope NARROWS. A layer naming a family its target excludes
+        draws on no aircraft at all — the stack is skipped before its layers are
+        reached — and there is nothing in the cockpit to tell that apart from a
+        layer someone forgot to enable. The editor warns; this is the half that
+        catches it in a file."""
+        by_target = dict(self._shipped_stacks())
+        for name, fams in self._shipped_layer_scopes():
+            target = by_target.get(name)
+            if not target:                      # unscoped target allows anything
+                continue
+            self.assertTrue(
+                set(fams) & set(target),
+                "a layer of %r is scoped to %s but the target only paints on %s, "
+                "so the layer draws nowhere" % (name, fams, target))
+
+    def test_the_screen_stacks_are_not_scoped(self):
+        """The A330-900 shares ToLiss's panel atlas layout: the six DUs, the ISIS
+        and both DCDUs all land within ~3 px of the A3xx rects, and the look was
+        confirmed good there in-sim. Scoping them would remove a working effect."""
+        scoped = {n for n, f in self._shipped_stacks() if f is not None}
+        for name in ("Main displays", "ISIS", "DCDU", "MCDU"):
+            self.assertNotIn(name, scoped,
+                             "%r is scoped, but it reads correctly on both "
+                             "families" % name)
+
+    def test_the_shipped_scopes_are_what_was_settled_in_sim(self):
+        """⚠ THIS PINS AN IN-SIM FINDING, NOT A LAW, and the finding has already
+        moved once. Six stacks were scoped `a3xx` on 2026-08-11 on the reading
+        that a look tuned to A3xx artwork reads wrong on an A330. Flown on
+        2026-08-13, five of the six read fine there and were re-enabled by the
+        user; what was actually wrong with the FCU row was its BRIGHTNESS SOURCE,
+        not its colors — the A330 drives that unit from
+        `AirbusFBW/SupplLightLevels[1]`, so the tint was tracking a knob that does
+        not exist and the row is now `a3xx a330` with a family-scoped source row.
+
+        `DME` is the one that stays: its two windows are 24 px narrower on the
+        A330 (docs/fcu_tint_plan.md §2b), so the rect genuinely does not fit.
+
+        Editing this list is how a future in-sim session records what it saw. What
+        must not happen silently is a scope DISAPPEARING with no such session —
+        the cockpit cannot tell you which of the two it was."""
+        by_name = dict(self._shipped_stacks())
+        self.assertEqual(by_name.get("DME"), ["a3xx"],
+                         "the DME windows do not fit the A330 - see §2b")
+        self.assertEqual(sorted(by_name.get("FCU row") or []), ["a330", "a3xx"],
+                         "the FCU row should paint on both families now that the "
+                         "A330 has its own brightness source")
+        for name in ("Overhead readouts", "Radios", "XPDR code", "rudder trim"):
+            self.assertIsNone(by_name.get(name),
+                              "%r was re-enabled on the A330 in-sim (2026-08-13); "
+                              "re-scoping it needs a session that saw it fail"
+                              % name)
+
+
 class ShippingBuildTests(unittest.TestCase):
     """The compositor SHIPS; the probe and the editor do not.
 
@@ -920,6 +1275,30 @@ class ShippingBuildTests(unittest.TestCase):
                        "static int ReadCbArray("):
             self.assertTrue(self._guarded(symbol),
                             "%s must stay behind #if PHOTON_DEV" % symbol)
+
+    def test_the_family_gate_ships_and_only_its_editor_does_not(self):
+        """⚠ The asymmetric one. The GATE has to ship or a release paints A3xx
+        artwork on an A330 exactly as before, while the dev machine — where the
+        checkbox is — looks correct; and the READER has to ship with it, or a
+        release silently ignores every `family` line in the file the installer
+        just put there. Only the checkbox itself is an instrument."""
+        for symbol in ("static bool FxFamilyAllows(",
+                       "static bool FxStackFamilyAllows(",
+                       "static bool FxLayerFamilyAllows(",
+                       "static void ResolveFxFamily()",
+                       "static unsigned FxFamilyForIcao(",
+                       "static std::string FxFamilyMaskNames(",
+                       # The wire, both halves: a release that ignored `lfamily`
+                       # would draw one family's layer on the other.
+                       "static unsigned FxReadFamilyList(",
+                       "static void FxWriteFamilyLine("):
+            self.assertFalse(self._guarded(symbol),
+                             "%s must not be behind #if PHOTON_DEV" % symbol)
+        for symbol in ("static bool FxFamilyRow(",
+                       "static void FxFamilyEditor("):
+            self.assertTrue(self._guarded(symbol),
+                            "the family checkboxes are an editor control and "
+                            "must stay behind #if PHOTON_DEV")
 
     def test_the_ambient_blend_ships(self):
         """It is part of the LOOK, not an instrument. Left behind the guard, a
@@ -1124,6 +1503,169 @@ class CompositorHotPathTests(unittest.TestCase):
         # a backstop.
         self.assertIn("ScanFxTextures();", self._body("LoadPanelFx"))
 
+    def test_the_containment_masks_are_resolved_once(self):
+        # PanelTargetMask derived a group's mask by walking its member NAMES on
+        # every call — up to 36 x 36 strcmps — and it is both the comparator of
+        # the compositor's per-pass sort and the basis of the editor's target
+        # tree, which asks it O(targets^2) times per ImGui frame.
+        body = self._body("PanelTargetMask")
+        self.assertNotIn("RectIndexByName", body,
+                         "PanelTargetMask resolves member names again — build "
+                         "the table from GroupMembers()")
+        self.assertIn("GroupMembers(", body,
+                      "the mask must come from the same resolved member list "
+                      "PaintPanelTarget walks, or containment and painting can "
+                      "answer differently")
+        self.assertIn("static bool built", body)
+
+    def test_the_pass_stops_before_any_gl_when_the_effects_are_off(self):
+        # Every factor was already zero with the Displays switches off, so the
+        # pass drew nothing — the expensive way: the sort, the graphics state,
+        # and a texture bind, a blend equation and a begin/end block per layer.
+        body = self._body("DrawPanelFx")
+        stop = body.index("FxUserDrawableMask()")
+        for later in ("XPLMSetGraphicsState", "PushBlendFunc", "FxDrawOrder",
+                      "PanelQuadWindingHold"):
+            self.assertLess(stop, body.index(later),
+                            "%s runs before the early-out" % later)
+
+    def test_the_watchdog_and_the_ambient_sample_are_above_the_early_out(self):
+        # Both are per-frame bookkeeping that goes wrong by NOT running: a
+        # brightness pin with no watchdog stays held for the session, and an
+        # ambient blend that stops sampling fades up from night when the effects
+        # are switched back on. Three dataref reads and an exp() between them.
+        body = self._body("DrawPanelFx")
+        stop = body.index("FxUserDrawableMask()")
+        self.assertLess(body.index("FxSampleAmbient();"), stop)
+        self.assertLess(body.index("FxExpireDriveOverride();"), stop)
+
+    def test_a_target_that_cannot_draw_is_skipped_before_its_first_layer(self):
+        # The per-LAYER cost — texture bind, blend func, blend equation,
+        # begin/end — is spent before the first quad, so testing per quad saves
+        # none of it. ⚠ And the stack must already be current: a stack may
+        # override `power`.
+        body = self._body("DrawPanelFx")
+        self.assertIn("FxTargetGateMask(stack.target)", body)
+        self.assertLess(body.index("gFxDrawStack = &stack;"),
+                        body.index("FxTargetGateMask(stack.target)"),
+                        "the skip consults gFxDrawStack for a stack's power "
+                        "override and must run with it set")
+
+    def test_the_gate_answer_is_resolved_once_per_stack(self):
+        # The gates do not depend on the LAYER, so a stack of N layers over R
+        # rects asked the same R questions N times — "Main displays" alone
+        # re-derived six answers three times a frame, each up to three driver
+        # lookups. The mask the skip already walks is held for the stack's
+        # layers instead.
+        body = self._body("DrawPanelFx")
+        self.assertLess(body.index("FxTargetGateMask(stack.target)"),
+                        body.index("gFxDrawGateMaskOn = true;"),
+                        "the mask must be built before it is armed — the "
+                        "builder would otherwise answer out of the previous "
+                        "stack's mask")
+        self.assertIn("gFxDrawGateMaskOn = false;", body,
+                      "the memo must be dropped with the stack")
+        # Armed in one place, exactly like the driver value cache: the Dev panes
+        # call FxRectFactor outside a pass and must keep resolving live.
+        self.assertEqual(PLUGIN_CPP.count("gFxDrawGateMaskOn = true;"), 1)
+        # ⚠ Not a second statement of the rules: the mask is built by calling
+        # FxRectGated, so the skip and the paint cannot disagree.
+        builder = self._body("FxTargetGateMask")
+        self.assertIn("FxRectGated(", builder)
+        self.assertNotIn("gFxDrawGateMaskOn", builder,
+                         "the builder must not read the memo it fills")
+
+    def test_the_per_quad_gate_reads_the_memo_before_the_drivers(self):
+        # Otherwise the memo saves nothing: the point is that the switch, the
+        # power source, the bus and the breaker are not consulted again for
+        # every layer over every rect.
+        body = self._body("FxRectGated")
+        self.assertLess(body.index("gFxDrawGateMaskOn"),
+                        body.index("FxDisplayUserFactor"),
+                        "the memo has to be the first thing FxRectGated asks")
+
+    def test_the_rect_set_is_resolved_once_per_pass(self):
+        # PanelRects() is asked once per PaintPanelTarget call, i.e. once per
+        # LAYER — 24 reads of one ToLiss dataref a frame. Pinning it also means
+        # a resolution flip mid-pass cannot paint the six DUs from one table for
+        # the layers before it and the other table for the layers after.
+        body = self._body("DrawPanelFx")
+        self.assertIn("gFxPassRects = PanelRects();", body)
+        self.assertIn("gFxPassRects = nullptr;", body)
+        self.assertLess(body.index("gFxPassRects = PanelRects();"),
+                        body.index("gFxPassRects = nullptr;"))
+        # ⚠ Pinned in one place and released in the same one. The Dev panes and
+        # the probe's log line read PanelRects() outside the pass.
+        self.assertEqual(PLUGIN_CPP.count("gFxPassRects = PanelRects();"), 1)
+        # Twice in the file: this release, and the declaration's initializer.
+        self.assertEqual(PLUGIN_CPP.count("gFxPassRects = nullptr;"), 2)
+        self.assertEqual(body.count("gFxPassRects = nullptr;"), 1)
+        # Indexed on the definition rather than through _body: the comments
+        # around it mention PanelRects() and the brace matcher would run on to
+        # the next function.
+        at = PLUGIN_CPP.index("static const PanelRect* PanelRects() {")
+        self.assertIn("if (gFxPassRects) return gFxPassRects;",
+                      PLUGIN_CPP[at:PLUGIN_CPP.index("\n}", at)],
+                      "null must mean 'not in a pass', not 'full-res'")
+
+    def test_the_target_breadths_are_resolved_once(self):
+        # A popcount of a 36-bit mask, called twice per comparison by the
+        # compositor's sort and once per target per node by the editor's tree.
+        body = self._body("PanelTargetBreadth")
+        self.assertIn("static bool built", body)
+        self.assertIn("static int table[kPanelTargetCount];", body)
+
+    def test_the_blend_state_memo_cannot_outlive_one_pass(self):
+        # ⚠ It records what WE set. X-Plane owns this state between passes —
+        # XPLMSetGraphicsState sets a func of its own when it enables blending,
+        # and in a dev build the probe's multiply runs after us in the same
+        # frame — so a memo that survived a pass would skip a call the GL state
+        # no longer matches: the whole cockpit blended with someone else's
+        # operator, which is the failure PopBlendFunc exists to prevent,
+        # arriving from the other end.
+        body = self._body("DrawPanelFx")
+        self.assertEqual(body.count("FxForgetBlendState();"), 2,
+                         "the memo is dropped at both ends of the pass")
+        first, last = (body.index("FxForgetBlendState();"),
+                       body.rindex("FxForgetBlendState();"))
+        self.assertLess(body.index("PushBlendFunc();"), first)
+        self.assertLess(body.index("PopBlendFunc();"), last)
+        self.assertEqual(PLUGIN_CPP.count("FxForgetBlendState();"), 2,
+                         "nothing outside the pass may arm or drop it")
+
+    def test_the_blend_equation_and_func_are_tracked_separately(self):
+        # They change on different layers — five of the eight modes are plain
+        # GL_FUNC_ADD, and Add/Burn/Subtract all want (GL_ONE, GL_ONE) — so one
+        # combined test would set both whenever either moved and give back a
+        # third of what this saves.
+        body = self._body("SetFxBlend")
+        self.assertRegex(body, r"if \(!known \|\| eq != gFxBlendEq\)")
+        self.assertRegex(body,
+                         r"if \(!known \|\| src != gFxBlendSrc \|\| "
+                         r"dst != gFxBlendDst\)")
+        # ⚠ The refusal path sets nothing, so it must record nothing: the state
+        # is still whatever the previous layer left.
+        self.assertLess(body.index("return false;"), body.index("gFxBlendEq = eq;"),
+                        "a layer that could not be drawn must not update the memo")
+
+    def test_the_winding_hold_is_scoped_and_the_batch_still_queries(self):
+        # ⚠ A stale winding is SILENTLY CULLED — indistinguishable from the
+        # compositor not running — so the hold is opt-in and scoped, and a batch
+        # opened anywhere else (the probe's) queries exactly as before.
+        batch = re.search(r"struct PanelQuadBatch \{(.*?)^\};", PLUGIN_CPP,
+                          re.S | re.M)
+        self.assertIsNotNone(batch, "PanelQuadBatch not found")
+        self.assertIn("if (!gQuadFrontHeld)", batch.group(1),
+                      "the batch must still query when no hold is open")
+        hold = re.search(r"struct PanelQuadWindingHold \{(.*?)^\};", PLUGIN_CPP,
+                         re.S | re.M)
+        self.assertIsNotNone(hold, "PanelQuadWindingHold not found")
+        self.assertIn("~PanelQuadWindingHold() { gQuadFrontHeld = false; }",
+                      hold.group(1), "the hold must unwind itself")
+        # One hold, in the compositor's pass and nowhere else.
+        self.assertEqual(PLUGIN_CPP.count("PanelQuadWindingHold winding;"), 1)
+        self.assertIn("PanelQuadWindingHold winding;", self._body("DrawPanelFx"))
+
     def test_the_draw_order_buffer_is_reused_but_still_sorted(self):
         # Caching the ORDER would need invalidating everywhere the editor adds,
         # removes or re-targets a stack, and a stale order is a silent visual bug
@@ -1143,6 +1685,24 @@ class LayerDefinitionTests(unittest.TestCase):
         self.assertTrue(PANELFX.is_file(),
                         "src/native/panelfx.txt is missing; it is the authored "
                         "look and cannot be regenerated")
+
+    def test_the_comment_header_matches_what_a_dev_save_would_write(self):
+        """The shipped file's header is what SavePanelFx emits, and the next dev
+        save rewrites it. Documenting a new key in one place and not the other
+        therefore lands as a diff nobody made, in a file that is a SYMLINK into
+        this repo on a dev machine — noise in exactly the file whose diffs are
+        supposed to be a tuning session."""
+        start = PLUGIN_CPP.index("static void SavePanelFx()")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}\n", start)]
+        written = [line.replace('\\"', '"')
+                   for line in re.findall(r'f << "(.*?)\\n";', body)
+                   if line.startswith("#")]
+        have = [l for l in PANELFX.read_text(encoding="utf-8").splitlines()
+                if l.startswith("#")]
+        self.assertTrue(written, "could not read SavePanelFx's header lines")
+        self.assertEqual(written, have,
+                         "src/native/panelfx.txt's header is not what "
+                         "SavePanelFx writes")
 
     def test_every_image_a_layer_names_exists(self):
         """A layer whose image is missing is SKIPPED at runtime, not drawn as a

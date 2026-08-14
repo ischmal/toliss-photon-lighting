@@ -56,9 +56,21 @@ public:
     void Write(const std::string&, const std::string&) override {}
 };
 
-// Progress during the ~57 MiB interior texture copy, which otherwise looks like a
-// hang.
-using ProgressFn = void (*)(int done, int total, const std::string& name,
+// How far through the WHOLE run we are, 0..1, with the name of the step now
+// running.
+//
+// ⚠ IT USED TO MEAN "TEXTURES COPIED OUT OF ELEVEN" and was called from exactly one
+// loop — step 2 of 5 of the last phase, and only when the cockpit mod was selected.
+// The bar it fed therefore sat at 0% for an entire ordinary install and then jumped
+// to 100%, and with the cockpit mod it ran to 100% partway through and stalled
+// there. The fraction now comes from `progress::Plan`, which is built from file
+// sizes before any work starts; see core/progress.h for the cost model and the
+// measurements behind it.
+//
+// ⚠ THE FRACTION IS MONOTONIC AND NEVER REACHES 1.0 FROM HERE. Only the caller
+// knows the run is finished — the plan can only say every step it knew about is
+// done — so the last step to 1.0 belongs to whoever owns the UI.
+using ProgressFn = void (*)(double fraction, const std::string& step,
                             void* userData);
 
 struct Options {

@@ -1,0 +1,200 @@
+// Screen 3 — which aircraft are you modifying?
+//
+// A scrolling well of radio cards: its own darker fill, a 1 px border and the
+// design's inset shadow, which `WellRecess` approximates because Slint's real one
+// is Skia-only and this build is FemtoVG. See that component.
+
+import { Tokens } from "../tokens.slint";
+import {
+    AircraftEntry, AircraftCard, Header1, WellRecess, PhotonScrollView
+} from "../widgets.slint";
+
+export component AircraftScreen inherits Rectangle {
+    in property <[AircraftEntry]> aircraft;
+    in property <int> selected: -1;
+    callback select(int);
+
+    background: Tokens.screen-bg;
+
+    // ⚠ THE LIST IS ONE TAB STOP AND THE ARROWS MOVE THE SELECTION ITSELF —
+    // there is no separate focus cursor travelling over unselected rows. That is
+    // the radio-group convention, and here it is also what keeps the design
+    // honest: a selected card and a focused button are both "2 px white border",
+    // so a focus cursor that could sit on an UNSELECTED card would have had to
+    // invent a third look, or reuse that border and claim two rows were chosen.
+    // Tying the two together means the border only ever means one thing per
+    // element. It is also why the card takes `highlighted` rather than `focused`.
+    //
+    // The consequence to keep in mind: arrowing through this list CHANGES the
+    // selection as it goes, exactly as a radio group does. That is safe here —
+    // choosing an aircraft is free and reversible, and nothing commits until
+    // Next.
+    property <length> row-spacing: 8px;
+    property <length> well-pad: 12px;
+    property <length> row-pitch: Tokens.card-h + root.row-spacing;
+
+    function step-selection(delta: int) {
+        if (root.aircraft.length > 0) {
+            // From "nothing selected", Down takes the first row and Up the last.
+            root.select(root.selected < 0
+                ? (delta > 0 ? 0 : root.aircraft.length - 1)
+                : max(0, min(root.aircraft.length - 1, root.selected + delta)));
+        }
+    }
+
+    // Scroll the least amount that puts row `idx` fully in view, its 12 px of
+    // well padding included, and otherwise leave the viewport alone.
+    //
+    // `viewport-y` is NEGATIVE as you scroll down (Flickable's convention), so
+    // everything below works in `s = -viewport-y` and negates once at the end.
+    // Row i spans [pad + i*pitch, pad + i*pitch + card-h]; wanting `pad` of
+    // margin on each side gives s <= i*pitch and s >= i*pitch + card-h + 2*pad
+    // - visible-height. Clamping s between those two is the whole function; the
+    // outer clamp just keeps it inside the scrollable range.
+    function reveal(idx: int) {
+        if (idx >= 0) {
+            view.viewport-y = -min(
+                max(0px, view.viewport-height - view.visible-height),
+                max(0px, max(
+                    idx * root.row-pitch + Tokens.card-h + 2 * root.well-pad
+                        - view.visible-height,
+                    min(-view.viewport-y, idx * root.row-pitch))));
+        }
+    }
+
+    function select-edge(first: bool) {
+        if (root.aircraft.length > 0) {
+            root.select(first ? 0 : root.aircraft.length - 1);
+        }
+    }
+
+    // ⚠ ON THE PROPERTY, NOT IN THE KEY HANDLER. `select()` goes out to C++,
+    // which decides whether the selection actually moves and writes `selected`
+    // back — so revealing from the handler would scroll to the row we ASKED for
+    // rather than the one we got, and would not scroll at all when C++ moves the
+    // selection on its own.
+    changed selected => { root.reveal(root.selected); }
+
+    VerticalLayout {
+        spacing: Tokens.content-gap;
+        padding-left: Tokens.content-pad-x;
+        padding-right: Tokens.content-pad-x;
+        padding-top: Tokens.content-pad-y;
+        padding-bottom: Tokens.content-pad-y;
+
+        Header1 {
+            height: 40px;
+            text: "Which aircraft are you modifying?";
+        }
+
+        Rectangle {
+            background: Tokens.panel-bg;
+            border-color: Tokens.panel-border;
+            border-width: 1px;
+            border-radius: Tokens.radius-panel;
+            // ⚠ Required by WellRecess — its bands are square.
+            clip: true;
+
+            // ⚠ THE VIEW FILLS THE WELL AND THE 12 px INSET IS THE CONTENT'S
+            // PADDING. It used to be the ScrollView's own geometry, which also
+            // moved the scrollbar: Slint pins the bar to the VIEW's right edge, so
+            // a 12 px inset put the thumb 16 px in from the panel border with an
+            // empty lane outside it — the "equal padding on all sides" look a
+            // scrollbar should not have. Only the 1 px border is avoided here.
+            view := PhotonScrollView {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+
+                VerticalLayout {
+                    // ⚠ Both from the properties `reveal` does its arithmetic
+                    // with. Written twice, they drift and the scroll lands a few
+                    // pixels off per row — which reads as the list being sloppy
+                    // rather than as two numbers disagreeing.
+                    spacing: root.row-spacing;
+                    alignment: start;
+                    padding-left: root.well-pad;
+                    padding-top: root.well-pad;
+                    padding-bottom: root.well-pad;
+                    // ⚠ THE SCROLLBAR IS AN OVERLAY, NOT A COLUMN. Slint's
+                    // ScrollView draws it on top of the viewport rather than
+                    // taking width from it, so full-width children run underneath
+                    // it — the bar sat over the UPDATE badges. Reserving the
+                    // gutter here is the only way to get one: there is no "always
+                    // reserve space" mode to switch on.
+                    padding-right: Tokens.scrollbar-gutter;
+
+                    for entry[idx] in root.aircraft: AircraftCard {
+                        entry: entry;
+                        selected: idx == root.selected;
+                        // Only the selected row, and only while the list holds
+                        // the keyboard — see the note at the top.
+                        highlighted: idx == root.selected && keys.has-focus;
+                        // ⚠ Clicking a card focuses the LIST, so the arrows work
+                        // straight after a click. The scope is zero-width and
+                        // cannot be clicked itself (see PhotonButton), so this is
+                        // the only way focus gets there by mouse.
+                        clicked => {
+                            keys.focus();
+                            root.select(idx);
+                        }
+                    }
+                }
+            }
+
+            // Detection finding nothing is a normal outcome — a stock X-Plane with
+            // no ToLiss aircraft — and it must not look like the list failed to
+            // load.
+            if root.aircraft.length == 0: Text {
+                width: 100%;
+                height: 100%;
+                text: "No ToLiss aircraft found in this X-Plane folder.";
+                color: Tokens.muted;
+                font-family: Tokens.font;
+                font-size: Tokens.h2-size;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            // ⚠ LAST, so it darkens the edges of whatever the well holds, as an
+            // inset shadow should. Input-transparent — see WellRecess.
+            WellRecess {
+                width: 100%;
+                height: 100%;
+            }
+
+            // ⚠ ZERO-WIDTH, like every other FocusScope here: at full size it
+            // would swallow the press before any card's TouchArea saw it and the
+            // list would stop being clickable. Focus arrives by Tab, or from a
+            // card's own `clicked` handler above.
+            keys := FocusScope {
+                x: 0;
+                width: 0;
+                key-pressed(event) => {
+                    if (event.text == Key.UpArrow) {
+                        root.step-selection(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.step-selection(1);
+                        return accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.select-edge(true);
+                        return accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.select-edge(false);
+                        return accept;
+                    }
+                    // ⚠ Everything else, Tab and Enter included. Tab must reach
+                    // the window handler or focus is trapped in the list; Enter
+                    // must reach the App's root scope, which is what advances the
+                    // wizard once a row is chosen.
+                    return reject;
+                }
+            }
+        }
+    }
+}

@@ -46,7 +46,7 @@ is what the binary reads when run from a checkout, not a download:
     release/photon-installer[.exe]                    the compiled installer
     release/payload/objs/<stock|durantula|realwings>/<obj filename>
     release/payload/objs/interior/lights_inn.obj      (wing- & airframe-independent)
-    release/payload/objs/screens/lights_screens.obj   (display glow, A3xx)
+    release/payload/objs/screens/<airframe>/lights_screens.obj  (display glow)
     release/payload/textures/interior/*.png           (Gus's set, ~57 MiB)
     release/payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl
     release/payload/plugindata/{panelfx.txt,overlays/*.png}   (into the plugin folder)
@@ -99,7 +99,7 @@ import patch_realwings as RWBUILD  # noqa: E402  (build/patch_realwings.py)
 import readme as _readme  # noqa: E402  (build/readme.py)
 from constants import (  # noqa: E402  (build/constants.py)
     PANELFX_FILE, PLUGIN_DATA_DIRNAME, PLUGIN_FOLDER, PLUGIN_USER_DIRS,
-    WINGS, XPL_NAME,
+    SCREENS_AIRFRAMES, WINGS, XPL_NAME,
 )
 from patch_realwings import PATCH_JSON  # noqa: E402  (build/patch_realwings.py)
 # ⚠ THE VERSION COMES FROM core/version.h. That header is the one definition the
@@ -159,21 +159,29 @@ def build_interior_payload(payload: Path):
 
 
 def build_screens_payload(payload: Path):
-    """The display-glow OBJ, built ONCE like the interior one and for the same
-    reasons: no wing variants, and the A3xx flight decks are the same model so the
-    six display positions are identical.
+    """The display-glow OBJs, ONE PER AIRFRAME, to
+    payload/objs/screens/<airframe>/lights_screens.obj.
+
+    ⚠ Per airframe, unlike the interior — and NOT because of wing variants (there
+    are none here either). The A3xx three genuinely are byte-identical, so a single
+    staged copy was right while they were the only airframes. The A330-900 is a
+    different flight deck against a different datum, so sharing one file would
+    install the A320's six positions into it: every light in the wrong place, all
+    of them still drawing, and nothing on disk to show for it. Three identical
+    copies is the price of that never being possible.
 
     ⚠ NOT covered by `build_objs.py build` — `screens` is deliberately absent from
     DEFAULT_TARGETS so a bare build cannot slip an experiment into `dist/`. That
     makes this call the only thing that puts it in a bundle, so it is emitted
     straight from the Emitter here rather than copied out of `dist/`."""
     cfg = B.load_config(wing="stock")
-    fname = B.OBJ_TARGETS["a320"]["screens"]
-    text = B.Emitter(cfg, "a320", "stock", target="screens").emit()
-    dest = payload / "objs" / "screens" / fname
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(text.encode("utf-8"))
-    print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
+    for airframe in SCREENS_AIRFRAMES:
+        fname = B.OBJ_TARGETS[airframe]["screens"]
+        text = B.Emitter(cfg, airframe, "stock", target="screens").emit()
+        dest = payload / "objs" / "screens" / airframe / fname
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(text.encode("utf-8"))
+        print(f"  wrote payload/{dest.relative_to(payload)} ({len(text)} bytes)")
 
 
 def stage_plugin_data(payload: Path):

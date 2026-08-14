@@ -222,9 +222,13 @@ class BrightnessSourceTests(unittest.TestCase):
         start = PLUGIN_CPP.index("static const PanelSource kPanelSources[] = {")
         end = PLUGIN_CPP.index("\n};", start)
         body = PLUGIN_CPP[start:end]
+        # ⚠ The trailing group is the row's FAMILY SCOPE, and it is optional: a
+        # row that names none is unrestricted, which is what every row written
+        # before scoping existed reads as.
         self.rows = re.findall(
             r'\{\s*"([^"]+)"\s*,\s*("(?:[^"]*)"|k\w+)\s*,\s*(-?\d+)\s*,'
-            r'\s*[-\d.f]+\s*,\s*[-\d.f]+\s*,\s*("(?:[^"]*)"|k\w+)\s*,\s*(-?\d+)',
+            r'\s*[-\d.f]+\s*,\s*[-\d.f]+\s*,\s*("(?:[^"]*)"|k\w+)\s*,\s*(-?\d+)'
+            r'\s*,\s*[-\d.f]+\s*(?:,\s*(k\w+)\s*)?\}',
             body)
         self.names = [r[0] for r in self.rows]
 
@@ -239,8 +243,49 @@ class BrightnessSourceTests(unittest.TestCase):
             self.assertIn(name, rects,
                           "kPanelSources names %r, which is not a rect" % name)
 
-    def test_no_rect_is_listed_twice(self):
-        self.assertEqual(sorted(self.names), sorted(set(self.names)))
+    def test_no_rect_is_listed_twice_for_the_same_family(self):
+        """A rect may appear once per aircraft family and no more.
+
+        Two rows with the SAME scope are not an override, they are a
+        duplicate: BuildRectDrivers applies the rows in order, so the second
+        silently wins and the first is dead text that reads like the answer."""
+        seen = [(name, fam) for name, _b, _bi, _p, _pi, fam in self.rows]
+        dupes = {k for k in seen if seen.count(k) > 1}
+        self.assertFalse(dupes, "kPanelSources lists these twice for one "
+                                "family: %s" % sorted(dupes))
+
+    def test_a_family_scoped_row_comes_after_the_row_it_overrides(self):
+        """⚠ ORDER IS LOAD-BEARING. BuildRectDrivers walks kPanelSources top to
+        bottom and skips rows for other families, so the LAST row naming the
+        loaded family wins. A scoped row moved above the unscoped one it exists
+        to override is not a compile error and not a log line — it is one face
+        reading another aeroplane's knob, which resolves, reads a plausible
+        number, and dims on the wrong input."""
+        unscoped = {}
+        for i, (name, _b, _bi, _p, _pi, fam) in enumerate(self.rows):
+            if not fam:
+                unscoped[name] = i
+        for i, (name, _b, _bi, _p, _pi, fam) in enumerate(self.rows):
+            if fam and name in unscoped:
+                self.assertGreater(
+                    i, unscoped[name],
+                    "the %s row scoped to %s comes BEFORE the unscoped one, so "
+                    "the unscoped row overrides it instead" % (name, fam))
+
+    def test_the_a330_fcu_faces_read_their_own_knob(self):
+        """The reason row scoping exists (2026-08-13, user): the FCU's integral
+        lighting is `AirbusFBW/SupplLightLevels[1]`, 0..1, on an A330, and the
+        A3xx rows are a raw knob animation running 1..270. All three FCU faces
+        are on one knob, so all three need the row — a scope that covered the
+        strip and not the two baro windows would dim two thirds of one unit."""
+        by_rect = {}
+        for name, bright, idx, _p, _pi, fam in self.rows:
+            if fam == "kFxFamilyA330":
+                by_rect[name] = (bright.strip('"'), idx)
+        for rect in ("FCU strip", "capt baro", "FO baro"):
+            self.assertIn(rect, by_rect,
+                          "%r has no A330 brightness source" % rect)
+            self.assertEqual(by_rect[rect], ("AirbusFBW/SupplLightLevels", "1"))
 
     def test_the_transponder_has_no_power_source(self):
         """⚠ AirbusFBW/XPDRPower is the WRONG QUANTITY and must not come back.
@@ -253,7 +298,7 @@ class BrightnessSourceTests(unittest.TestCase):
 
         This is the recurring shape in this table: a dataref that resolves
         cleanly, reads plausibly, and reports the fact NEXT DOOR."""
-        power = {n: p for n, _b, _bi, p, _pi in self.rows}
+        power = {n: p for n, _b, _bi, p, _pi, _f in self.rows}
         self.assertIn("XPDR code", power)
         self.assertEqual('""', power["XPDR code"],
                          "the transponder must have no power source")
@@ -272,7 +317,7 @@ class BrightnessSourceTests(unittest.TestCase):
         m = re.search(r"kScreenDU\[kScreenCount\]\s*=\s*\{([^}]*)\}", PLUGIN_CPP)
         self.assertIsNotNone(m)
         screen_du = [int(x) for x in re.findall(r"\d+", m.group(1))]
-        du_rows = [(n, int(idx)) for n, bright, idx, _p, _pi in self.rows
+        du_rows = [(n, int(idx)) for n, bright, idx, _p, _pi, _f in self.rows
                    if "DUBrightness" in bright]
         self.assertEqual(len(du_rows), 6, "expected the six display units")
         # kScreenDU is in the screen-glow's own slot order, which is the same
@@ -327,8 +372,15 @@ class ScreenFxRectTests(unittest.TestCase):
         # The ISIS was on the other-displays switch until 2026-08-02. It is a
         # backlit screen by every test except carrying a DUBrightness index —
         # which it does not carry because ToLiss gives it its own ISIBrightness.
+        #
+        # ⚠ `MCDU 3` (2026-08-13) is here despite existing on the A330 only.
+        # Which switch owns a face has nothing to do with which aircraft the face
+        # is on: left off this list, the A330's third MCDU would follow the
+        # "other readouts" switch while the two beside it followed "screens", so
+        # turning the screen effects off would leave one of three MCDUs tinted.
         self.assertEqual(sorted(self.extras),
-                         ["DCDU FO", "DCDU capt", "ISIS", "MCDU FO", "MCDU capt"])
+                         ["DCDU FO", "DCDU capt", "ISIS",
+                          "MCDU 3", "MCDU FO", "MCDU capt"])
 
     def test_every_extra_names_a_real_rect(self):
         # Resolved by name at runtime; a miss logs and falls through to the
@@ -351,6 +403,78 @@ class ScreenFxRectTests(unittest.TestCase):
         body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
         self.assertIn("PanelRectIsScreen(rectIndex)", body)
         self.assertNotIn(".du >= 0", body)
+
+
+class RectExistenceTests(unittest.TestCase):
+    """Which rects are on which aircraft (kPanelRectFamilies, 2026-08-13).
+
+    The rect table is one table for the whole ToLiss fleet and it is A3xx-derived,
+    so every row in it lands on an A330 too — until the A330's third MCDU, which
+    has no A3xx counterpart at all. On an A3xx its UV rect is 270x240 px of
+    unrelated artwork, so a `Screen` layer over it is a pale patch on the panel
+    with no screen under it: visible, wrong, and with nothing in a log.
+    """
+
+    def _families(self):
+        start = PLUGIN_CPP.index("static const PanelRectFamily kPanelRectFamilies[]")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("};", start)]
+        return re.findall(r'\{\s*"([^"]+)"\s*,\s*(k\w+)\s*\}', body)
+
+    def test_every_scoped_rect_is_a_real_rect_and_a_known_family(self):
+        rects = {r[0] for r in _table("kPanelRectsHi")}
+        # The family CONSTANTS, read off the wire-name table so adding a family
+        # teaches this test rather than breaking it.
+        m = re.search(r"kFxFamilyNames\[\]\s*=\s*\{(.*?)\};", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "kFxFamilyNames moved or was renamed")
+        known = set(re.findall(r'\{\s*"[^"]+"\s*,\s*(k\w+)\s*\}', m.group(1)))
+        self.assertTrue(known, "no family constants parsed")
+        rows = self._families()
+        self.assertTrue(rows, "kPanelRectFamilies did not parse")
+        for name, fam in rows:
+            self.assertIn(name, rects,
+                          "kPanelRectFamilies names %r, which is not a rect" % name)
+            self.assertIn(fam, known, "%r names an unknown family %r" % (name, fam))
+
+    def test_the_third_mcdu_is_a330_only(self):
+        self.assertIn(("MCDU 3", "kFxFamilyA330"), self._families(),
+                      "the A330's third MCDU is not scoped - on an A3xx its rect "
+                      "is 270x240 px of unrelated panel artwork")
+
+    def test_absence_from_the_table_means_every_aircraft(self):
+        """⚠ The mask is built by CLEARING bits, not by setting them. Built the
+        other way round, a rect missing from kPanelRectFamilies would draw
+        nowhere — and 36 of the 37 rows are deliberately absent from it."""
+        start = PLUGIN_CPP.index("static void BuildRectDrivers()")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}\n", start)]
+        self.assertIn("gRectsHere = PanelAllRectsMask();", body)
+        self.assertIn("gRectsHere &= ~((PanelMask)1 << i);", body)
+        self.assertNotIn("gRectsHere |=", body)
+
+    def test_existence_is_asked_above_the_master_switch(self):
+        """⚠ ORDER IS LOAD-BEARING. "Follow display brightness" outranks every
+        ELECTRICAL gate — those answer how strongly to paint — and this is not one
+        of those: it is the per-rect twin of a stack's `family` scope, which
+        nothing overrides. Below that early-out, turning the hatch off would paint
+        the A330's third MCDU onto A3xx artwork, in the editor, which is exactly
+        where it would be believed."""
+        start = PLUGIN_CPP.index("static bool FxRectGated(int rectIndex)")
+        body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}\n", start)]
+        self.assertIn("(gRectsHere >> rectIndex) & 1", body)
+        self.assertLess(body.index("gRectsHere"), body.index("gFxFollowBrightness"),
+                        "the existence test is below the master switch")
+        # ...and above the Displays-tab switch too, so the pane can name it as
+        # the cause before anything else claims the zero.
+        self.assertLess(body.index("gRectsHere"), body.index("FxDisplayUserFactor"))
+
+    def test_an_aircraft_specific_rect_is_still_a_full_group_member(self):
+        """Membership is authored STRUCTURE and does not change with the
+        aeroplane: a group that quietly shrank would change its own breadth, and
+        breadth is what decides broadest-first composite order. Existence is
+        answered per frame instead."""
+        start = PLUGIN_CPP.index("static const PanelGroup kPanelGroups[]")
+        groups = PLUGIN_CPP[start:PLUGIN_CPP.index("\n};", start)]
+        self.assertIn('{ "MCDU capt", "MCDU FO", "MCDU 3", nullptr }', groups,
+                      "the third MCDU is not a member of the MCDU group")
 
 
 class ElectricalGateTests(unittest.TestCase):
@@ -497,12 +621,37 @@ class ElectricalGateTests(unittest.TestCase):
         # `power` is part of the authored look and a stack may override it. Bus
         # and breaker are facts about the aircraft; a look able to opt out of
         # them would eventually be authored by accident.
-        start = PLUGIN_CPP.index("static float FxRectFactor(int rectIndex,")
+        #
+        # ⚠ The three live in FxRectGated (2026-08-10), not in FxRectFactor —
+        # none of them depends on the layer, which is what lets the compositor
+        # skip a whole target before its first texture bind.
+        start = PLUGIN_CPP.index("static bool FxRectGated(int rectIndex)")
         body = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
         self.assertIn("gRectBus[rectIndex]", body)
         self.assertIn("gRectCb[rectIndex]", body)
         for token in ("gFxDrawStack->bus", "gFxDrawStack->cb"):
             self.assertNotIn(token, body)
+
+    def test_the_gates_are_stated_once(self):
+        """⚠ ONE definition of "is this rect gated shut", called both by the
+        per-quad factor and by the per-target skip.
+
+        A second copy beside the skip is the failure this split invites, and it
+        is silent in the worse direction: a skip that is stricter than the paint
+        is a target that stops drawing with nothing in the log."""
+        start = PLUGIN_CPP.index("static float FxRectFactor(int rectIndex,")
+        factor = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
+        self.assertIn("FxRectGated(rectIndex)", factor)
+        for token in ("gRectBus[", "gRectCb[", "gRectPower["):
+            self.assertNotIn(token, factor,
+                             "%s is back in FxRectFactor — the gates belong to "
+                             "FxRectGated, which the target skip shares" % token)
+        start = PLUGIN_CPP.index("static PanelMask FxTargetGateMask(int target)")
+        skip = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}", start)]
+        self.assertIn("FxRectGated(", skip)
+        for token in ("gRectBus[", "gRectCb[", "gRectPower[", "FxDriverPowered"):
+            self.assertNotIn(token, skip,
+                             "%s is a second copy of the gate rules" % token)
 
 
 class DcduBrightnessTests(unittest.TestCase):

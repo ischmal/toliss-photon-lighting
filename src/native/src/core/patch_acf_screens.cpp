@@ -65,6 +65,14 @@ int FindObj(const std::string& text, const std::string& filename) {
     return -1;
 }
 
+int FindFrameTemplate(const std::string& text) {
+    for (const std::string& candidate : ScreensFrameTemplates()) {
+        const int idx = FindObj(text, candidate);
+        if (idx >= 0) return idx;
+    }
+    return -1;
+}
+
 int DeclaredCount(const std::string& text) {
     const auto props = acf::ReadProps(text);
     const auto it = props.find(kCountProp);
@@ -93,11 +101,16 @@ std::string PatchText(const std::string& text, int& changed) {
     changed = 0;
     if (IsAttached(text)) return text;
 
-    const int tmplIdx = FindObj(text, kFrameTemplateObj);
+    const int tmplIdx = FindFrameTemplate(text);
     if (tmplIdx < 0) {
+        std::string names;
+        for (const std::string& c : ScreensFrameTemplates()) {
+            if (!names.empty()) names += ", ";
+            names += c;
+        }
         throw acf::AcfError(
-            std::string("no attachment row for ") + kFrameTemplateObj +
-            " in this .acf, so there is no known-good frame to copy. " +
+            "no attachment row for any of [" + names +
+            "] in this .acf, so there is no known-good frame to copy. " +
             kScreensObj + "'s light coordinates are authored in that OBJ's "
             "frame; attaching at a guessed datum would mis-place every screen "
             "light. Refusing.");
@@ -227,7 +240,8 @@ std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8) {
     return acf::AcfFilesContaining(aircraftDirUtf8, kCountProp);
 }
 
-RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
+RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
+              const progress::StepProgress& onProgress) {
     RunResult result;
     const std::vector<std::string> files = AcfFiles(aircraftDirUtf8);
     if (files.empty()) {
@@ -235,7 +249,14 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
                              aircraftDirUtf8);
         return result;
     }
-    for (const std::string& pathUtf8 : files) {
+    // ⚠ REPORTED AT THE TOP OF THE ITERATION, NOT THE BOTTOM. Half the paths
+    // through this loop are `continue` — an unreadable file, a refused patch —
+    // and a report at the end would skip exactly the files that went wrong.
+    // The four `.acf` are within 9% of each other in size, so file count is a
+    // fair weight here; the big scans elsewhere weight by bytes instead.
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        if (onProgress) onProgress(static_cast<double>(i) / files.size());
+        const std::string& pathUtf8 = files[i];
         const auto path = fsutil::PathFromUtf8(pathUtf8);
         std::string text;
         if (!fsutil::ReadFileBytes(path, text)) continue;
@@ -268,6 +289,7 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
         }
         result.touched.push_back(pathUtf8);
     }
+    if (onProgress) onProgress(1.0);
     return result;
 }
 

@@ -36,13 +36,22 @@
 #include <vector>
 
 #include "core/acf.h"
+#include "core/progress.h"
 
 namespace photon {
 namespace patch_acf_screens {
 
 constexpr char kCountProp[] = "_obja/count";
 constexpr char kFileField[] = "_v10_att_file_stl";
-constexpr char kFrameTemplateObj[] = "lights_inn.obj";
+
+// Index of the row whose frame ours is copied from, or -1 if this file carries
+// none of the candidates in ScreensFrameTemplates(). Exposed for the tests and
+// for the refusal message, which names what it looked for.
+//
+// ⚠ Chosen BY CONTENT, in the candidate list's order, never from an airframe key
+// passed down from detection — the same rule the installer follows everywhere
+// else, and it keeps the answer correct for a file that carries more than one.
+int FindFrameTemplate(const std::string& text);
 
 // The `_obja/*` table as {index: {field: raw value}}.
 std::map<int, std::map<std::string, std::string>> AttachmentRows(
@@ -72,7 +81,8 @@ struct RunResult {
     std::vector<std::string> log;
 };
 
-RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun);
+RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
+              const progress::StepProgress& onProgress = {});
 
 }  // namespace patch_acf_screens
 }  // namespace photon

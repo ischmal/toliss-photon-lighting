@@ -1,0 +1,1237 @@
+// The shared widgets, one per component in the Figma file.
+//
+// Every visual number here comes from the mockup's design context. Where the
+// design describes a thing with absolute insets, this reproduces the INTENT with a
+// layout — see ui/README.md for why porting the absolute positioning gives a
+// window that is correct at exactly one size.
+
+import { Tokens } from "tokens.slint";
+
+// One row of the aircraft list. Mirrors `detect::Aircraft` closely enough that
+// gui.cpp is a straight field copy, but it is a VIEW type: `status` and `badge`
+// are already-rendered strings, because deciding what "V1 -> V2" says is the
+// front-end's job and photoncore has no opinion about wording.
+export struct AircraftEntry {
+    name: string,
+    folder: string,
+    version: string,
+    status: string,
+    // "" for none. "UPDATE", "INSTALLED" or "REPAIR" — see `kind`.
+    badge: string,
+    // ⚠ AN INT, AND THE VALUES ARE WIRE. gui.cpp writes the same numbers; they are
+    // spelled out in both files rather than shared, because a Slint enum crossing
+    // into C++ renames its variants and the mapping stops being greppable.
+    //   0 = none      nothing installed, no badge
+    //   1 = update    installed, older version  -> accent
+    //   2 = current   installed and up to date  -> status-ok (green)
+    //   3 = broken    marker gone, reinstall    -> status-broken (red)
+    kind: int,
+}
+
+// ─── the logo ────────────────────────────────────────────────────────────────
+// ⚠ FOUR SEPARATE VECTORS COMPOSED IN A 207x108 BOX, not one file. The percentages
+// are the Figma insets converted to x/y/w/h; they are what makes the pieces line
+// up, and the pieces are meaningless alone. `image-fit: fill` matches the exported
+// SVGs' own `preserveAspectRatio="none"`.
+//
+// One component serves both sizes the design uses — 235x124 on the splash and
+// 105x56 in the rail — because SVG is resolution independent.
+//
+// ⚠ EVERY EDGE IS SNAPPED TO A WHOLE PIXEL. A percentage of an arbitrary box lands
+// on fractions like 8.084px, and an SVG rasterized into a fractional rect is
+// resampled across two pixel columns — which is exactly the soft, slightly muddy
+// wordmark this had. `px-snap` rounds through the unitless domain (Slint has no
+// round() for lengths) and is applied to POSITION AND SIZE BOTH: rounding only the
+// position moves the blur rather than removing it.
+export component Logo inherits Rectangle {
+    // A percentage of a dimension, rounded to whole pixels.
+    pure function snap(fraction: float, extent: length) -> length {
+        return round(fraction * extent / 1px) * 1px;
+    }
+
+    Image {
+        source: @image-url("assets/logo-v2.svg");   // the "Photon" wordmark
+        x: root.snap(0.0344, root.width);
+        y: root.snap(0.3088, root.height);
+        width: root.snap(0.9336, root.width);
+        height: root.snap(0.4126, root.height);
+        image-fit: fill;
+    }
+    Image {
+        source: @image-url("assets/logo-v3.svg");   // the "ToLiss" wordmark
+        x: root.snap(0.6011, root.width);
+        y: root.snap(0.067, root.height);
+        width: root.snap(0.3595, root.width);
+        height: root.snap(0.2077, root.height);
+        image-fit: fill;
+    }
+    Image {
+        source: @image-url("assets/logo-v0.svg");   // the two dots
+        x: root.snap(0.7954, root.width);
+        y: root.snap(0.8102, root.height);
+        width: root.snap(0.0744, root.width);
+        height: root.snap(0.1415, root.height);
+        image-fit: fill;
+    }
+    Image {
+        source: @image-url("assets/logo-v1.svg");
+        x: root.snap(0.907, root.width);
+        y: root.snap(0.8102, root.height);
+        width: root.snap(0.0744, root.width);
+        height: root.snap(0.1415, root.height);
+        image-fit: fill;
+    }
+}
+
+// ─── the recessed well ───────────────────────────────────────────────────────
+// The inset shadow the design puts on the aircraft list and the installer log —
+// both `inset 0 1px 7px rgba(0,0,0,.25)`, one treatment, hence one component.
+//
+// ⚠ THIS IS AN APPROXIMATION AND HAS TO BE. Slint 1.17 does have `inner-shadow-*`
+// on Rectangle, but it is **Skia-only**, and this binary renders with FemtoVG,
+// which returns early on `box_shadow.inset()` — the property would compile
+// cleanly and draw nothing at all, which is the worst kind of wrong. The
+// renderer cannot be switched either: the link fails on the CRT (details in
+// CMakeLists.txt). Four edge bands are what is left, and the arithmetic behind
+// their alphas is in `tokens.slint`.
+//
+// ⚠ IT PAINTS OVER THE CONTENT, WHICH IS CORRECT — an inset shadow darkens the
+// inside edges of whatever the container holds, and Figma has it as the last
+// child for that reason. So it must be the LAST child here too, and it must stay
+// input-transparent: plain Rectangles are (only TouchArea takes hits), so do not
+// give one an id and hang a handler on it.
+//
+// ⚠ THE WELL ITSELF NEEDS `clip: true`, or the square bands paint over the
+// rounded corners and the well grows four dark notches.
+export component WellRecess inherits Rectangle {
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: Tokens.recess-top-h;
+        background: Tokens.recess-top;
+    }
+    Rectangle {
+        y: parent.height - Tokens.recess-bottom-h;
+        width: 100%;
+        height: Tokens.recess-bottom-h;
+        background: Tokens.recess-bottom;
+    }
+    Rectangle {
+        x: 0;
+        width: Tokens.recess-side-w;
+        height: 100%;
+        background: Tokens.recess-left;
+    }
+    Rectangle {
+        x: parent.width - Tokens.recess-side-w;
+        width: Tokens.recess-side-w;
+        height: 100%;
+        background: Tokens.recess-right;
+    }
+}
+
+// The same approximation for an inset shadow with NO OFFSET, which is a simpler
+// shape: Φ(0) = ½ on every edge, so all four bands are one color and one width
+// and the whole thing is a single `tint`. `WellRecess` cannot share this — its
+// +1 px offset is exactly what makes its four edges differ.
+//
+// Used by the aircraft card, whose Figma glow is `inset 0 0 4px` in white.
+//
+// ⚠ SAME TWO RULES AS `WellRecess`: the container needs `clip: true` or the
+// square bands paint over its rounded corners, and this must be the LAST child
+// so it darkens what the container holds. Input-transparent — plain Rectangles
+// take no hits, so do not hang a handler on one.
+export component InsetGlow inherits Rectangle {
+    in property <color> tint;
+    in property <length> band: 4px;
+
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: root.band;
+        background: @linear-gradient(180deg, root.tint 0%, transparent 100%);
+    }
+    Rectangle {
+        y: parent.height - root.band;
+        width: 100%;
+        height: root.band;
+        background: @linear-gradient(0deg, root.tint 0%, transparent 100%);
+    }
+    Rectangle {
+        x: 0;
+        width: root.band;
+        height: 100%;
+        background: @linear-gradient(90deg, root.tint 0%, transparent 100%);
+    }
+    Rectangle {
+        x: parent.width - root.band;
+        width: root.band;
+        height: 100%;
+        background: @linear-gradient(270deg, root.tint 0%, transparent 100%);
+    }
+}
+
+// ─── the scroll view ─────────────────────────────────────────────────────────
+// A `Flickable` plus our own thumb, replacing std-widgets' `ScrollView`
+// (2026-08-13). It was the LAST std-widgets element in the installer, and it went
+// for the reason `PathField` never used LineEdit: the widget's own theming fights
+// every color here and cannot be reached to fix.
+//
+// ⚠ THE TRACK IS TRANSPARENT IN EVERY STATE. fluent's ScrollBar paints
+// `FluentPalette.alternate-background` behind the thumb on hover — a dark rounded
+// rectangle that belongs to a different design language than the panels it lands
+// in. The contrast it was reaching for is real, so it is kept, but as the THUMB
+// going opaque white rather than as a second shape appearing.
+//
+// ⚠ THOSE FLUENT COLORS ARE NOT OVERRIDABLE. `alternate-background` and `border`
+// are literals inside `fluent/styling.slint`, not derived from the public
+// `Palette` global, so no amount of palette setting reaches them. Re-theming was
+// never an option; replacing the widget was.
+//
+// ⚠ AND THEY FOLLOW THE USER'S OS THEME. Both are written
+// `dark-color-scheme ? <dark> : <light>`, so the same build drew a #2C2C2C track
+// with an 8%-white thumb on a dark-mode machine and an #f0f0f0 track with a
+// 45%-BLACK thumb on a light-mode one. Nothing in this UI is theme-reactive, so
+// that was one control disagreeing with the whole window on half of all machines.
+// This one has no such branch.
+//
+// ⚠ VERTICAL ONLY, on purpose. Both wells wrap or clip horizontally and neither
+// can scroll sideways; a horizontal bar would be dead code with live geometry.
+// The exposed property names are std-widgets' own so a caller swaps the import
+// and changes nothing else — `viewport-y` included, which is NEGATIVE as you
+// scroll down (Flickable's convention) and which `aircraft.slint` does arithmetic
+// with.
+export component PhotonScrollView {
+    in property <bool> enabled: true;
+
+    out property <length> visible-width <=> flick.width;
+    out property <length> visible-height <=> flick.height;
+    in-out property <length> viewport-width <=> flick.viewport-width;
+    in-out property <length> viewport-height <=> flick.viewport-height;
+    in-out property <length> viewport-x <=> flick.viewport-x;
+    in-out property <length> viewport-y <=> flick.viewport-y;
+
+    preferred-width: 100%;
+    preferred-height: 100%;
+
+    property <length> maximum: max(0px, flick.viewport-height - flick.height);
+    property <bool> active: touch.has-hover || touch.pressed;
+    // ⚠ THE TRACK IS SHORTER THAN THE BAR AT BOTH ENDS. Without the inset the
+    // thumb runs flush into the top and bottom of the well at the extremes of the
+    // scroll, which reads as it colliding with the container rather than sitting
+    // in it. Everything below measures against this, not against `bar.height` —
+    // the thumb's own height included, or a full-height thumb would overhang the
+    // inset it was supposed to respect.
+    property <length> track-h: max(0px,
+        bar.height - 2 * Tokens.scroll-track-inset);
+    // The thumb is the visible fraction of the content, floored so a very long
+    // list still leaves something to grab and capped so a very short one cannot
+    // exceed the track.
+    property <length> thumb-h: root.maximum <= 0px
+        ? 0px
+        : min(root.track-h,
+              max(Tokens.scroll-thumb-min,
+                  root.track-h * (flick.height / flick.viewport-height)));
+    property <length> travel: max(0px, root.track-h - root.thumb-h);
+
+    flick := Flickable {
+        // The wheel is handled by Flickable itself; `interactive` is only about
+        // dragging the CONTENT, which would fight the text selection in the log.
+        interactive: false;
+        width: parent.width;
+        height: parent.height;
+
+        @children
+    }
+
+    bar := Rectangle {
+        x: parent.width - Tokens.scrollbar-w;
+        y: 0;
+        width: Tokens.scrollbar-w;
+        height: parent.height;
+        visible: root.maximum > 0px;
+        // ⚠ NO `background`. That absence is the whole point — see above.
+
+        Rectangle {
+            x: parent.width - Tokens.scroll-thumb-inset - self.width;
+            // ⚠ Guarded: at `maximum == 0` the bar is hidden but its bindings are
+            // still evaluated, and 0px/0px is NaN rather than an error.
+            y: Tokens.scroll-track-inset + (root.maximum <= 0px
+                ? 0px
+                : root.travel * (-flick.viewport-y / root.maximum));
+            width: root.active
+                ? Tokens.scroll-thumb-w-active : Tokens.scroll-thumb-w;
+            height: root.thumb-h;
+            border-radius: self.width / 2;
+            background: root.active
+                ? Tokens.scroll-thumb-active : Tokens.scroll-thumb;
+
+            animate width, background { duration: 150ms; easing: ease-out; }
+        }
+
+        touch := TouchArea {
+            // Where the drag started, in content coordinates. Captured on press
+            // so the thumb tracks the pointer instead of jumping to it.
+            property <{ pressed-value: length, y: length }> saved;
+
+            width: parent.width;
+            height: parent.height;
+            // ⚠ Also off when there is nothing to scroll, so a hidden bar cannot
+            // swallow a click meant for what is behind it.
+            enabled: root.enabled && root.maximum > 0px;
+
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left
+                        && event.kind == PointerEventKind.down) {
+                    self.saved = {
+                        pressed-value: -flick.viewport-y,
+                        y: self.mouse-y,
+                    };
+                }
+            }
+
+            moved => {
+                if (self.enabled && self.pressed && root.travel > 0px) {
+                    flick.viewport-y = -max(0px, min(root.maximum,
+                        self.saved.pressed-value
+                            + (self.mouse-y - self.saved.y)
+                              * (root.maximum / root.travel)));
+                }
+            }
+
+            // Wheeling while over the BAR itself — the Flickable underneath never
+            // sees those events.
+            scroll-event(event) => {
+                if (event.delta-y != 0) {
+                    flick.viewport-y = max(-root.maximum,
+                        min(0px, flick.viewport-y + event.delta-y));
+                    return accept;
+                }
+                return reject;
+            }
+        }
+    }
+}
+
+// ─── buttons ─────────────────────────────────────────────────────────────────
+// Four states x three styles: Primary (accent fill), Normal (flat neutral fill)
+// and Danger (the destructive red), each with Default / Hover / Down / Focus.
+// 96x32, radius 4, Roboto SemiBold 14 centered.
+//
+// ⚠ EVERY STATE FILL IS READ FROM THE COMPONENT SET, NOT DERIVED. An earlier cut
+// brightened on hover and darkened on press from each base, which is wrong for
+// three of the six: Primary hover jumps to a brighter, bluer #2fa4ed; Normal hover
+// moves from grey toward blue; and Primary and Danger both KEEP their base fill
+// when pressed, taking an inset shadow rather than a darker color. Only Normal
+// actually changes fill on press.
+//
+// ⚠ NO STYLE HAS A RESTING BORDER ANY MORE (2026-08-12). Primary used to carry a
+// permanent 2 px white keyline and thin it to 1 px on hover; the design removed it
+// from every resting state and gave all three styles a Focus variant that is the
+// base fill plus that same 2 px white border. So the keyline now means FOCUS and
+// nothing else — see `Tokens.focus-ring-w`. Restoring Primary's identity border
+// would make its focus state invisible, which is the whole reason it went.
+export component PhotonButton inherits Rectangle {
+    in property <string> label: "Button";
+    in property <bool> primary: true;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    out property <bool> has-focus: keys.has-focus;
+
+    property <bool> hovered: root.enabled && touch.has-hover && !touch.pressed;
+    property <bool> down: root.enabled && touch.pressed;
+    property <bool> focused: root.enabled && keys.has-focus;
+
+    // So `PhotonButton { }` is a tab stop and `.focus()` on it reaches the scope.
+    forward-focus: keys;
+
+    width: Tokens.button-w;
+    height: Tokens.button-h;
+    border-radius: Tokens.radius;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    background:
+        root.danger
+            ? (root.hovered ? Tokens.danger-hover : Tokens.danger)
+        : root.primary
+            ? (root.hovered ? Tokens.accent-hover : Tokens.accent)
+            : (root.down ? Tokens.neutral-down
+               : (root.hovered ? Tokens.neutral-hover : Tokens.neutral));
+
+    // ⚠ FOCUS ONLY, AND ON ALL THREE STYLES. Slint draws a border INSIDE the
+    // bounds, so this does not resize the button or move its label — which is
+    // what lets the ring appear and disappear without the row reflowing.
+    border-width: root.focused ? Tokens.focus-ring-w : 0px;
+    border-color: Tokens.text;
+
+    // The lift under a hovered button. Slint has drop-shadow on Rectangle, so this
+    // one is expressible directly rather than approximated. All three styles are
+    // `0 4px blur 4` and differ only in alpha — see the `lift-*` tokens for why
+    // the component set appears to say otherwise.
+    drop-shadow-offset-y: root.hovered ? 4px : 0px;
+    drop-shadow-blur: root.hovered ? 4px : 0px;
+    drop-shadow-color: root.hovered
+        ? (root.primary && !root.danger ? Tokens.lift-strong : Tokens.lift-soft)
+        : transparent;
+
+    // ⚠ THE PRESSED LOOK IS AN INSET SHADOW AND SLINT CANNOT DRAW ONE HERE.
+    // `inner-shadow-*` exists in Slint 1.17 and is SKIA-ONLY; this build renders
+    // with FemtoVG, whose item renderer returns early on `box_shadow.inset()` —
+    // so writing the real property would compile, pass review, and draw NOTHING.
+    // The gradient is the stand-in, one per style at the design's own alpha
+    // (.20/.19/.10 — Normal's is half the others, so a single shared gradient was
+    // wrong on two of three). It is kept where the wells' used to be dropped
+    // because it is the ONLY thing distinguishing pressed from hover on Primary
+    // and Danger, which do not change fill.
+    if root.down: Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: root.danger ? Tokens.press-danger
+            : (root.primary ? Tokens.press-primary : Tokens.press-normal);
+    }
+
+    Text {
+        text: root.label;
+        color: Tokens.text;
+        font-family: Tokens.font;
+        font-size: Tokens.h2-size;
+        font-weight: Tokens.weight-semibold;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+
+    // ⚠ ZERO-WIDTH ON PURPOSE, AND EVERY FocusScope IN THIS FILE IS. A sized
+    // FocusScope with `focus-on-click` (the default) returns EventAccepted from
+    // its own `input_event` on a press — it SWALLOWS the click rather than merely
+    // taking focus — so a full-size one over a TouchArea makes the control
+    // unclickable. Slint's own Button pins its scope to `width: 0` for exactly
+    // this reason and so does everything here.
+    //
+    // The side effect is the one we want: a button cannot be focused by clicking
+    // it, so the ring only ever appears from Tab. That is `:focus-visible`
+    // behavior, and it is why clicking Next does not leave a keyline behind.
+    //
+    // ⚠ REJECT EVERYTHING ELSE — Tab above all. Slint moves focus in the window's
+    // key handler AFTER the focused chain has rejected the event, so a scope that
+    // accepted Tab would trap focus on this button forever.
+    keys := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+// The ring drawn around a control the design has no Focus variant for. Carries
+// the look only; the call site gives it a geometry, because a component cannot
+// see `parent` from inside its own definition.
+component FocusRing inherits Rectangle {
+    background: transparent;
+    border-width: Tokens.focus-ring-w;
+    border-color: Tokens.text;
+    border-radius: Tokens.radius;
+}
+
+// ─── checkboxes ──────────────────────────────────────────────────────────────
+// The 20 px "Large Checkbox" that heads each feature row. Six variants in the
+// design — Checked x {Normal, Hover, Down} — and it borrows the buttons' whole
+// state palette to draw them: see the `check-*` tokens for which fills and why
+// none of them is a new color.
+//
+// ⚠ HOVER AND PRESS ARE THE CALLER'S TO REPORT, which is what `hovered`/`down`
+// are for. The control here is the WHOLE FEATURE ROW (see `OptionRow`), so the
+// box has to light up while the pointer is over the title — 20 px of a 442 px
+// target. Its own TouchArea can never see that, and a box that only reacts on
+// the glyph reads as the row not being clickable at all. They are OR'd with its
+// own touch state so a standalone `LargeCheckbox { }` still animates alone.
+export component LargeCheckbox inherits Rectangle {
+    in property <bool> checked: true;
+    in property <bool> enabled: true;
+    in property <bool> hovered: false;
+    in property <bool> down: false;
+    callback toggled();
+
+    property <bool> pressed: root.enabled && (root.down || touch.pressed);
+    // ⚠ Down WINS. A press keeps the pointer inside, so `has-hover` is true
+    // throughout one — without this the hover fill and the pressed inset would
+    // both be on and Down would never be reached.
+    property <bool> hot: root.enabled && !root.pressed
+        && (root.hovered || touch.has-hover);
+
+    width: 20px;
+    height: 20px;
+    border-radius: Tokens.radius-small;
+    opacity: root.enabled ? 1.0 : 0.45;
+    // ⚠ Required by the hover lip below — the band is square, and unclipped it
+    // pokes about 0.7 px past each of the two top corners.
+    clip: true;
+
+    // ⚠ CHECKED KEEPS ITS FILL WHEN PRESSED and takes the inset instead, exactly
+    // as the Primary button does; unchecked changes fill, as Normal does. Same
+    // trap as the buttons — derived with brighter()/darker() this comes out wrong
+    // on three of the six.
+    background:
+        root.checked
+            ? (root.hot ? Tokens.accent-hover : Tokens.accent)
+            : (root.pressed ? Tokens.neutral-down
+               : (root.hot ? Tokens.neutral-hover : Tokens.muted));
+
+    // The same lift as a hovered Normal button — `0 4px`, blur 4, 11%.
+    drop-shadow-offset-y: root.hot ? 4px : 0px;
+    drop-shadow-blur: root.hot ? 4px : 0px;
+    drop-shadow-color: root.hot ? Tokens.lift-soft : transparent;
+
+    // The hover lip. Exact rather than approximated — see the token.
+    if root.hot: Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: root.checked
+            ? Tokens.check-lip-checked : Tokens.check-lip-unchecked;
+    }
+
+    // The pressed inset, as a gradient for the same reason `PhotonButton`'s is
+    // one: Slint's `inner-shadow-*` is Skia-only and this build is FemtoVG, so
+    // the real property would compile and draw nothing.
+    //
+    // ⚠ BEFORE THE GLYPH, because Figma has the checkmark above the whole
+    // Background including its shadow — a pressed box darkens around the tick,
+    // not through it.
+    if root.pressed: Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: root.checked
+            ? Tokens.check-press-checked : Tokens.check-press-unchecked;
+    }
+
+    if root.checked: Image {
+        source: @image-url("assets/checkmark.svg");
+        // The glyph's own inset inside the 20 px box, from the design.
+        x: parent.width * 0.15;
+        y: parent.height * 0.25;
+        width: parent.width * 0.692;
+        height: parent.height * 0.5475;
+        image-fit: fill;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(); }
+    }
+}
+
+// The 16 px radio used for the wing-mod sub-choice. The design draws it square
+// with a square glyph — it behaves as a radio but is not drawn as one. Six
+// variants (`195:703`), Checked x {Normal, Hover, Down}, added 2026-08-13.
+//
+// ⚠ NEARLY THE LARGE CHECKBOX AND NOT QUITE, so do not merge the two. It takes
+// the same six fills, but it has NO white hover lip in any state, its pressed
+// inset is a quarter the strength when unchecked, its hover lift is a different
+// alpha AND a different geometry per state, and its label goes white on HOVER as
+// well as on check. All four are what the component set says.
+//
+// ⚠ NO `hovered`/`down` IN PROPERTIES, unlike `LargeCheckbox` — this component
+// IS its own row (box, label and one TouchArea across both), so its own touch
+// state already is the row's. The checkbox needs the caller to report those only
+// because `OptionRow` wraps it inside a larger control.
+export component SmallRadio inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    // Same rule as the checkbox: a press keeps the pointer inside, so without
+    // the exclusion the hover fill and the pressed inset would both be on.
+    property <bool> pressed: root.enabled && touch.pressed;
+    property <bool> hot: root.enabled && !root.pressed && touch.has-hover;
+
+    // ⚠ THE CONTROL'S REAL EXTENT — the 16 px box, the 8 px gap and the label —
+    // AND ONE NUMBER FOR BOTH THE HIT ZONE AND THE FOCUS RING. This sits in a
+    // VerticalLayout and therefore stretches to the whole content column, about
+    // 412 px against ~110 px of control. That was harmless while the only
+    // consequence was a generous click target; with a hover state it means 300 px
+    // of empty space lighting up a radio far to its left. Written twice the two
+    // drift and the ring stops describing what the pointer can hit.
+    //
+    // ⚠ `caption.width`, NEVER `caption.preferred-width`. A Slint `Text` gets its
+    // DEFAULT WIDTH BINDING from its implicit size — `preferred-width` is a
+    // layout property and reads 0 outside a layout, whatever the text says. It
+    // compiles, and `hot-w` silently becomes 24 px: the label stops responding,
+    // and so does most of the box. Which is why the caption below must NOT be
+    // given an explicit width — self-sizing is what makes it measurable.
+    property <length> hot-w: 24px + caption.width;
+
+    height: 16px;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    box := Rectangle {
+        x: 0;
+        y: 0;
+        width: 16px;
+        height: 16px;
+        border-radius: Tokens.radius-small;
+        // ⚠ CHECKED KEEPS ITS FILL UNDER THE PRESS and darkens with the inset
+        // alone, as Primary does; unchecked changes fill, as Normal does.
+        background: root.checked
+            ? (root.hot ? Tokens.accent-hover : Tokens.accent)
+            : (root.pressed ? Tokens.neutral-down
+               : (root.hot ? Tokens.neutral-hover : Tokens.muted));
+
+        // ⚠ THE TWO HOVER LIFTS ARE NOT ONE SHADOW AT TWO STRENGTHS, and that is
+        // not a transcription slip: Figma gives unchecked `0 2px` blur 2 and
+        // checked `0 1px` blur 4, at one alpha. ⚠ Both arrive as CSS
+        // *box-shadows*, so both blurs are radii as written — this is not the
+        // filter-vs-box-shadow sigma trap the buttons carry, and doubling them
+        // "for consistency" would be wrong.
+        drop-shadow-offset-y: root.hot ? (root.checked ? 1px : 2px) : 0px;
+        drop-shadow-blur: root.hot ? (root.checked ? 4px : 2px) : 0px;
+        drop-shadow-color: root.hot ? Tokens.lift-faint : transparent;
+
+        // Pressed, as a gradient for the same reason every other one here is:
+        // Slint's `inner-shadow-*` is Skia-only and this build is FemtoVG.
+        //
+        // ⚠ BEFORE THE GLYPH, because Figma has the glyph outside the box and
+        // above its shadow — a pressed radio darkens around the mark, not
+        // through it.
+        if root.pressed: Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            background: root.checked
+                ? Tokens.radio-press-checked : Tokens.radio-press-unchecked;
+        }
+
+        if root.checked: Rectangle {
+            x: 4px;
+            y: 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 1px;
+            background: Tokens.text;
+        }
+    }
+
+    // ⚠ NO EXPLICIT WIDTH — it self-sizes to its text, which is what `hot-w`
+    // above measures. Giving it one puts the hit zone back to 24 px.
+    caption := Text {
+        x: 24px;
+        height: 100%;
+        text: root.label;
+        // ⚠ WHITE ON HOVER AND PRESS TOO, not only when checked — five of the
+        // six variants carry white and only Unchecked Normal is muted. Keyed on
+        // `checked` alone, a hovered row lights its box and leaves its label
+        // grey, which reads as the two not belonging to each other.
+        color: (root.checked || root.hot || root.pressed)
+            ? Tokens.text : Tokens.muted;
+        font-family: Tokens.font;
+        font-size: Tokens.label-size;
+        font-weight: Tokens.weight-semibold;
+        vertical-alignment: center;
+    }
+
+    // Around the box AND its label, because together they are what the pointer
+    // operates — a ring hugging the 16 px box would point at a fraction of it.
+    if root.enabled && keys.has-focus: FocusRing {
+        x: -Tokens.focus-ring-outset;
+        y: -Tokens.focus-ring-outset;
+        width: root.hot-w + 2 * Tokens.focus-ring-outset;
+        height: parent.height + 2 * Tokens.focus-ring-outset;
+    }
+
+    // ⚠ `x: 0` IS LOAD-BEARING THE MOMENT A WIDTH IS GIVEN. In a non-layout
+    // parent Slint CENTERS a child that has an explicit size and no explicit
+    // position — so this TouchArea, sized but unplaced, sat in the middle of the
+    // 412 px row: the box and the label were both dead and a band of empty space
+    // to their right was live. It costs a build to find, because "sized but
+    // unplaced" looks like the most ordinary line in the file. Every other child
+    // here states its `x` for the same reason; an unsized one fills the parent
+    // and does not need to, which is why the old full-row TouchArea did not.
+    touch := TouchArea {
+        x: 0;
+        width: root.hot-w;
+        height: 100%;
+        enabled: root.enabled;
+        // As `OptionRow` and `PhotonButton` do. ⚠ Its extent is `hot-w`, not the
+        // row, so the pointer changes over exactly what lights up — which is the
+        // second reason to keep those two one number: a hand cursor over 300 px
+        // of empty space would promise a click that does nothing.
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+
+    keys := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+// ─── the step rail ───────────────────────────────────────────────────────────
+// The 158 px sidebar: the logo at a fixed offset, the six steps centered.
+//
+// A step's marker has three states and they are three different SVGs, not one
+// tinted shape: done is a filled muted dot, current a filled accent dot, and
+// pending a 2 px muted ring.
+export component StepRail inherits Rectangle {
+    in property <[string]> steps;
+    in property <int> current: 0;
+
+    width: Tokens.sidebar-w;
+    background: Tokens.sidebar-bg;
+
+    // The 1 px rule down the right edge — the design's `shadow-[1px_0_0_#2b333a]`.
+    // Slint has no box-shadow, and for a hairline a Rectangle is the honest
+    // equivalent rather than an approximation.
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        height: 100%;
+        background: Tokens.sidebar-edge;
+    }
+
+    Logo {
+        x: 26px;
+        y: 20px;
+        width: 105px;
+        height: 56px;
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 18px;
+        padding-left: 14px;
+        padding-right: 14px;
+
+        for step[idx] in root.steps: Rectangle {
+            height: 16px;
+
+            Image {
+                source: idx < root.current
+                    ? @image-url("assets/marker-done.svg")
+                    : (idx == root.current
+                        ? @image-url("assets/marker-current.svg")
+                        : @image-url("assets/marker-todo.svg"));
+                x: 0;
+                y: (parent.height - 10px) / 2;
+                width: 10px;
+                height: 10px;
+                image-fit: fill;
+            }
+
+            Text {
+                x: 18px;
+                width: parent.width - 30px;
+                height: 100%;
+                text: step;
+                color: idx == root.current ? Tokens.text : Tokens.muted;
+                font-family: Tokens.font;
+                font-size: Tokens.label-size;
+                font-weight: Tokens.weight-semibold;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// ─── the bottom bar ──────────────────────────────────────────────────────────
+// 64 px, version on the left, Back/Next on the right at 19 px and 123 px — which
+// is the same as a right-aligned row with 8 px between the two buttons.
+//
+// ⚠ The Uninstall slot is NOT in the mockup, which puts that button on the
+// Features screen. It lives here because the action belongs next to the thing it
+// acts on — the aircraft you picked — and Features is where you choose what to
+// ADD. Hidden unless a screen asks for it. Placement is still undecided; see
+// docs/installer_gui_plan.md §3.
+export component BottomBar inherits Rectangle {
+    in property <string> version;
+    in property <bool> back-visible: false;
+    in property <bool> next-visible: true;
+    in property <bool> next-enabled: true;
+    in property <string> next-label: "Next";
+    // ⚠ THE FORWARD BUTTON IS PRIMARY ON EVERY STEP, Complete's "Exit" included.
+    // It was briefly Danger red there (2026-08-13, withdrawn the same day): red
+    // is this UI's destructive colour and it is spent on Uninstall below, so
+    // spending it again on the button that closes a SUCCESSFUL install made the
+    // one unambiguous signal ambiguous. Do not reintroduce a `next-danger`.
+    in property <bool> uninstall-visible: false;
+
+    callback back();
+    callback next();
+    callback uninstall();
+    callback version-clicked();
+
+    height: Tokens.bar-h;
+    background: Tokens.bar-bg;
+
+    // The design's `shadow-[0px_-1px_0px_#0d151c]` — a 1 px rule along the top.
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: Tokens.bar-edge;
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 19px;
+        padding-top: 16px;
+        padding-bottom: 16px;
+        spacing: 8px;
+
+        // The version is a LINK to the X-Plane.org page. The design underlines it
+        // on the Run and Complete screens and not on the others; it is underlined
+        // everywhere here, because a control that is clickable only sometimes,
+        // with no other difference, is worse than one that always is.
+        //
+        // ⚠ The rule is a Rectangle. Slint's Text has no text-decoration, and a
+        // drawn hairline is the honest equivalent — the same choice the top edge
+        // and the attribute divider make.
+        Rectangle {
+            width: versionText.preferred-width;
+
+            versionText := Text {
+                width: 100%;
+                height: 100%;
+                text: root.version;
+                color: versionTouch.has-hover ? Tokens.text : Tokens.muted;
+                font-family: Tokens.font;
+                font-size: Tokens.h2-size;
+                font-weight: Tokens.weight-medium;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                x: 0;
+                y: versionText.y + (parent.height + versionText.font-size) / 2;
+                width: versionText.preferred-width;
+                height: 1px;
+                background: versionTouch.has-hover ? Tokens.text : Tokens.muted;
+            }
+
+            versionTouch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.version-clicked(); }
+            }
+        }
+
+        Rectangle { }   // the spacer that pushes the buttons right
+
+        // ⚠ LEFT OF BACK, and red. It sits with the other navigation rather than
+        // off by the version, because it is one of the things you can do from this
+        // screen — and the red is what stops it reading as a third way forward.
+        if root.uninstall-visible: PhotonButton {
+            label: "Uninstall";
+            danger: true;
+            clicked => { root.uninstall(); }
+        }
+
+        if root.back-visible: PhotonButton {
+            label: "Back";
+            primary: false;
+            clicked => { root.back(); }
+        }
+
+        if root.next-visible: PhotonButton {
+            label: root.next-label;
+            primary: true;
+            enabled: root.next-enabled;
+            clicked => { root.next(); }
+        }
+    }
+}
+
+// ─── the aircraft card ───────────────────────────────────────────────────────
+// 72 px tall. Unselected is a flat card with a 1 px border and a soft white edge
+// glow; selected takes the accent fill and a 2 px white border, and every text on
+// it goes white. Either one lifts under the pointer.
+export component AircraftCard inherits Rectangle {
+    in property <AircraftEntry> entry;
+    in property <bool> selected: false;
+    // ⚠ "THE LIST HAS THE KEYBOARD AND THIS IS ITS ROW", not a second selection.
+    // The list moves `selected` with the arrow keys rather than carrying a
+    // separate focus cursor, so this is only ever true on the selected card —
+    // it renders the design's Hover state, which is the vocabulary already there
+    // for "this is the row you are on". See screens/aircraft.slint.
+    in property <bool> highlighted: false;
+    callback clicked();
+
+    // The badge's own color, by `kind`. Kept as one expression so the three states
+    // are readable together rather than spread across three `if` branches.
+    property <color> status-color:
+        root.entry.kind == 2 ? Tokens.status-ok
+        : (root.entry.kind == 3 ? Tokens.status-broken : Tokens.accent);
+
+    property <bool> hot: root.highlighted || touch.has-hover;
+
+    height: Tokens.card-h;
+    border-radius: Tokens.radius;
+    background: root.selected ? Tokens.accent : Tokens.card-bg;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Tokens.text : Tokens.card-border;
+    // ⚠ Required by InsetGlow below — its bands are square.
+    clip: true;
+
+    // Hover lifts either state; only the glow is selection-dependent.
+    drop-shadow-offset-y: root.hot ? Tokens.card-lift-y : 0px;
+    drop-shadow-blur: root.hot ? Tokens.card-lift-blur : 0px;
+    drop-shadow-color: root.hot ? Tokens.card-lift : transparent;
+
+    Image {
+        source: root.selected
+            ? @image-url("assets/radio-on.svg")
+            : @image-url("assets/radio-off.svg");
+        x: 15px;
+        y: (parent.height - 20px) / 2;
+        width: 20px;
+        height: 20px;
+        image-fit: fill;
+    }
+
+    // Title row: name, then the aircraft's own version in mono.
+    //
+    // ⚠ BASELINES, NOT BOXES. Roboto and Roboto Mono have different ascent and
+    // descent, so two Texts of the same font-size in a row do NOT share a baseline
+    // — `vertical-alignment: bottom` aligns the two LAYOUT BOXES, and the mono
+    // glyphs then sit visibly low. Both are given the same explicit height and
+    // `bottom` alignment against THAT height, which is the same box for both and
+    // therefore the same baseline.
+    HorizontalLayout {
+        x: 48px;
+        y: 1px;
+        width: parent.width - 48px - 77px;
+        height: 24px;
+        spacing: 4px;
+        alignment: start;
+
+        Text {
+            text: root.entry.name;
+            height: 24px;
+            color: Tokens.text;
+            font-family: Tokens.font;
+            font-size: Tokens.h2-size;
+            font-weight: Tokens.weight-medium;
+            vertical-alignment: bottom;
+        }
+
+        Text {
+            // The "v" lives here rather than in the data: it is a label, and
+            // gui.cpp already has one job too many rendering status sentences.
+            text: "v" + root.entry.version;
+            height: 24px;
+            color: root.selected ? Tokens.text : Tokens.muted;
+            font-family: Tokens.font-mono;
+            font-size: Tokens.h2-size;
+            font-weight: 300;
+            vertical-alignment: bottom;
+        }
+    }
+
+    Text {
+        x: 48px;
+        y: 28px;
+        width: parent.width - 48px - 77px;
+        height: 16px;
+        text: root.entry.folder;
+        color: root.selected ? Tokens.text : Tokens.muted;
+        font-family: Tokens.font;
+        font-size: Tokens.label-size;
+        font-weight: Tokens.weight-semibold;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 48px;
+        y: 47px;
+        width: parent.width - 48px - 77px;
+        height: 16px;
+        text: root.entry.status;
+        // ⚠ White when selected — the status colors are legible on the card fill
+        // but not on the accent fill, which is the same failure the badge had.
+        color: root.selected
+            ? Tokens.text
+            : (root.entry.kind == 0 ? Tokens.muted : root.status-color);
+        font-family: Tokens.font;
+        font-size: Tokens.label-size;
+        font-weight: Tokens.weight-semibold;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // ⚠ THE BADGE INVERTS WHEN THE CARD IS SELECTED — white fill, colored text.
+    // It used to be colored-on-colored, which made it vanish exactly when you
+    // clicked the row it was on; the design was updated to fix that, and the
+    // inversion is the fix. Do not "simplify" it back to one fill.
+    //
+    // ⚠ 80 px is the Badge component's own width (it was widened from 63), kept as
+    // a MINIMUM so "INSTALLED" is not clipped to "INSTALL…" by the design's
+    // `text-ellipsis` — which reads as a verb, the opposite of what a green badge
+    // means.
+    if root.entry.badge != "": Rectangle {
+        x: parent.width - 14px - self.width;
+        y: (parent.height - 22px) / 2;
+        width: max(80px, label.preferred-width + 16px);
+        height: 22px;
+        border-radius: Tokens.radius-small;
+        background: root.selected ? Tokens.text : root.status-color;
+
+        label := Text {
+            text: root.entry.badge;
+            // ⚠ SELECTED INK IS THE ACCENT, NOT THE STATUS COLOR. The inverted
+            // badge is a hole punched in the card, so its ink is whatever the card
+            // is filled with — the same rule the green badge's dark ink follows
+            // (that one is the SCREEN background). Keeping the status color here
+            // instead put a third color on a card that is already all-accent, and
+            // a green "INSTALLED" on blue was the one word on the screen fighting
+            // the selection rather than belonging to it.
+            //
+            // ⚠ Dark ink on the GREEN when NOT selected. It is light enough that
+            // white on it fails to read at 12 px; the blue and the red both carry
+            // white.
+            color: root.selected
+                ? Tokens.accent
+                : (root.entry.kind == 2 ? Tokens.badge-ink-dark : Tokens.text);
+            font-family: Tokens.font;
+            font-size: Tokens.label-size;
+            font-weight: Tokens.weight-black;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    // ⚠ UNSELECTED ONLY, AND LAST. Figma drops the inset shadow on the selected
+    // branch — a white haze just inside the 2 px white border reads as the border
+    // being blurry, not as a glow. Last for the usual reason: an inset shadow
+    // darkens the edges of what the container holds, badge included.
+    if !root.selected: InsetGlow {
+        width: 100%;
+        height: 100%;
+        band: Tokens.card-glow-band;
+        tint: root.hot ? Tokens.card-glow-hover : Tokens.card-glow;
+    }
+}
+
+// ─── small text pieces ───────────────────────────────────────────────────────
+export component Header1 inherits Text {
+    color: Tokens.text;
+    font-family: Tokens.font;
+    font-size: Tokens.h1-size;
+    font-weight: Tokens.weight-regular;
+    vertical-alignment: center;
+    wrap: word-wrap;
+}
+
+export component Header2 inherits Text {
+    color: Tokens.text;
+    font-family: Tokens.font;
+    font-size: Tokens.h2-size;
+    font-weight: Tokens.weight-medium;
+    vertical-alignment: center;
+}
+
+export component MutedLabel inherits Text {
+    color: Tokens.muted;
+    font-family: Tokens.font;
+    font-size: Tokens.label-size;
+    font-weight: Tokens.weight-semibold;
+    vertical-alignment: center;
+    wrap: word-wrap;
+}
+
+// The Review screen's "Property Label": a white head over a muted value.
+//
+// ⚠ THE VALUE IS ONE LINE, ELIDED — never wrapped. `MutedLabel` wraps by default
+// (it is used for paragraphs elsewhere), and the row is a fixed 40 px, so a long
+// value — the X-Plane path, every time — grew to two lines and ran straight
+// through the heading of the row below it. That read as the rows being mis-spaced
+// rather than as one value being too long. The full path is on the previous screen
+// and in the log; this is a confirmation line, not the place to read it from.
+export component PropertyRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+
+    height: 40px;
+
+    Header2 {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 24px;
+        text: root.label;
+        font-weight: Tokens.weight-semibold;
+    }
+
+    MutedLabel {
+        x: 0;
+        y: 26px;
+        width: 100%;
+        height: 16px;
+        text: root.value;
+        wrap: no-wrap;
+        overflow: elide;
+    }
+}
+
+// A feature row on the Select Features screen: a 20 px checkbox, a title, and a
+// wrapping description.
+//
+// ⚠ ITS HEIGHT COMES FROM ITS CONTENT, and the caller must not pin it. The
+// description wraps to two lines at this width and a fixed height clipped it
+// against whatever sat underneath — which read as the row below overlapping this
+// one rather than as this one being too short.
+//
+// ⚠ THE WHOLE ROW TOGGLES, not just the 20 px box. A caption that describes a
+// checkbox and does not operate it is a target people miss and then blame
+// themselves for; the TouchArea spans the row and the checkbox itself is inert.
+export component OptionRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> checked: true;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    height: layout.preferred-height;
+
+    // ⚠ THE INDENT IS THE LAYOUT'S PADDING, NOT AN `x`/`width` ON EACH CHILD.
+    // Setting a child's width to `parent.width - 30px` inside a layout makes the
+    // child's preferred width depend on the parent's actual width, while the
+    // parent's preferred width is computed FROM its children — a binding loop
+    // Slint rejects at compile time ("layoutinfo-h is part of a binding loop").
+    // Padding expresses the same indent with the dependency running one way.
+    layout := VerticalLayout {
+        padding-left: 30px;
+        spacing: 2px;
+
+        Header2 {
+            height: 24px;
+            text: root.title;
+        }
+
+        MutedLabel {
+            text: root.description;
+            vertical-alignment: top;
+            font-weight: Tokens.weight-medium;
+            wrap: word-wrap;
+        }
+    }
+
+    LargeCheckbox {
+        x: 0;
+        y: 2px;
+        checked: root.checked;
+        enabled: root.enabled;
+        // ⚠ THE ROW'S POINTER STATE, NOT THE BOX'S, and this is the other half of
+        // "the whole row toggles". `touch` spans the row and sits above the box,
+        // so the box's own TouchArea sees neither hover nor press — without these
+        // two lines the design's Hover and Down variants would be unreachable
+        // everywhere except the 20 px of glyph, on a target 442 px wide.
+        hovered: touch.has-hover;
+        down: touch.pressed;
+        // Inert: the row's TouchArea is above it and owns every click, so letting
+        // the box fire too would toggle twice on the 20 px where they overlap.
+        toggled => { }
+    }
+
+    // Same rule as SmallRadio: the ring marks the row, which is what toggles.
+    if root.enabled && keys.has-focus: FocusRing {
+        x: -Tokens.focus-ring-outset;
+        y: -Tokens.focus-ring-outset;
+        width: parent.width + 2 * Tokens.focus-ring-outset;
+        height: parent.height + 2 * Tokens.focus-ring-outset;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.toggled(); }
+    }
+
+    keys := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+// ─── the path field ──────────────────────────────────────────────────────────
+// A light field on a dark screen, which is what the design specifies. Built on the
+// raw `TextInput` rather than std-widgets' LineEdit, whose own theming would fight
+// every color here.
+export component PathField inherits Rectangle {
+    in-out property <string> text;
+    callback edited(string);
+    // Enter in the field means "go on" — the bottom bar's Next. Raised rather
+    // than handled here so the one place that knows whether Next is even legal
+    // stays the one place that decides.
+    callback accepted();
+
+    height: Tokens.button-h;
+    border-radius: Tokens.radius;
+    background: Tokens.field-bg;
+
+    // ⚠ THE RING IS THE ACCENT HERE, NOT WHITE. Every other focus ring is the
+    // white keyline the design uses on buttons, but this field is a LIGHT box
+    // (#e4e8ed) on a dark screen and white on it is invisible. The field also
+    // needs no `FocusScope`: a TextInput is focusable in its own right and is
+    // already in the tab order.
+    border-width: input.has-focus ? Tokens.focus-ring-w : 0px;
+    border-color: Tokens.accent;
+
+    input := TextInput {
+        x: 12px;
+        y: 0;
+        width: parent.width - 23px;
+        height: 100%;
+        text <=> root.text;
+        color: Tokens.field-text;
+        font-family: Tokens.font;
+        font-size: Tokens.h2-size;
+        vertical-alignment: center;
+        single-line: true;
+        selection-background-color: Tokens.accent;
+        selection-foreground-color: Tokens.text;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(); }
+    }
+}

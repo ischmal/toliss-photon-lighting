@@ -175,6 +175,32 @@ class SharedConstantTests(unittest.TestCase):
         for name in c.INTERIOR_TEXTURES_ADDED:
             self.assertIn(f'name == "{name}"', CONSTANTS_CPP)
 
+    def test_the_screens_airframe_and_frame_template_lists_match(self):
+        """Both halves of the display glow's per-airframe wiring (2026-08-11).
+
+        ⚠ The frame-template list is the one that fails INVISIBLY. It decides
+        which `.acf` attachment row our row's coordinate frame is copied from, so
+        a name that exists in only one of the two files means either a refusal on
+        an airframe that should work, or — worse — a build script that believes an
+        airframe is covered when the installer will not attach it."""
+        c = _build_constants()
+        cpp = re.search(r"ScreensAirframes\(\).*?\{(.*?)\}", CONSTANTS_CPP, re.S)
+        self.assertIsNotNone(cpp, "ScreensAirframes() moved or was renamed")
+        self.assertEqual(set(c.SCREENS_AIRFRAMES),
+                         set(re.findall(r'"(a\d{3})"', cpp.group(1))),
+                         "build/constants.SCREENS_AIRFRAMES and "
+                         "core/constants.cpp's ScreensAirframes() disagree")
+
+        tmpl = re.search(r"ScreensFrameTemplates\(\).*?kTemplates = \{(.*?)\};",
+                         CONSTANTS_CPP, re.S)
+        self.assertIsNotNone(tmpl, "ScreensFrameTemplates() moved or was renamed")
+        # ORDER matters as well as membership: the two frames are different datums,
+        # so which one wins in a file carrying both has to be a decision.
+        self.assertEqual(list(c.SCREENS_FRAME_TEMPLATES),
+                         re.findall(r'"([^"]+\.obj)"', tmpl.group(1)),
+                         "build/constants.SCREENS_FRAME_TEMPLATES and "
+                         "core/constants.cpp's ScreensFrameTemplates() disagree")
+
     def test_photoncore_includes_no_xplm_header(self):
         """⚠ THE LIBRARY'S LOAD-BEARING PROPERTY. `photon-installer` and
         `photoncore_tests` build on machines and CI runners with no X-Plane SDK,

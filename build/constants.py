@@ -81,7 +81,31 @@ INTERIOR_TEXTURES_ADDED = frozenset({"pedals_details_1.png", "pedals_details_2.p
 
 # ─── display (screen) glow ────────────────────────────────────────────────────
 SCREENS_OBJ = "lights_screens.obj"
-SCREENS_AIRFRAMES = ("a319", "a320", "a321")
+
+# ⚠ Unlike the interior, this one DOES cover the A330-900: it needs only the six
+# DU positions and AirbusFBW/DUBrightness, and the a339 has both. Its OBJ is NOT
+# byte-identical to the A3xx one — different flight deck, different datum — which
+# is why the payload stages one per airframe (see SCREENS_FRAME_TEMPLATES).
+SCREENS_AIRFRAMES = ("a319", "a320", "a321", "a339")
+
+# The `.acf` attachment row our screens row is COPIED from, per airframe, in
+# preference order. That row carries the OBJ's origin against the aircraft's own
+# datum, so it decides the frame the DSL positions are read in — copying the
+# wrong one mis-places all six lights, and inventing one is what the patcher
+# refuses to do.
+#
+# ⚠ The A330-900 has NO `lights_inn.obj`; its analogue is `CockpitLighting_XP12.obj`,
+# which shares a frame with its `cockpit_INN` and carries the same `_obj_flags 5`
+# the A3xx template does. BOTH of its spellings are listed — the XP11 pair of `.acf`
+# files calls it `CockpitLighting.obj` — because the patcher runs on all four and
+# omitting one leaves refusal lines on an airframe where nothing is wrong.
+# Mirrors ScreensFrameTemplates() in core/constants.cpp; tests/test_version.py pins
+# the two together.
+SCREENS_FRAME_TEMPLATES = (
+    "lights_inn.obj",
+    "CockpitLighting_XP12.obj",
+    "CockpitLighting.obj",
+)
 
 # ─── the plugin folder ────────────────────────────────────────────────────────
 PLUGIN_FOLDER = "ToLissPhoton"

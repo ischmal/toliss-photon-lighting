@@ -409,9 +409,11 @@ airframe a320 {
   // EXPERIMENTAL (docs/screens_plan.md). Six spill lights, one per main display
   // unit, throwing each screen's own wash back into the cockpit.
   //
-  // In the a320 block so a319/a321 inherit them and a339 gets nothing, and in
-  // the SAME COORDINATE FRAME as lights_inn.obj — patch_acf_screens.py copies
-  // the attachment point from the aircraft's own lights_inn.obj row.
+  // In the a320 block so a319/a321 inherit them, and in the SAME COORDINATE
+  // FRAME as lights_inn.obj — patch_acf_screens copies the attachment point from
+  // the aircraft's own lights_inn.obj row. ⚠ The a339 has its OWN six (bottom of
+  // this file) because its flight deck is a different model AND its OBJ frame is
+  // a different datum; it does not inherit these.
   //
   // Positions were seeded from the panel geometry (ToLiss draws the DUs from its
   // plugin, so there is no screen geometry to measure) and tuned in-sim
@@ -727,5 +729,78 @@ airframe a339 {
     wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 2; }
     wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 2; }
     wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 2; }
+  }
+
+  // ==========================================================================
+  // SCREENS (display glow) — target: screens -> objects/lights_screens.obj
+  // ==========================================================================
+  // The a339's own six. ⚠ POSITION IS THE ONLY THING THAT DIFFERS FROM THE A3xx
+  // — color, alpha, size, aim and spread all come from the `screen_glow` light
+  // type in lights.style.phdsl and are deliberately shared, so a retune of the
+  // look moves both airframes together and this block never has to be revisited
+  // for anything but geometry.
+  //
+  // ⚠ A DIFFERENT DATUM, not just different seats. These are in the frame of
+  // `CockpitLighting_XP12.obj` — which is what patch_acf_screens copies the
+  // attachment row from on this airframe, there being no `lights_inn.obj` here
+  // (that file is the A3xx's, and its absence is why the patcher needs a
+  // per-airframe template list). The a339 flight deck sits at z ≈ −29 in that
+  // frame where the A3xx sits at z ≈ −4.7, so these numbers look nothing like
+  // the block above and correctly so. `A330-900_cockpit_INN.obj` shares this
+  // frame, which is what makes the derivation below legitimate.
+  //
+  // HOW THESE WERE DERIVED (2026-08-11), and how to redo it if ToLiss moves the
+  // panel: `build/derive_panel_rects.py <cockpit_INN.obj> --all` reports each
+  // display face's bounding-box CENTER. The six A3xx lights sit a fixed standoff
+  // off their own faces — about 3.7 cm behind the glass and 1 cm below center,
+  // the SD 4.5 cm and 2.2 cm — so each light below is the a339's own face center
+  // plus the A3xx standoff for that same DU. That transfers the tuned geometry
+  // rather than re-guessing it, and it is why these are seeds worth trusting.
+  //
+  // ⚠ SEEDS ALL THE SAME — derived, not seen. Nothing here has been looked at in
+  // the sim. Re-tune with `build --target screens --debug --write` and judge by
+  // the position MARKERS, not the pool of light; a spill light's origin is not
+  // the bright part of its pool.
+  //
+  // The two numbers per fixture mean what they mean in the a320 block above:
+  // `spill_dref` is the light's own slot (n = fixture order), `index:` is the
+  // AirbusFBW/DUBrightness element driving it, and they are NOT the same number.
+  // The a339 carries the same six DUs in the same Airbus numbering, so `index:`
+  // is identical to the a320's per screen — a test pins both against kScreenDU.
+  fixture screen_capt_pfd "Captain PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.554 0.634 -29.137;  index: 0;  spill_dref: ToLissPhoton/screens/spill/0; }
+  }
+  fixture screen_capt_nd "Captain ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.348 0.634 -29.138;  index: 1;  spill_dref: ToLissPhoton/screens/spill/1; }
+  }
+  // The ECAM pair stack on the centerline, upper (E/WD) above lower (SD). x is
+  // 0.015 rather than 0 because that is where ToLiss's own faces sit — the a320
+  // has the same 1 cm offset, for whatever reason it has it.
+  fixture screen_ecam_upper "Upper ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.015 0.626 -29.136;  index: 4;  spill_dref: ToLissPhoton/screens/spill/2; }
+  }
+  // ⚠ The odd one out here too, and for the same reason as on the a320: the SD
+  // sits ~17 cm below the E/WD and slightly proud of it. That is ToLiss's
+  // geometry, not a transcription slip.
+  fixture screen_ecam_lower "Lower ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.015 0.449 -29.086;  index: 5;  spill_dref: ToLissPhoton/screens/spill/3; }
+  }
+  fixture screen_fo_nd "First Officer ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.359 0.635 -29.137;  index: 3;  spill_dref: ToLissPhoton/screens/spill/4; }
+  }
+  fixture screen_fo_pfd "First Officer PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.564 0.634 -29.138;  index: 2;  spill_dref: ToLissPhoton/screens/spill/5; }
   }
 }

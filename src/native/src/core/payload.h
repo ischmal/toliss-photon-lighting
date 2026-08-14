@@ -17,7 +17,7 @@
 // Layout:
 //     payload/objs/<stock|durantula|realwings>/<obj filename>
 //     payload/objs/interior/lights_inn.obj
-//     payload/objs/screens/lights_screens.obj
+//     payload/objs/screens/<airframe>/lights_screens.obj
 //     payload/textures/interior/*.png
 //     payload/plugin/ToLissPhoton/<arch>/ToLissPhoton.xpl
 //     payload/plugindata/{panelfx.txt,overlays/*.png}
@@ -65,9 +65,16 @@ std::string InteriorObjText();
 // `ToLissPhoton/debug/light/*`, is not installable, and would leave six lights
 // ignoring the DU knobs. `make_release` emits it straight from the Emitter for
 // exactly that reason rather than copying `dist/`.
-std::string ScreensObjPath();
-std::string ScreensObjText();
-bool ScreensAvailable();
+//
+// ⚠ PER AIRFRAME, unlike the interior OBJ (2026-08-11). The A3xx three really are
+// byte-identical, which is what made a single staged copy right when they were the
+// only airframes; the A330-900's six lights are in a different flight deck against
+// a different datum, so one shared file would install the A320's positions into it
+// and every light would land in the wrong place while still drawing perfectly.
+// Taking the key here rather than at the call site is what makes that unforgettable.
+std::string ScreensObjPath(const std::string& airframeKey);
+std::string ScreensObjText(const std::string& airframeKey);
+bool ScreensAvailable(const std::string& airframeKey);
 
 // ─── interior textures ───────────────────────────────────────────────────────
 // (filename, absolute source), ordered by name so install progress is stable run

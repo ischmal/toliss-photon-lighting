@@ -32,6 +32,7 @@
 #include "core/patch_acf_screens.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
+#include "core/progress.h"
 #include "core/version.h"
 
 namespace fs = std::filesystem;
@@ -204,8 +205,14 @@ public:
         Write(root_ / "objs" / "interior" / kInteriorObj,
               "I\n800\nOBJ\n\nPOINT_COUNTS\t0\t0\t0\t0\n"
               "# ToLissPhoton/interior/dome\n");
-        Write(root_ / "objs" / "screens" / kScreensObj,
-              "I\n800\nOBJ\n\nPOINT_COUNTS\t0\t0\t0\t0\n# screens\n");
+        // ⚠ PER AIRFRAME, and the stub says WHICH — the whole hazard this layout
+        // exists to remove is installing one airframe's six positions into
+        // another, where every light draws and every light is in the wrong place.
+        // A stub that read the same for all of them could not catch that.
+        for (const std::string& key : ScreensAirframes()) {
+            Write(root_ / "objs" / "screens" / key / kScreensObj,
+                  "I\n800\nOBJ\n\nPOINT_COUNTS\t0\t0\t0\t0\n# screens " + key + "\n");
+        }
         for (const std::string& t : InteriorTextures()) {
             Write(root_ / "textures" / "interior" / t, "PNG stub " + t);
         }
@@ -269,6 +276,34 @@ public:
 private:
     std::string airframe_;
     fs::path root_, folder_, objects_, objPath_;
+};
+
+
+// -- the progress recorder ---------------------------------------------------
+// Everything `ProgressFn` reported during a run, in order.
+//
+// WARNING: this exists because the old bar failed SILENTLY. `ProgressFn` was called
+// from exactly one loop - the interior texture copy - so an install without the
+// cockpit mod reported NOTHING and the bar sat at 0% until the run ended and the GUI
+// set it to 1.0 itself. Nothing in the code read as wrong; the callback was simply
+// never reached, and a bar that goes 0 -> 100 looks like a fast install.
+struct ProgressLog {
+    std::vector<double> fractions;
+    std::vector<std::string> steps;
+
+    static void Callback(double f, const std::string& step, void* self) {
+        auto* p = static_cast<ProgressLog*>(self);
+        p->fractions.push_back(f);
+        p->steps.push_back(step);
+    }
+    void AttachTo(actions::Options& o) {
+        o.progress = &Callback;
+        o.progressUserData = this;
+    }
+    bool SawStep(const std::string& name) const {
+        return std::find(steps.begin(), steps.end(), name) != steps.end();
+    }
+    double Last() const { return fractions.empty() ? -1.0 : fractions.back(); }
 };
 
 // A SkunkCrafts cfg, the pipe-delimited form the real files use.
@@ -535,7 +570,17 @@ TEST("payload: an EMPTY bundle dir still fails per-artifact, not up front") {
     payload::InitFromExecutable(U8(dir / "photon-installer"));
     CHECK(payload::Available());
     CHECK(!payload::InteriorAvailable());
-    CHECK(!payload::ScreensAvailable());
+    // ⚠ Per airframe since the a339 joined: its OBJ is a different file, so one
+    // bool cannot answer for the fleet. Both are asked here because "missing"
+    // must be per artifact — a bundle short of one airframe's screen-glow OBJ
+    // still installs everything else.
+    CHECK(!payload::ScreensAvailable("a320"));
+    CHECK(!payload::ScreensAvailable("a339"));
+    // ⚠ An airframe this feature does not cover reports NOT SUPPORTED rather than
+    // "your download is incomplete" — the gate fires before the file check, the
+    // same ordering ObjPath uses for wings and for the same reason: never send a
+    // user to re-download over a combination that does not exist.
+    CHECK_THROWS(payload::ScreensObjPath("a340"), payload::PayloadError);
     CHECK_THROWS(payload::ObjText("stock", "a320"), payload::PayloadError);
 }
 
@@ -1184,13 +1229,44 @@ TEST("screens: a DRY RUN of the .acf attachment writes nothing") {
     CHECK_EQ(Read(acf), original);                  // and does none of it
 }
 
-TEST("screens: an airframe without them is left alone") {
+// ⚠ THE FAILURE THIS CATCHES DRAWS PERFECTLY. Every airframe writes the same
+// FILENAME into its own objects/ folder, so installing the A320's six positions
+// onto an A330-900 leaves a file that is present, correctly attached, correctly
+// listed in the manifest, and lighting six places nobody is sitting. Nothing short
+// of reading the OBJ's contents can tell the two apart, which is why the payload
+// stubs name their airframe and why this asserts on that name.
+TEST("screens: the a339 gets ITS OWN OBJ, not the A3xx one") {
     TempDir tmp;
     FakePayload pay(tmp / "payload");
     FakeAircraft fa(tmp.path(), "a339", "ToLissA339_V1p0p4");
-    actions::Install(fa.Opts("stock"), gLog);
+    // Its cockpit-lighting row is the frame ours is copied from — there is no
+    // lights_inn.obj on this airframe, which is what the template LIST is for.
+    Write(fa.folder() / "A330-900.acf",
+          std::string("I\r\nACF\r\n"
+                      "P _obja/0/_v10_att_file_stl Fuselage_Fwd.obj\r\n"
+                      "P _obja/0/_v10_att_y_acf_prt_ref -3.000000000\r\n"
+                      "P _obja/1/_obj_hide_dataref AirbusFBW/ObjectKill\r\n"
+                      "P _obja/1/_v10_att_file_stl CockpitLighting_XP12.obj\r\n"
+                      "P _obja/1/_v10_att_y_acf_prt_ref -3.000000000\r\n"
+                      "P _obja/count 2\r\n"));
+
+    const std::vector<std::string> steps = actions::Install(fa.Opts("stock"), gLog);
+    CHECK(AnyStep(steps, "display glow"));
+    CHECK(Exists(fa.objects() / kScreensObj));
+    CHECK(Contains(Read(fa.objects() / kScreensObj), "# screens a339"));
+    CHECK(!Contains(Read(fa.objects() / kScreensObj), "# screens a320"));
+
+    const manifest::Manifest m = manifest::Read(U8(fa.objects()));
+    CHECK(m.screens.installed);
+    CHECK(HasEntry(m.screens.added, kScreensObj));      // added[], never backed_up[]
+    CHECK(!HasEntry(m.backedUp, kScreensObj));
+    CHECK(HasEntry(m.screens.acfPatched, "A330-900.acf"));
+
+    // ...and it comes back out again, both halves.
+    actions::Options o = fa.Opts("stock");
+    actions::Uninstall(o, gLog);
     CHECK(!Exists(fa.objects() / kScreensObj));
-    CHECK(!manifest::Read(U8(fa.objects())).screens.installed);
+    CHECK(!patch_acf_screens::IsAttached(Read(fa.folder() / "A330-900.acf")));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1215,4 +1291,243 @@ TEST("manifest: a key this build does not model survives an install round trip")
 
     actions::Install(fa.Opts("stock"), gLog);
     CHECK(Contains(Read(mf), "future_axis"));
+}
+
+
+// --- progress ---------------------------------------------------------------
+// The cost model and the measurements behind it live in core/progress.h.
+
+TEST("progress: an ordinary install reports from its first phase, not its last") {
+    // The regression this whole module exists for. Before, the only call site was
+    // inside the interior texture loop, so this exact run - the common one, and the
+    // only one available on the A330-900 - reported zero times.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    ProgressLog prog;
+    actions::Options o = fa.Opts("stock");
+    prog.AttachTo(o);
+
+    actions::Install(o, gLog);
+
+    CHECK(!prog.fractions.empty());
+    CHECK(prog.SawStep("Plugin"));
+    CHECK(prog.SawStep("Exterior lights"));
+    // It must MOVE, not merely fire: a run that reports 0.0 every time is the old
+    // behavior wearing a callback.
+    CHECK(prog.Last() > 0.0);
+}
+
+TEST("progress: the fraction never goes backwards") {
+    // A bar that retreats reads as a bug in whatever step was running. `Plan` makes
+    // this structural - `Within` only moves the CURRENT step and takes a max - but
+    // the property is the point, so it is checked over a real run.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    ProgressLog prog;
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    prog.AttachTo(o);
+
+    actions::Install(o, gLog);
+
+    CHECK(prog.fractions.size() > 1);
+    for (std::size_t i = 1; i < prog.fractions.size(); ++i) {
+        CHECK(prog.fractions[i] >= prog.fractions[i - 1]);
+    }
+    for (double f : prog.fractions) {
+        CHECK(f >= 0.0);
+        CHECK(f <= 1.0);
+    }
+}
+
+TEST("progress: every phase the plan priced is one the run enters") {
+    // HALF THE TYPO GUARD, by arithmetic: a step that is priced but never entered is
+    // never banked, while still sitting in the denominator, so the run ends short of
+    // 1.0. Renaming one `Begin` and not its `Add` fails here.
+    //
+    // The OTHER half - a step the run enters that the plan never priced - is NOT
+    // visible from the fraction and has its own test below. It is missing from the
+    // denominator too, so the arithmetic still lands on exactly 1.000. That is not a
+    // guess: this test was written believing it covered both, and it passed against
+    // a mutation that deleted the glow step's `plan.Add`.
+    //
+    // A phase that forgets its `Finish` is NOT a bug and is not tested for -
+    // `Plan::Begin` banks the step it is leaving, so only the last step in a run
+    // needs its own `Finish`, and it has one.
+    for (bool interior : {false, true}) {
+        TempDir tmp;
+        FakePayload pay(tmp / "payload");
+        FakeAircraft fa(tmp.path());
+        ProgressLog prog;
+        actions::Options o = fa.Opts("stock");
+        o.interior = interior;
+        prog.AttachTo(o);
+
+        actions::Install(o, gLog);
+        CHECK(prog.Last() > 0.999);
+    }
+}
+
+TEST("progress: no phase enters a step the plan never priced") {
+    // THE OTHER HALF, and it needs a hook because the numbers cannot show it - see
+    // progress.h. Every branch of a real run is walked with the hook armed; any call
+    // at all is a phase whose `Begin` has no matching `Add`, which in production is
+    // a silent dead spot in the bar.
+    std::vector<std::string> unknown;
+    progress::SetUnknownStepHook(
+        [&unknown](const std::string& n) { unknown.push_back(n); });
+
+    {
+        TempDir tmp;
+        FakePayload pay(tmp / "payload");
+        // Every airframe, both wing branches that exist, cockpit mod on and off, and
+        // the uninstall - the steps differ per branch and an unpriced one only shows
+        // up on the branch that enters it.
+        for (const Airframe& af : Airframes()) {
+            for (const std::string& wing : WingsFor(af.key)) {
+                for (bool interior : {false, true}) {
+                    FakeAircraft fa(tmp.path(), af.key,
+                                    std::string("ToLiss_") + af.key + "_" + wing +
+                                        (interior ? "_int" : ""));
+                    actions::Options o = fa.Opts(wing);
+                    o.interior = interior;
+                    o.progress = &ProgressLog::Callback;
+                    ProgressLog sink;
+                    o.progressUserData = &sink;
+                    actions::Install(o, gLog);
+                    actions::Uninstall(o, gLog);
+                }
+            }
+        }
+    }
+
+    progress::SetUnknownStepHook(nullptr);
+    for (const std::string& n : unknown) {
+        std::cout << "    unpriced step entered: " << n << std::endl;
+    }
+    CHECK(unknown.empty());
+}
+
+TEST("progress: an uninstall is planned too, and also completes") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    actions::Options in = fa.Opts("stock");
+    in.interior = true;
+    actions::Install(in, gLog);
+
+    ProgressLog prog;
+    actions::Options out = fa.Opts("stock");
+    prog.AttachTo(out);
+    actions::Uninstall(out, gLog);
+
+    CHECK(!prog.fractions.empty());
+    CHECK(prog.SawStep("Restoring originals"));
+    CHECK(prog.Last() > 0.999);
+}
+
+TEST("progress: only the airframe with a glow map is charged for the scan") {
+    // THE REASON THE PLAN IS PER RUN. Reading every `.obj` in objects/ is ~97% of an
+    // A330-900 install and 0% of an A320's, because `GlowRedirect()` has one entry.
+    // A shared weight table would be off by a factor of twenty on one of them
+    // whichever way it was tuned.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+
+    FakeAircraft a320(tmp.path(), "a320", "ToLissA320_V1p3p2");
+    ProgressLog p320;
+    actions::Options o320 = a320.Opts("stock");
+    p320.AttachTo(o320);
+    actions::Install(o320, gLog);
+    CHECK(!p320.SawStep("Skin glow"));
+
+    FakeAircraft a339(tmp.path(), "a339", "ToLissA339_V1p0p4");
+    ProgressLog p339;
+    actions::Options o339 = a339.Opts("stock");
+    p339.AttachTo(o339);
+    actions::Install(o339, gLog);
+    CHECK(p339.SawStep("Skin glow"));
+    CHECK(p339.Last() > 0.999);
+}
+
+TEST("progress: a plan with nothing in it reports 0, never 1") {
+    // An empty plan means "nothing is known", not "everything is done". Reporting
+    // 1.0 there would put a full bar on screen before the work started - the same
+    // lie as the empty bar it replaced, told the other way round.
+    progress::Plan empty;
+    CHECK(empty.Empty());
+    CHECK_EQ(empty.Fraction(), 0.0);
+
+    progress::Plan zero;
+    zero.Add("nothing", 0.0);
+    CHECK_EQ(zero.Fraction(), 0.0);
+}
+
+TEST("progress: a step's fraction is clamped and can only advance") {
+    progress::Plan plan;
+    plan.Add("a", 100.0);
+    plan.Add("b", 100.0);
+
+    plan.Begin("a");
+    plan.Within(0.5);
+    CHECK_EQ(plan.Fraction(), 0.25);
+    // Backwards within a step is ignored - a patcher reporting its files out of
+    // order must not walk the bar back.
+    plan.Within(0.1);
+    CHECK_EQ(plan.Fraction(), 0.25);
+    // Out of range is clamped, not wrapped or trusted.
+    plan.Within(9.0);
+    CHECK_EQ(plan.Fraction(), 0.5);
+    plan.Finish();
+    CHECK_EQ(plan.Fraction(), 0.5);
+
+    plan.Begin("b");
+    plan.Within(1.0);
+    plan.Finish();
+    CHECK_EQ(plan.Fraction(), 1.0);
+}
+
+TEST("progress: an unknown step name cannot corrupt the fraction") {
+    // Belt and braces for the guard above: a mistyped name loses its own progress
+    // and nothing else. It must never bank another step's estimate or throw.
+    progress::Plan plan;
+    plan.Add("real", 100.0);
+    plan.Begin("typo");
+    plan.Within(1.0);
+    plan.Finish();
+    CHECK_EQ(plan.Fraction(), 0.0);
+    plan.Begin("real");
+    plan.Finish();
+    CHECK_EQ(plan.Fraction(), 1.0);
+}
+
+TEST("progress: entering a step banks the one before it") {
+    // Callers that walk Begin -> Begin without a Finish still get a monotonic bar.
+    progress::Plan plan;
+    plan.Add("a", 50.0);
+    plan.Add("b", 50.0);
+    plan.Begin("a");
+    plan.Begin("b");
+    CHECK_EQ(plan.Fraction(), 0.5);
+}
+
+TEST("progress: the plan is built from sizes and never reads the files") {
+    // THE PROPERTY THAT MAKES PLANNING FREE. `BytesOfFilesWithExt` prices a 1.6 GB
+    // folder without opening it; if it ever grew a read, planning would cost exactly
+    // as much as the phase it is predicting.
+    TempDir tmp;
+    const fs::path d = tmp / "objs";
+    Write(d / "one.obj", std::string(1000, 'x'));
+    Write(d / "two.OBJ", std::string(2000, 'y'));
+    Write(d / "skip.txt", std::string(4000, 'z'));
+    Write(d / "nested" / "deep.obj", std::string(8000, 'w'));
+
+    CHECK_EQ(progress::BytesOfFilesWithExt(U8(d), ".obj"), 3000u);
+    // Recursion is opt-in and must match the phase being priced: patch_glow walks
+    // one level, patch_realwings recurses.
+    CHECK_EQ(progress::BytesOfFilesWithExt(U8(d), ".obj", true), 11000u);
+    CHECK_EQ(progress::FileSizeOrZero(U8(d / "one.obj")), 1000u);
+    CHECK_EQ(progress::FileSizeOrZero(U8(d / "nope.obj")), 0u);
 }

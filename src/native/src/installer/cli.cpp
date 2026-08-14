@@ -470,7 +470,15 @@ int CmdVersion(const Args& a) {
     out["payload_available"] = payload::Available();
     out["realwings_available"] = payload::RealWingsAvailable();
     out["interior_available"] = payload::InteriorAvailable();
-    out["screens_available"] = payload::ScreensAvailable();
+    // ⚠ PER AIRFRAME since the A330-900 joined (2026-08-11) — its screen-glow OBJ
+    // is a different file, so one bool cannot answer for the fleet. Reported as a
+    // map rather than an any/all bool so a bundle missing exactly one airframe's
+    // OBJ says which, instead of reading as a wholesale build failure.
+    json screens = json::object();
+    for (const std::string& key : ScreensAirframes()) {
+        screens[key] = payload::ScreensAvailable(key);
+    }
+    out["screens_available"] = screens;
     std::vector<std::string> arches;
     try {
         arches = payload::PluginArches();
@@ -486,7 +494,7 @@ std::string UsageText() {
     return
         "ToLiss Photon Lighting installer\n"
         "\n"
-        "  photon-installer         [--dry-run] [--xplane-root P]\n"
+        "  photon-installer         [--dry-run] [--xplane-root P] [--tui]\n"
         "                                          the interactive installer\n"
         "  photon-installer detect  [--xplane-root P] [--json]\n"
         "  photon-installer status  --aircraft P [--json]\n"
@@ -508,6 +516,10 @@ std::string UsageText() {
         "--json prints a machine-readable result on stdout; the exit code is 0 or 1.\n"
         "There are no prompts: missing required input is an error, and a running\n"
         "X-Plane is a refusal unless --force.\n"
+        "\n"
+        "--tui             use the terminal installer rather than the graphical one\n"
+        "                  (for SSH and headless machines). Accepted and ignored by\n"
+        "                  a build without the GUI, where it is already the default.\n"
         "\n"
         "--payload-dir P   read the installable files from P instead of the\n"
         "                  payload/ (or data/) folder beside this binary. Accepted\n"

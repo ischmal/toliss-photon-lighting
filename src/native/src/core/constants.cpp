@@ -86,10 +86,57 @@ const std::vector<std::string>& AcfSuffixes() {
 }
 
 const std::vector<std::string>& ScreensAirframes() {
-    // A339 is out for the same reason it is out of the interior — a different
-    // cockpit model, so these six display positions are simply not its.
-    static const std::vector<std::string> kKeys = {"a319", "a320", "a321"};
+    // ⚠ A339 IS IN (2026-08-11), unlike the interior. The two were excluded
+    // together and for a stated reason — "a different cockpit model, so these six
+    // display positions are simply not its" — but that reason only ever ruled out
+    // reusing the A3xx POSITIONS. This feature needs nothing else airframe-shaped:
+    // the A330-900 carries the same six DUs on the same AirbusFBW/DUBrightness
+    // indices, so it gets its own six positions in the DSL and everything else is
+    // shared. The interior stays out for reasons that are still true (decision
+    // #14) — different rheostat indices, and Gus's mod does not cover it.
+    static const std::vector<std::string> kKeys = {"a319", "a320", "a321", "a339"};
     return kKeys;
+}
+
+const std::vector<std::string>& ScreensFrameTemplates() {
+    // The `.acf` attachment row `patch_acf_screens` copies OUR row from, in
+    // preference order. Whichever is present in the file wins; if none is, the
+    // patcher refuses rather than guessing a datum.
+    //
+    // ⚠ THIS IS A FRAME, NOT A FILE LIST. The copied row carries the OBJ's origin
+    // against the aircraft's own datum, which is the coordinate system the six
+    // positions in lights.layout.phdsl are authored in. Copy the wrong row and
+    // every light lands somewhere else — silently, since a spill light in the
+    // wrong place still draws.
+    //
+    // ⚠ The A330-900 has no `lights_inn.obj` at all (that is an A3xx file), which
+    // is the whole reason this is a list. Its `CockpitLighting_XP12.obj` is the
+    // analogue: same `_obj_flags 5`, and it shares a frame with that airframe's
+    // `cockpit_INN`, which is where the positions were derived from. Content
+    // decides, not the airframe key — the same rule detection already follows,
+    // and it means a file carrying both would take the A3xx frame, correctly.
+    //
+    // ⚠ BOTH A330-900 SPELLINGS, and the XP11 one is not an oversight to remove.
+    // A ToLiss folder holds four `.acf` variants and the patcher runs on all of
+    // them; on the A3xx every one attaches `lights_inn.obj`, so all four get our
+    // row. The A330-900 names its cockpit lighting `CockpitLighting_XP12.obj` in
+    // the XP12 pair and `CockpitLighting.obj` in the XP11 pair — so listing only
+    // the first leaves two REFUSAL lines in the installer's output on an airframe
+    // where nothing is actually wrong, which reads as a broken install and is the
+    // kind of asymmetry that costs somebody an afternoon.
+    //
+    // The two rows carry the same origin and a DIFFERENT FIELD SET (XP11 has
+    // `_v10_att_part` where XP12 has body/gear/wing, and renders floats `0.0`
+    // against `0.000000000`) — which is precisely why the row is copied verbatim
+    // per file instead of being written from constants.
+    //
+    // Mirrored by SCREENS_FRAME_TEMPLATES in build/constants.py.
+    static const std::vector<std::string> kTemplates = {
+        "lights_inn.obj",              // A319 / A320 / A321, all four .acf
+        "CockpitLighting_XP12.obj",    // A330-900, the XP12 pair
+        "CockpitLighting.obj",         // A330-900, the XP11 pair
+    };
+    return kTemplates;
 }
 
 bool AirframeHasScreens(const std::string& key) {

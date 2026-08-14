@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "core/acf.h"
+#include "core/progress.h"
 
 namespace photon {
 namespace patch_acf {
@@ -63,7 +64,8 @@ struct RunResult {
 };
 
 // Patch (or revert) every spot-carrying `.acf` in an aircraft folder.
-RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun);
+RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
+              const progress::StepProgress& onProgress = {});
 
 }  // namespace patch_acf
 }  // namespace photon

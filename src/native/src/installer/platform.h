@@ -26,6 +26,21 @@ namespace platform {
 // holds them as multi-byte UTF-8 literals.
 void EnableVt();
 
+// ⚠ FOR THE WINDOWS SUBSYSTEM BUILD ONLY (`-DPHOTON_GUI=ON`), and it must run
+// BEFORE any CLI output. A GUI-subsystem binary is started with no console
+// attached, so `photon-installer detect --json` run from an existing terminal
+// writes to nothing at all and exits 0 — output silently lost, which reads as the
+// subcommand being broken. This re-attaches the parent's console.
+//
+// ⚠ IT MUST NOT TOUCH A REDIRECTED STREAM. When stdout is a pipe or a file the
+// handle is inherited and already correct; reopening it onto CONOUT$ would send
+// `--json` to the terminal instead of into the caller's pipe. Each of the three
+// standard streams is therefore re-pointed only when it has no handle of its own.
+//
+// Returns false when there was no parent console to attach to (a double-click),
+// which is not an error — it is the normal GUI case. No-op off Windows.
+bool AttachParentConsole();
+
 // The window, as (columns, rows). Falls back to 90x30 when it cannot be
 // determined — a pipe, a CI runner, a terminal that does not answer.
 void TerminalSize(int& cols, int& rows);
@@ -42,6 +57,16 @@ bool OpenUrl(const std::string& url);
 // the header off the top" bug. notepad.exe is always present, opens any text file
 // regardless of association, and is a GUI app so it never writes to our console.
 bool OpenInEditor(const std::string& pathUtf8);
+
+// ─── the folder chooser (GUI only) ───────────────────────────────────────────
+// A native "pick a folder" dialog, for the Browse button on the X-Plane directory
+// screen. Returns the chosen path as UTF-8, or "" if the user cancelled.
+//
+// ⚠ WINDOWS ONLY TODAY, and it returns "" everywhere else rather than pretending.
+// That degrades to typing the path into the field, which is why the field is
+// editable and not a read-only display of whatever the dialog returned — the
+// screen has to stay usable on a platform with no picker behind it.
+std::string PickFolder(const std::string& titleUtf8, const std::string& startUtf8);
 
 // ─── misc ────────────────────────────────────────────────────────────────────
 // The OS temp directory, UTF-8. Where the installer log lands.

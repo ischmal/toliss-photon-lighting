@@ -41,6 +41,77 @@ voltmeters, the FMS load window and two still-unidentified aft-overhead readouts
 with `build/derive_panel_rects.py`; **byte-identical on A319/A320/A321**, so the table is
 A3xx-wide.
 
+⚠ **THE COMPOSITOR HAD NO AIRFRAME GATE AT ALL until 2026-08-11**, and the docs said
+otherwise. `PanelTargetByName` resolves against `static const` tables, so every stack
+in `panelfx.txt` resolved and painted on whatever cockpit was loaded, non-ToLiss
+included; `fcu_tint_plan.md` §4's "on an A339 the named targets simply do not resolve
+and the stacks are dropped with a log line" described behavior that never existed.
+The gate is now a per-target **`family a3xx [a330 …]`** line, absent = every aircraft.
+
+- **The A339 does NOT have its own atlas** — ToLiss reuses one layout across the fleet.
+  Six DUs within 3.3 px, both DCDUs within 0.2 px, ISIS/FCU strip/clock/RMP1/2 within
+  ~6 px. What genuinely has no A330 counterpart: `BAT2`, `ovhd aft L1`/`L2`, `FMS Load`
+  and the three EFB rects.
+- ⚠ **A matching rect is not a matching look.** The FCU row lands within ~6 px and still
+  reads wrong on an A330, because its layers are tuned to A3xx *artwork*. Scope by
+  target, never by "does the rect land".
+- ⚠ **The ToLiss A320's ICAO is `A20N`.** a319 = A319, a321 = A321, a339 = A339, but the
+  A320 is a neo — a list of the obvious three drops every scoped stack on the one
+  aircraft this project is mostly used on, and nowhere else.
+- ⚠ **0 means unrestricted**, so an unparseable scope resolves to `kFxFamilyUnrecognized`
+  (bit 31, matches nothing) rather than to 0. Clearing it would turn a scope we failed to
+  read into no scope at all.
+- **The gate and the file reader SHIP; only the checkbox is `PHOTON_DEV`.** Both halves
+  are pinned in `ShippingBuildTests`; the rest is `AircraftFamilyTests`.
+
+⚠ **THREE THINGS CARRY THAT MASK, and the rule is stated ONCE** — `FxFamilyAllows`,
+with the stack, the layer and the driver row as one-line readers (2026-08-13,
+`fcu_tint_plan.md` §4a). A second copy of `== kFxFamilyNone || & gFxFamily` is how one
+of the three would fail OPEN on an aircraft nobody tests on; one `FxReadFamilyList` and
+one `FxWriteFamilyLine` serve both wire keys for the same reason.
+
+- **A LAYER has its own scope — `lfamily`, own line under the layer.** Two families
+  often want the same target with ONE layer different, and that cannot be two stacks:
+  **a stack IS its target**, so two would be two entries under one name that the tree
+  and the file both key on. ⚠ It **narrows and cannot widen** — the stack is skipped
+  before its layers are reached, so a layer naming a family its target excludes draws
+  NOWHERE (the pane says so in orange; a test says so about the shipped file). The gate
+  sits in the layer loop **above the `enabled` test**, so a scoped-out layer costs no
+  bind, no blend equation and no quad. ⚠ `lfamily`, never `family`: parsing dispatches
+  on the key alone, so a layer scope spelled like its target's would be read as the
+  TARGET's and silently widen it. Same reason `lfollow`/`lcurve` carry the `l`.
+- **A ROW OF `kPanelSources` has one too** (`PanelSource::families`, last field,
+  defaults to unrestricted). ⚠ **Rows apply IN ORDER and a scoped row OVERRIDES the
+  unscoped one above it** — moving it above is not an error and not a log line, it is
+  one face reading another aeroplane's knob. ⚠ **An empty field in a scoped row
+  INHERITS rather than clearing**, so an override can be one line. Shipped: the three
+  FCU faces on `AirbusFBW/SupplLightLevels[1]` (0..1) for `a330`, against the A3xx's
+  raw 1..270 knob animation.
+- ⚠ **The driver table therefore belongs to a FAMILY, and "is it built" is the wrong
+  question.** `EnsureRectDrivers()` replaced `if (!gRectDriversBuilt)` at all six call
+  sites and rebuilds when `gRectDriversFamily != gFxFamily`. A table built for an A320
+  and read on an A330 is stale invisibly: every driver resolves, every value reads, one
+  face follows the wrong knob.
+
+⚠ **`family` IS NOT THE ToLiss GATE, and treating it as one was the second half of the
+same bug** (fixed 2026-08-11, from a user report of Photon painting over an unrelated
+aircraft). `family` narrows a stack *within* the ToLiss fleet; it says nothing about
+whether the loaded aircraft is a ToLiss at all. Two ways that showed:
+
+- **Four shipped stacks carry no scope** — `Main displays`, `MCDU`, `DCDU`, `ISIS`,
+  deliberately, because they read correctly on both families — so they composited on
+  every cockpit in the sim, ToLiss or not.
+- ⚠ **`gFxFamily` was resolved on the ToLiss branch of `UpdateMenuVisibility` ONLY**, so
+  it kept the last ToLiss's answer after a switch and the six *scoped* stacks painted
+  too. `AutoLoop` cannot fix that up — it returns early off the same aircraft check.
+
+The aircraft gate is `gIsToLiss` (`tests/test_aircraft_gate.py`), set only by
+`UpdateMenuVisibility` and read as an early-out by `PanelPassDraw` (which covers the
+probe with it), by `DrawPanelFx`, and by both flight loops. ⚠ In `DrawPanelFx` it goes
+**above `FxSampleAmbient`**, which is otherwise deliberately above every early-out.
+`ResolveFxFamily` also answers `kFxFamilyNone` when the flag is false: a third-party A320
+reports `A20N` as readily as ToLiss's does.
+
 - **The complete list came from ONE TRIS BATCH, not from a geometry filter** (2026-08-01).
   ToLiss draws every readout face in the cockpit from a single batch (line 54323 on all
   three A3xx, the one the FCU strip is in), so "every island in that batch" is a closed set
@@ -82,6 +153,21 @@ A3xx-wide.
 
 - ⚠ **APPEND ONLY.** The index is persisted and is the value of
   `ToLissPhoton/debug/panel_probe_rect`; inserting a row silently re-aims a saved target.
+- ⚠ **ONE ROW IS NOT ON EVERY AIRCRAFT: `MCDU 3`, the A330's third MCDU** (2026-08-13,
+  `fcu_tint_plan.md` §2a/§2c). Everything else in the table is A3xx-derived and lands on
+  the A330 too; this is the mirror image, and on an A3xx its rect is 270×240 px of
+  unrelated artwork. Listed in **`kPanelRectFamilies`** — a name-keyed side table where
+  absence means "every aircraft" — resolved into `gRectsHere` alongside the per-rect
+  drivers. ⚠ The mask is built by CLEARING bits from all-of-them, or a rect nobody
+  listed would draw nowhere. ⚠ **Existence is NOT group membership**: it is a member of
+  `MCDU`/`Glass displays`/`Whole panel` on every aircraft, because membership is
+  authored structure and a group that shrank per aeroplane would change its own breadth,
+  which is what orders the compositor. ⚠ The test sits **above the master switch** in
+  `FxRectGated` — it is the per-rect twin of a stack's `family`, not an electrical gate,
+  and below that early-out the tuning hatch would paint it onto A3xx artwork. It is in
+  `kScreenFxExtraRects` regardless of aircraft, and the probe is deliberately ungated.
+  Found by its manipulators: the `AirbusFBW/MCDU3*` keyboard centers 10 cm behind it,
+  and the same method lands `UndockMCDU1`/`2` exactly on the other two islands.
 - ⚠ **Names below the six DUs are inferred from geometry, not confirmed in-sim.** ToLiss
   labels none of these faces. Confirm with the FX target tree's `?` button (floods it
   magenta), then fix the name here rather than working around it.
@@ -150,6 +236,8 @@ a screen dimmed to black.
   Only the six `DUBrightness` indices are settled (they are `kScreenDU`'s). Every row is
   editable in the tab, which shows the live value and the factor beside it — that display is
   the point, because a name alone cannot tell you whether the dataref means what you hoped.
+  ⚠ **A row may be scoped to an aircraft family** and the rows apply IN ORDER — see the
+  family block above; the same face legitimately appears twice with two datarefs.
 - **Integral lighting follows THE PANEL A FACE SITS IN, not the unit it belongs to**
   (2026-08-02, user). `AirbusFBW/PanelBrightnessLevel` for the main panel and the pedestal —
   clock, DME, RMP1/2, transponder, rudder trim, `ped strips`; `AirbusFBW/OHPBrightnessLevel`
@@ -261,9 +349,20 @@ optionally a **daytime** one, and the compositor interpolates between them.
   the night tint is blue-shifted, so an average reads a moonlit cockpit as too dark.
   `gFxAmbientLo`/`Hi` (0.15/0.70) are the calibration; `lo` above `hi` inverts.
 - ⚠ **An INTERPOLATION, not a switch.** Dusk lasts twenty minutes and is where the effect
-  is judged. **Smoothed** (`tau` 2.5 s) against the **wall clock**, because the raw value
+  is judged. **Smoothed** (`tau` 0.5 s) against the **wall clock**, because the raw value
   jumps when a cloud crosses the sun; the **first sample snaps**, or every noon departure
   fades up from night.
+- ⚠ **The sun-elevation gate** (2026-08-11): `cockpit_light_level_*` is **analytic** —
+  computed from the light sources, not metered off the frame — so a red-heavy dome lamp
+  slams one channel to ~1.0 and the MAX calls it daylight: the screens went day-look at
+  midnight. `FxSampleAmbient` multiplies the **target** (before the smoothing and the
+  first-sample snap) by a smoothstep of `sim/graphics/scenery/sun_pitch_degrees` across
+  `gFxAmbientSunLo`/`Hi` (−5°/+5° default; wire **`ambientsun <lo> <hi>`**, always
+  written, read into locals adopted whole). Equal ends = hard step; **both −90 = held
+  open (off)**; unresolved ref = **open** (missing must not repaint the cockpit);
+  sim-owned so lazily resolved, no retry line, not dropped by `FxForgetDrivers`. The
+  Pin outranks it (read in `FxAmbientNow`), so the day half stays authorable after dark.
+  `AmbientBlendTests` pins all three contracts.
 - **Only color and opacity vary** — never the blend mode or the image (there is no defined
   midpoint between `GL_MIN` and additive). ⚠ **That costs nothing**: `dayOpacity` 0 is a
   night-only layer and `opacity` 0 with a `dayOpacity` above it is a **day-only** one, so
@@ -440,8 +539,74 @@ the structure was never the cost. What was:
   invalidating everywhere the editor touches a stack, and a stale order silently composites
   a base over its own refinement. The allocation was the cost, not the sort.
 - **Measure with `kLeverDisplayFx`** before extending. Next suspect if it ever shows up is
-  the 21 blend-EQUATION switches through the Vulkan→GL bridge — which no restructuring
-  removes, since they are per-layer and broadest-first order forbids sorting by mode.
+  the ~24 blend-EQUATION switches through the Vulkan→GL bridge — which no restructuring
+  removes, since they are per-layer and broadest-first order forbids sorting by mode. (Half
+  were merely REDUNDANT — see §8j.3 below; the rest stand as described.)
+
+**The second pass — not doing it at all** (§8j.2, 2026-08-10). Shipped look: 24 layers,
+70 quads.
+
+- ⚠ **`PanelTargetMask` is RESOLVED ONCE, and it was the expensive one.** It re-derived a
+  group's mask from member NAMES on every call (`Whole panel` = 666 strcmps), and it is
+  both `FxDrawOrder`'s sort comparator (~2 400–3 800 strcmps a pass) and the basis of the
+  editor's tree — `BuildFxTargetPane`'s root scan alone was **~211 000 strcmps per ImGui
+  frame**, repeated per open node. Built from `GroupMembers()`, so containment and painting
+  are now one answer rather than two agreeing ones.
+- ⚠ **The pass RETURNS before any GL when both effect switches are off**
+  (`FxUserDrawableMask`), and a stack whose every rect is gated shut is skipped before its
+  first layer (`FxTargetGateMask`) — the texture bind, blend func, blend EQUATION and
+  begin/end are all per LAYER and all spent before the first quad, so a per-quad test saves
+  none of them.
+- ⚠ **The gates are stated ONCE, in `FxRectGated`** — the part of `FxRectFactor` that does
+  not depend on the layer (the Displays switch, power, bus, breaker), shared by the per-quad
+  factor and the skip. **A skip stricter than the paint is a target that silently stops
+  drawing.** ⚠ Nothing per-layer may join it: a layer with `follow` off draws at full
+  strength through a dark knob, so testing the FACTOR there would skip exactly the layers
+  §8f exists for. ⚠ `gFxDrawStack` must be set before it is asked (a stack may override
+  `power`).
+- ⚠ **`FxSampleAmbient` and `FxExpireDriveOverride` stay ABOVE the early-out** — both go
+  wrong by not running: a watchdog behind an early-out is not a watchdog, and an ambient
+  blend that stops sampling resumes with a fade at noon.
+- ⚠ **The winding query is hoisted to once per pass, opt-in and SCOPED**
+  (`PanelQuadWindingHold`). A stale `GL_FRONT_FACE` is silently culled and reads as the
+  compositor not running, so `PanelQuadBatch` still queries by default and the probe's batch
+  is unchanged.
+- **Rejected:** hoisting `follows`/shape/`hasRamp` into per-layer globals — a handful of
+  branches per quad, and the Dev panes call `FxRectFactor` outside a pass, where they would
+  read stale.
+
+**The third pass — asking each question once** (§8j.3, 2026-08-10). What was left after the
+first two is REPETITION: four quantities that cannot change inside one pass, re-derived per
+layer or per quad. On the shipped 24 layers / 70 quads: gate evaluations **80 → 29**, blend
+state calls **48 → 29**, `PanelRects()` reads **24 → 1**, sort popcounts **~60 → 0**.
+
+- ⚠ **The per-stack gate memo is NOT a second statement of the rules.** `gFxDrawGateMask` is
+  built by calling `FxRectGated` itself (with the memo off), so the skip and the paint are
+  literally the same bits. It is sound only because everything the gates read is already
+  frozen — the Displays switches are user state, the electrical reads come from the value
+  cache. ⚠ Armed around ONE stack's layers (a stack may override `power`) and dropped with
+  `gFxDrawStack`; armed in exactly one place, like the value cache, because the Dev panes
+  call `FxRectFactor` outside a pass and must keep resolving live.
+- ⚠ **`FxTargetCanDraw` is now `FxTargetGateMask`** — it returns the SET, not "any?", and
+  that IS the trick: the walk the skip already did is what fills the memo. Zero means skip.
+- ⚠ **The blend memo cannot outlive one pass.** It records what WE set;
+  `XPLMSetGraphicsState` sets a func of its own when it enables blending, and a dev build's
+  probe multiply runs after us in the same frame. `FxForgetBlendState` therefore runs at
+  BOTH ends (after `PushBlendFunc`, after `PopBlendFunc`) — a surviving memo skips a call
+  the GL state no longer matches, which is `PopBlendFunc`'s failure arriving from the other
+  end. ⚠ Equation and func are tracked SEPARATELY (five modes are plain `GL_FUNC_ADD`; Add,
+  Burn and Subtract all want `GL_ONE, GL_ONE`), and ⚠ the refusal path records nothing
+  because it set nothing.
+- ⚠ **`gFxPassRects` pins the rect table for the pass** — 23 dataref reads, and the reason
+  it is worth having is the other half: a resolution flip mid-pass would paint the six DUs
+  from one table for the layers before it and the other for those after. ⚠ **Null means
+  "not in a pass", not "full-res"** — the Dev panes and the probe's log line read
+  `PanelRects()` outside it.
+- **Rejected:** dropping per-vertex `glTexCoord2f` on solid layers (~190 immediate-mode
+  calls). It works, but it re-creates the `tile 0` failure — a textured layer that lost its
+  coordinates draws one texel stretched over the rect, which reads as a flat color and not
+  as a bug. Client-side vertex arrays: same objection, plus `GL_VERTEX_ARRAY` client state
+  is not tracked by `XPLMSetGraphicsState`, so a leak corrupts the sim's own drawing.
 
 Pinned by `CompositorHotPathTests` in `tests/test_panel_fx.py`.
 

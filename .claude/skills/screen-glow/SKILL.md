@@ -8,7 +8,16 @@ description: The six LIGHT_SPILL_CUSTOM screen-glow lights (target `screens`, ob
 Six `LIGHT_SPILL_CUSTOM` lights, one per display unit, in their own OBJ
 (`objects/lights_screens.obj`, target `screens`). Full spec: `docs/screens_plan.md`.
 
-⚠ **IT SHIPS (2026-08-01)** — part of the BASE install on A3xx (`SCREENS_AIRFRAMES`), not an
+⚠ **A339 IS COVERED (2026-08-11)**, unlike the interior — it needs only six positions and
+`AirbusFBW/DUBrightness`, both of which it has. **Position is the only thing that differs**:
+color, alpha, size, aim and spread live in the shared `screen_glow` light type, and a test
+fails if anything else diverges. Its numbers are its own DU face centers (from
+`derive_panel_rects.py`) plus the A3xx standoff — **seeds, never seen in-sim**.
+⚠ **The payload is per airframe** (`payload/objs/screens/<airframe>/`) because every
+airframe writes the same *filename*: one shared copy installs the A320's positions into an
+A330 and every light draws, in the wrong place, with nothing on disk to show for it.
+
+⚠ **IT SHIPS (2026-08-01)** — part of the BASE install (`SCREENS_AIRFRAMES`), not an
 opt-in. It works on a stock cockpit, so it does not sit behind the interior's opt-in; whether
 the glow is visible is a runtime choice on the plugin's Displays tab. Much of
 `screens_plan.md` still reads "experiment"; the mechanisms are right, the status is not.
@@ -45,10 +54,18 @@ installer's base install on A3xx — or on its own via
 - **The dev tuner drives `source: "du"` lights on size too**, so a tuning pass on a debug OBJ
   judges the look the release produces. Isolate/Blink stay on alpha for every light.
 
-- **The attachment row is COPIED from the aircraft's own `lights_inn.obj` row**, never
-  written from constants — that row carries the OBJ origin in feet against a per-airframe
-  datum (26.00/20.75/6.78 ft on A3xx), and XP11 files use a *different field set* than XP12.
-  No `lights_inn.obj` row → the patcher **refuses** rather than guessing.
+- **The attachment row is COPIED from a known-good row in the SAME FILE**, never written
+  from constants — that row carries the OBJ origin in feet against a per-airframe datum
+  (26.00/20.75/6.78 ft on A3xx), and XP11 files use a *different field set* than XP12
+  (`_v10_att_part` vs body/gear/wing, floats `0.0` vs `0.000000000`). No candidate row →
+  the patcher **refuses** rather than guessing.
+  ⚠ **Which row is a LIST, matched by content** (`ScreensFrameTemplates`, `core/constants.cpp`,
+  mirrored in `build/constants.py` and pinned by `tests/test_version.py`): `lights_inn.obj`
+  for the A3xx, then `CockpitLighting_XP12.obj` and `CockpitLighting.obj` for the A330-900,
+  which has no `lights_inn.obj` anywhere. **Both A330 spellings are listed on purpose** —
+  the patcher runs on all four `.acf` variants, and omitting the XP11 name leaves two
+  refusal lines on an airframe where nothing is wrong. First match wins, so order is a
+  decision: the two frames are different datums.
 - **`is_attached()` requires the row to be inside `_obja/count`** — a row at index ≥ count
   looks installed to a grep and draws nothing.
 - **Detach renumbers rows above ours down**, never leaving a hole.

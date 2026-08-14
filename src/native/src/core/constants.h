@@ -94,12 +94,21 @@ const std::vector<std::string>& AcfSuffixes();
 // that must both be undone, and why the OBJ goes in the manifest's `screens.added[]`
 // and never in `backed_up[]`.
 //
-// Part of the BASE install on A3xx, not an opt-in: it works on a stock cockpit, so
-// it does not belong behind the interior's opt-in, and whether the glow is visible
-// is a runtime choice on the plugin's Displays tab.
+// Part of the BASE install, not an opt-in: it works on a stock cockpit, so it does
+// not belong behind the interior's opt-in, and whether the glow is visible is a
+// runtime choice on the plugin's Displays tab.
 constexpr char kScreensObj[] = "lights_screens.obj";
 const std::vector<std::string>& ScreensAirframes();
 bool AirframeHasScreens(const std::string& key);
+
+// ⚠ The OBJ is NOT shared across airframes, unlike the interior's. The A3xx three
+// are byte-identical to each other but the A330-900's six lights sit in a different
+// flight deck against a different datum, so the payload stages one per airframe
+// (`payload/objs/screens/<airframe>/`) rather than one for everybody.
+//
+// Which `.acf` attachment row ours is copied from — see the definition; this is
+// the aircraft's coordinate FRAME, and getting it wrong mis-places all six lights.
+const std::vector<std::string>& ScreensFrameTemplates();
 
 // ─── skin glow ───────────────────────────────────────────────────────────────
 // Airframes whose install repoints ToLiss's skin-glow LIT-texture regions to

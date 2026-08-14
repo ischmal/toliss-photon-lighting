@@ -1,0 +1,216 @@
+// Screen 7 — "Complete".
+//
+// Redesigned 2026-08-13. It was a heading, a muted summary and four identical
+// 215 px buttons in one stack. It is now two groups separated by flexible space:
+// what you might do NEXT (modify another aircraft, read the log) and, under its
+// own subhead, where to read more — the two link buttons sitting in a recessed
+// well of their own. The summary is a white Header 2 rather than a muted label,
+// which is right: it is the one sentence saying what actually happened.
+//
+// ⚠ THIS SCREEN HAS A BACK BUTTON AND THE TUI'S COMPLETE SCREEN DOES NOT. That
+// is a deliberate divergence, not drift (2026-08-12). It used to have none here
+// either, on the reasoning that the install already happened so there is nothing
+// to rewind to — but Back does not rewind anything: `GoBack` is a plain
+// `step - 1` with no side effects, and step 5 is the Run screen, which is the
+// only place the installer's log can be read INSIDE the program. Without it the
+// log is gone the moment the run finishes, and "View installer log..." below
+// hands you off to whatever opens .txt files.
+//
+// ⚠ The TUI does not need the same change and must not be given it to "match":
+// its log is the terminal's own scrollback and never goes anywhere. `screens.h`
+// still states no-back-on-Complete as the TUI's topology and that stays true.
+//
+// The pair is a CLOSED LOOP — Run has no Back of its own (`!running` in
+// app.slint), so Complete ⇄ Run is all the movement there is and no finished
+// install can be walked back into Review and started again.
+
+import { Tokens } from "../tokens.slint";
+import { Header1, Header2, PhotonButton, WellRecess } from "../widgets.slint";
+
+export component CompleteScreen inherits Rectangle {
+    // Rendered by C++ — "ToLiss Photon v0.9 (Durantula + Cockpit lighting)
+    // installed in ToLiss A320." is a sentence about the manifest, and the UI has
+    // no business assembling it.
+    in property <string> headline: "Done";
+    in property <string> summary;
+    // The log button is pointless when there is no log file on disk (a dry run
+    // that wrote nothing), so the caller decides.
+    in property <bool> log-available: true;
+
+    callback modify-another();
+    callback view-log();
+    callback open-org();
+    callback open-github();
+
+    background: Tokens.screen-bg;
+
+    // ⚠ THIS SCREEN IS POSITIONED, NOT LAID OUT, AND FOR TWO SEPARATE REASONS —
+    // both of which were re-learned the hard way, so do not "tidy" it into a
+    // VerticalLayout.
+    //
+    // 1. A CHILD WIDTH THAT READS `root.width` INSIDE A LAYOUT IS A BINDING LOOP.
+    //    A layout computes its own size FROM its children, so a child sizing
+    //    itself from the parent closes the circle and Slint rejects it at compile
+    //    time ("layoutinfo-h is part of a binding loop"). The summary needs an
+    //    explicit width to measure its wrap against, and the two link buttons need
+    //    one to split the well evenly — three widths that all have to come from
+    //    the pane. The same trap is written up on `OptionRow`, which escapes it
+    //    with padding; here the widths are real and positioning is the escape.
+    //
+    // 2. EVERY VERTICAL NUMBER MUST BE A WHOLE PIXEL. The design's two spacers are
+    //    `flex: 1 0 0`, i.e. an even split of whatever is left over — and what is
+    //    left over depends on the summary, whose height is a FONT METRIC (~16.41 px
+    //    a line for Roboto at 14). Halving an odd remainder puts every button below
+    //    it on a fractional y, and a rectangle on a fractional y is resampled
+    //    across two pixel rows: the soft edges this screen was already fixed for
+    //    once. `spacer-h` floors the half ONCE and both gaps take that whole
+    //    number.
+    //
+    // ⚠ `summaryBox` is a LAYOUT around the Text rather than the Text itself: a
+    // Text's `preferred-height` is its UNWRAPPED height (`default_size_binding:
+    // implicit_size`), so it reports one line however many it draws. A layout's
+    // preferred height accounts for the wrap.
+    //
+    // At the design's own size this lands on 45 px spacers and puts the rows at
+    // y = 24 / 74 / 163 / 205 / 302 / 336, which is exactly where Figma has them.
+    property <length> gap: Tokens.content-gap;
+    property <length> content-w: root.width - 2 * Tokens.content-pad-x;
+    property <length> summary-h:
+        max(24px, ceil(summaryBox.preferred-height / 1px) * 1px);
+    property <length> well-h: 56px;
+    // 40 heading + summary + two buttons + 24 subhead + 56 well.
+    property <length> fixed-h: 40px + root.summary-h + 2 * Tokens.button-h
+        + 24px + root.well-h;
+    property <length> spacer-h: max(0px, floor((root.height
+        - 2 * Tokens.content-pad-y - root.fixed-h - 7 * root.gap) / 2 / 1px) * 1px);
+
+    property <length> y-head: Tokens.content-pad-y;
+    property <length> y-summary: root.y-head + 40px + root.gap;
+    property <length> y-btn1: root.y-summary + root.summary-h + root.gap
+        + root.spacer-h + root.gap;
+    property <length> y-btn2: root.y-btn1 + Tokens.button-h + root.gap;
+    property <length> y-sub: root.y-btn2 + Tokens.button-h + root.gap
+        + root.spacer-h + root.gap;
+    property <length> y-well: root.y-sub + 24px + root.gap;
+
+    // The two link buttons split the well evenly. Floored for the same reason as
+    // the spacers — an odd remainder would put the right-hand one on a half pixel.
+    // 442 - 26 padding - 12 gap = 404, so 202 each at the design size, which is
+    // Figma's own instance width.
+    //
+    // ⚠ 13 px OF PADDING, NOT THE `px-[12px]` THE REFERENCE CSS REPORTS. That 12
+    // is measured inside the well's 1 px border, and a Slint Rectangle positions
+    // its children from the OUTER edge — so the border has to be added back.
+    // Figma's own instance x values are 13 and 227, which is what this reproduces.
+    //
+    // ⚠ AND THE BUTTONS ARE CENTRED, NOT TOP-PADDED. The CSS says `py-[8px]`,
+    // which would sit them at y = 9 and leave 15 px underneath; the real instances
+    // are at y = 12, because the row is a 1fr grid track and the button centres
+    // inside it. Reading the padding literally is what left them riding high.
+    // Written as a centring rather than as 12 so it survives a change of either
+    // height.
+    property <length> link-pad: 13px;
+    property <length> link-gap: 12px;
+    property <length> link-w: floor(
+        (root.content-w - 2 * root.link-pad - root.link-gap) / 2 / 1px) * 1px;
+    property <length> link-y: floor(
+        (root.well-h - Tokens.button-h) / 2 / 1px) * 1px;
+
+    Header1 {
+        x: Tokens.content-pad-x;
+        y: root.y-head;
+        width: root.content-w;
+        height: 40px;
+        text: root.headline;
+    }
+
+    // ⚠ WHITE Header 2, NOT the muted 12 px label it used to be, and it must wrap:
+    // it is a full sentence naming the aircraft and the options, and it runs to
+    // two lines on most installs. `Header2` does not wrap by default.
+    summaryBox := VerticalLayout {
+        x: Tokens.content-pad-x;
+        y: root.y-summary;
+        width: root.content-w;
+        height: root.summary-h;
+
+        Header2 {
+            text: root.summary;
+            wrap: word-wrap;
+            vertical-alignment: top;
+        }
+    }
+
+    // ⚠ "Modify another aircraft" is PRIMARY now. It is the only thing on this
+    // screen that starts more work, and the design promotes it accordingly.
+    //
+    // ⚠ Both restate their 215 px. `PhotonButton` binds `width: Tokens.button-w`,
+    // so anything that does not say otherwise is 96 px wide with its sentence
+    // overrunning the fill.
+    PhotonButton {
+        x: Tokens.content-pad-x;
+        y: root.y-btn1;
+        width: 215px;
+        label: "Modify another aircraft";
+        clicked => { root.modify-another(); }
+    }
+
+    PhotonButton {
+        x: Tokens.content-pad-x;
+        y: root.y-btn2;
+        width: 215px;
+        label: "View installer log...";
+        primary: false;
+        enabled: root.log-available;
+        clicked => { root.view-log(); }
+    }
+
+    Header2 {
+        x: Tokens.content-pad-x;
+        y: root.y-sub;
+        width: root.content-w;
+        height: 24px;
+        text: "Find more information online";
+    }
+
+    // The links well — the same recessed panel as the aircraft list and the
+    // installer log, down to the design's `inset 0 1px 7px rgba(0,0,0,.25)`, which
+    // `WellRecess` approximates. Grouping the two outward links inside it is what
+    // stops them reading as two more things to do next.
+    Rectangle {
+        x: Tokens.content-pad-x;
+        y: root.y-well;
+        width: root.content-w;
+        height: root.well-h;
+        background: Tokens.panel-bg;
+        border-color: Tokens.panel-border;
+        border-width: 1px;
+        border-radius: Tokens.radius-panel;
+        // ⚠ Required by WellRecess — its bands are square.
+        clip: true;
+
+        PhotonButton {
+            x: root.link-pad;
+            y: root.link-y;
+            width: root.link-w;
+            label: "Open X-Plane.org Page...";
+            primary: false;
+            clicked => { root.open-org(); }
+        }
+
+        PhotonButton {
+            x: root.link-pad + root.link-w + root.link-gap;
+            y: root.link-y;
+            width: root.link-w;
+            label: "Open GitHub Project...";
+            primary: false;
+            clicked => { root.open-github(); }
+        }
+
+        // ⚠ LAST, so it darkens the edges of what the well holds — the two buttons
+        // included, which is where Figma has it too.
+        WellRecess {
+            width: 100%;
+            height: 100%;
+        }
+    }
+}

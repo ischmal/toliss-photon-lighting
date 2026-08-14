@@ -108,7 +108,8 @@ std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8) {
     return acf::AcfFilesContaining(aircraftDirUtf8, kSpotBlockNeedle);
 }
 
-RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
+RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
+              const progress::StepProgress& onProgress) {
     RunResult result;
     const std::vector<std::string> files = AcfFiles(aircraftDirUtf8);
     if (files.empty()) {
@@ -116,7 +117,14 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
                              aircraftDirUtf8);
         return result;
     }
-    for (const std::string& pathUtf8 : files) {
+    // ⚠ REPORTED AT THE TOP OF THE ITERATION, NOT THE BOTTOM. Half the paths
+    // through this loop are `continue` — an unreadable file, a refused patch —
+    // and a report at the end would skip exactly the files that went wrong.
+    // The four `.acf` are within 9% of each other in size, so file count is a
+    // fair weight here; the big scans elsewhere weight by bytes instead.
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        if (onProgress) onProgress(static_cast<double>(i) / files.size());
+        const std::string& pathUtf8 = files[i];
         const auto path = fsutil::PathFromUtf8(pathUtf8);
         std::string text;
         if (!fsutil::ReadFileBytes(path, text)) {
@@ -153,6 +161,7 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun) {
         }
         result.touched.push_back(pathUtf8);
     }
+    if (onProgress) onProgress(1.0);
     return result;
 }
 
