@@ -41,10 +41,10 @@ has to agree with.
 |---|---|---|
 | Toolkit | **Slint** | The mockup is a designed UI; Dear ImGui (already vendored, MIT) would have been free but cannot reproduce an arbitrary design faithfully. |
 | License | **GPLv3, whole repo** | Slint's other option is royalty-free *with attribution conditions*. **Applied 2026-08-12** — `LICENSE` is the GPLv3 text and README §Usage says so. |
-| Ship model | **The GUI replaces the TUI in the bundle** | `build_bundle` ships exactly one executable; a download must not hand the user two things to double-click. |
+| Ship model | **The GUI replaces the TUI in the bundle — on Windows** | `build_bundle` ships exactly one executable; a download must not hand the user two things to double-click. **macOS and Linux ship the TUI** (2026-08-15): the GUI has only ever been built and run on Windows, it does not link on Unix, and `PickFolder` has no implementation there. One binary per platform still holds. |
 | The TUI | **Kept, reachable with `--tui`** | SSH and headless boxes still need it, and `photoncore_tests` covers its string engine. It is built either way; it is just not what a double-click gets. |
 | Linkage | **Static Slint** | See the bundle rule — a `slint_cpp.dll` beside the binary has nowhere to go in `data/`. |
-| Default | **`PHOTON_GUI=OFF`, and CI states `ON`** | The default keeps a contributor's checkout (and the core-only tree) buildable with no Rust. **CI installs Rust and passes `-DPHOTON_GUI=ON` since 2026-08-15**, so what ships is the GUI. |
+| Default | **`PHOTON_GUI=OFF`, and CI states it per platform** | The default keeps a contributor's checkout (and the core-only tree) buildable with no Rust. CI passes `-DPHOTON_GUI=${{ matrix.gui }}` — **ON for Windows, OFF for macOS/Linux** — and installs Rust only where it is ON. |
 
 ### Licensing, precisely
 
@@ -268,18 +268,29 @@ rather than part of this scaffold.
 
 **Build and linkage**
 
-- ⚠ **`PHOTON_GUI` STAYS OFF BY DEFAULT — AND CI PASSES `-DPHOTON_GUI=ON`**
-  (2026-08-15). The default is for the core-only tree and a contributor's checkout,
-  which must keep building `photon-installer` with no Rust present; flipping the
-  *default* would turn those red instead. CI wants the opposite answer and says so
-  explicitly. ⚠ **The gap between the two is silent in the direction that matters**:
-  an omitted flag does not fall back to the previous behavior, it packs the
-  **terminal** installer into a bundle named for the GUI, with a green run and a
-  well-formed download to show for it. That is what the workflow's `grep` on the
-  configure log is for — CMakeLists prints `GUI build - photon-installer links
-  Slint` only from inside `if(PHOTON_GUI)`, so matching it is the only proof that
-  survives a typo'd `-D` or a stale cache. Changing that `message(STATUS)` string
-  breaks the check; change both together.
+- ⚠ **THE GUI DOES NOT LINK ON LINUX OR macOS, AND LINKING IS NOT THE WHOLE GAP**
+  (2026-08-15, first Unix build ever attempted). Corrosion does not propagate
+  Slint's transitive system libraries — the same defect as the `opengl32`/`imm32`
+  note below. Linux wanted **fontconfig** (every undefined symbol was `Fc*`);
+  macOS wanted ~a dozen frameworks plus `-lobjc` (`CoreFoundation`, `AppKit`,
+  `Foundation`, `CoreGraphics`, `CoreText`, `CoreVideo`, `QuartzCore`, `OpenGL`,
+  `Carbon`, `CoreServices`). ⚠ **That NOTHING propagated on macOS, rather than a
+  couple of libraries being under-reported as on Windows, points at the universal
+  two-arch/lipo path losing the link interface** — "just add the frameworks" is
+  unproven. ⚠ And `platform::PickFolder` has no non-Windows implementation, so a
+  Unix GUI ships a **Browse button that does nothing**. Hence the ship model:
+  Windows GUI, Unix TUI.
+- ⚠ **`PHOTON_GUI` STAYS OFF BY DEFAULT — AND CI STATES IT ON EVERY RUNNER, BOTH
+  WAYS.** The default is for the core-only tree and a contributor's checkout, which
+  must keep building `photon-installer` with no Rust present; flipping the *default*
+  would turn those red instead. ⚠ **The gap between default and intent is silent in
+  both directions**: an omitted flag does not fall back to the previous behavior, it
+  packs the wrong front-end into a well-formed bundle on a green run. That is what
+  the workflow's **bidirectional** `grep` on the configure log is for — CMakeLists
+  prints `GUI build - photon-installer links Slint` only from inside
+  `if(PHOTON_GUI)`, so its presence is required where `gui` is ON and forbidden
+  where it is OFF. Changing that `message(STATUS)` string breaks the check; change
+  both together.
 - ⚠ **Rust defaults to the dynamic CRT (`/MD`) and this project is globally
   `/MT`.** Without `-C target-feature=+crt-static` the Rust staticlib drags in
   msvcrt against our libcmt: duplicate symbols at best, two heaps at worst, and a

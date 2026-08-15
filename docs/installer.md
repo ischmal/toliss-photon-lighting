@@ -903,11 +903,11 @@ Change it in the same commit as `make_release.build_bundle`.
 
 A three-job chain, since the C++ toolchain cannot cross-compile:
 
-1. **`build`** (matrix win/mac/linux) — installs Rust (and, on Linux, Slint's system
-   `-dev` packages), fetches the X-Plane SDK, compiles that OS's `.xpl` and
-   `photon-installer` **with `-DPHOTON_GUI=ON`**, runs both test suites, then packs that
-   platform's bundle on the same runner (`make_release --plugin-dir … --bundle`). Uploads
-   `bundle-<OS>`.
+1. **`build`** (matrix win/mac/linux) — fetches the X-Plane SDK, compiles that OS's `.xpl`
+   and `photon-installer` at `-DPHOTON_GUI=${{ matrix.gui }}` (**ON for Windows, OFF for
+   macOS and Linux** — see below), runs both test suites, then packs that platform's bundle
+   on the same runner (`make_release --plugin-dir … --bundle`). Uploads `bundle-<OS>`. Rust
+   and Slint's Linux `-dev` packages install only where `gui` is ON.
 2. **`collect`** — downloads all `bundle-*`, runs `make_allzip`, uploads `all-platforms`.
 3. **`release`** (tag `v*` **only**) — attaches the three `bundle-*` archives to a GitHub
    Release; `generate_release_notes`.
@@ -920,37 +920,59 @@ to produce something nobody downloads.
 A manual `workflow_dispatch` run does everything *except* `release`, so bundles can be
 downloaded and tested before publishing.
 
-⚠ **CI SHIPS THE GUI, AND THE FLAG THAT DECIDES THAT FAILS SILENTLY** (2026-08-15).
-`PHOTON_GUI` is OFF by default — that is what keeps the core-only tree and a
-contributor's checkout buildable with no Rust — so the workflow states
-`-DPHOTON_GUI=ON`. An omitted or typo'd `-D` does not fall back to the previous
-behavior: it packs the **terminal** installer into a bundle labelled as the GUI, on a
-green run, with a well-formed download to show for it. The configure step therefore
-`grep`s its own log for CMakeLists' `GUI build - photon-installer links Slint`, which
-is printed only from inside `if(PHOTON_GUI)`. **Change that `message(STATUS)` string
-and the check breaks** — change both together.
+### ⚠ The GUI ships on Windows only; macOS and Linux ship the TUI
 
-Three things turning it on added, one per platform concern:
+**`matrix.gui` is the one statement of that** (2026-08-15). The bundle rule is
+untouched — each platform still carries exactly one executable — it is just not the
+same front-end on all three. The bundle README already reads this way: Windows says
+*"Double-click `photon-installer.exe`"*, macOS and Linux say *"open a terminal and run
+`./photon-installer`"*.
 
-- **Rust**, installed explicitly rather than taken from the runner image. Slint v1.17.1
-  declares `rust-version = "1.92"`, and an image drifting below that would break the
-  build on a tag push — the one run nobody wants to debug. `stable` is deliberate: the
-  reproducibility that matters is pinned at the **Slint tag** (`v1.17.1`, in
-  `src/native/CMakeLists.txt`), while pinning rustc would instead break the day a
-  transitive crate needs something newer.
-- ⚠ **Both macOS Rust targets.** `CMAKE_OSX_ARCHITECTURES` asks for `arm64;x86_64`, but
-  cargo builds one arch at a time — Corrosion drives it per-arch and `lipo`s the
-  results, which needs both std libraries present. The runner is arm64, so
-  `x86_64-apple-darwin` is the one CI must add; CMakeLists `FATAL_ERROR`s on it rather
-  than letting cargo fail deep inside a Slint build log.
-- **Linux system `-dev` packages** for the winit/FemtoVG backend (fontconfig, freetype,
-  xcb, xkbcommon, wayland, mesa). Absent, the failure is a pkg-config or cc error raised
-  from inside a Rust build script, naming a crate rather than the missing apt package.
+**Why.** The GUI was developed on Windows against a Figma design, and
+`run-installer.ps1` says *"Windows/win_x64 only"* in its own header. Turning it on for
+the whole matrix made CI the first-ever Unix build of it, and both Unix jobs failed to
+**link**: Corrosion does not propagate Slint's transitive system libraries, the same
+defect the `opengl32`/`imm32` note in `CMakeLists.txt` already describes for Windows.
+The missing sets were **fontconfig** on Linux (every undefined symbol was `Fc*`) and
+roughly a dozen frameworks plus `-lobjc` on macOS (`CoreFoundation`, `AppKit`,
+`Foundation`, `CoreGraphics`, `CoreText`, `CoreVideo`, `QuartzCore`, `OpenGL`,
+`Carbon`, `CoreServices`). ⚠ **That nothing at all propagated on macOS — rather than a
+couple of libraries being under-reported, as on Windows — points at the universal
+two-arch/lipo path losing the link interface**, so treat "just add the frameworks" as
+unproven.
 
-Cargo's *downloads* are cached (keyed on `CMakeLists.txt`, so bumping the Slint tag
-retires the cache); the Slint **compile** is not, since Corrosion builds it inside the
-CMake tree and a release build has to be able to start from nothing. Expect the build
-job to be several minutes longer than it was pre-GUI.
+⚠ **Linking was never the whole gap.** `platform::PickFolder` has no non-Windows
+implementation (it returns an empty string, and `platform.h` says so deliberately —
+"degrades to typing the path into the field"), so a Unix GUI would ship a **Browse
+button that does nothing**, on a front-end nobody has ever run there. The TUI is
+tested, has no dead controls, and is what those users are already told to run.
+
+⚠ **The flag's default is OFF, and that is not the same as "OFF here."**
+`option(PHOTON_GUI ... OFF)` stays, because a contributor's checkout and the core-only
+tree must build with no Rust. The workflow states the value it wants on **every**
+runner, both ways, because an omitted or typo'd `-D` does not fall back to the previous
+behavior — it silently publishes the wrong front-end, on a green run, with a
+well-formed download to show for it. That is exactly what happened between the GUI
+landing and 2026-08-15, and the only symptom was that the thing users double-clicked
+opened a console.
+
+So the configure step `grep`s its own log **in both directions** for CMakeLists'
+`GUI build - photon-installer links Slint`, printed only from inside `if(PHOTON_GUI)`:
+present is required where `gui` is ON, and forbidden where it is OFF — a Unix bundle
+that quietly picked Slint up would either fail to link or ship the untested GUI, and
+neither would fail any other step. **Change that `message(STATUS)` string and the check
+breaks** — change both together.
+
+**What the GUI costs, where it is on.** Rust is installed explicitly rather than taken
+from the runner image: Slint v1.17.1 declares `rust-version = "1.92"`, and an image
+drifting below that would break the build on a tag push — the one run nobody wants to
+debug. `stable` is deliberate; the reproducibility that matters is pinned at the
+**Slint tag** (`v1.17.1`, `GIT_SHALLOW`, in `src/native/CMakeLists.txt`), while pinning
+rustc would instead break the day a transitive crate needs something newer. Cargo's
+*downloads* are cached, and the Slint **compile** is cached on `workflow_dispatch`
+only — a published bundle is built from nothing. Windows runs ~15 min with a cold
+cache; macOS and Linux are back to their pre-GUI runtime, which on macOS also means it
+is no longer compiling Slint twice for the universal binary.
 
 **Gotchas.** The manual **Run workflow** button only appears once `release.yml` is on the
 default branch (`main`); nothing auto-runs on a branch push (no `on: push: branches`) — only
