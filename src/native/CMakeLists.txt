@@ -70,6 +70,17 @@ set(PHOTON_CORE_SOURCES
     src/core/actions.cpp)
 
 add_library(photoncore STATIC ${PHOTON_CORE_SOURCES})
+# ⚠ PIC, BECAUSE ONE CONSUMER IS A SHARED OBJECT. photoncore links into both
+# `photon-installer` (an executable) and the `.xpl` (a MODULE — a shared object),
+# and on Linux every archive member entering a shared object must be PIC: ld
+# rejects the link with `relocation R_X86_64_PC32 ... can not be used when making
+# a shared object; recompile with -fPIC`. The ToLissPhoton target passing `-fPIC`
+# for its OWN sources does nothing for the archive's members — the property has
+# to be on THIS target. Ignored by MSVC and redundant on macOS (everything is PIC
+# there), so it is unconditional. Caught by the first Linux CI build of the
+# post-installer-port photoncore, 2026-08-15; earlier Linux runs predate the
+# archive members that carry the offending relocations.
+set_target_properties(photoncore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # `third_party/` is on the include path so the JSON header is reached as
 # `third_party/nlohmann/json.hpp` — the same shape stb and imgui use.
 target_include_directories(photoncore PUBLIC
