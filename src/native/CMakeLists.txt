@@ -421,6 +421,26 @@ if(APPLE)
             "-framework Carbon"
             "-framework CoreServices"
             objc)
+
+        # ⚠ THE INSTALLER CANNOT BE A UNIVERSAL BINARY IN ONE BUILD, because
+        # SLINT'S CORROSION HAS NO IDEA `CMAKE_OSX_ARCHITECTURES` EXISTS
+        # (2026-08-15: `grep -r 'OSX_ARCHITECTURES\|lipo'` over corrosion-src is
+        # EMPTY). It builds exactly one Rust target — the host — while CMake happily
+        # compiles our C++ for `arm64;x86_64`, so the x86_64 slice links against a
+        # `libslint_cpp.a` that has no x86_64 in it. The failure names every Slint
+        # symbol (`_RectangleVTable`, `_TextInputVTable`, …) "for architecture
+        # x86_64", which reads like a broken Slint build rather than a missing arch.
+        #
+        # ⚠ THE `.xpl` IS UNAFFECTED AND MUST STAY UNIVERSAL — it links no Rust, and
+        # Intel Macs still run X-Plane 12. So this narrows the INSTALLER only, and
+        # the workflow builds the second slice in its own tree and `lipo`s them.
+        # Unset (the normal case, and every dev build) leaves the global value alone.
+        if(PHOTON_INSTALLER_OSX_ARCH)
+            set_target_properties(photon-installer PROPERTIES
+                OSX_ARCHITECTURES "${PHOTON_INSTALLER_OSX_ARCH}")
+            message(STATUS
+                "ToLissPhoton: photon-installer arch -> ${PHOTON_INSTALLER_OSX_ARCH}")
+        endif()
     endif()
 elseif(NOT MSVC)
     # The same flags the `.xpl` already uses: a distro's libstdc++ is older than the
@@ -437,24 +457,51 @@ elseif(NOT MSVC)
         # the compile succeeds, and the failure lands at the final C++ link where
         # nothing has put `-lfontconfig` on the line.
         #
-        # Found by pkg-config rather than hard-coded, because the library name is
-        # stable but its location is not (multiarch dirs, Nix, containers).
+        # ⚠ `--no-as-needed` IS THE ACTUAL FIX, AND THE `-l` ALONE IS NOT (2026-08-15,
+        # second CI failure — the first fix added the library and changed nothing).
+        # Ubuntu's toolchain defaults to `--as-needed`, which DROPS a shared library
+        # that looks unused at the point the linker reaches it. CMake expands
+        # `Slint::Slint` transitively, so `libslint_cpp.a` — the thing that actually
+        # references `Fc*` — lands on the command line AFTER our direct entries: the
+        # linker sees `-lfontconfig`, finds nothing needing it yet, discards it, and
+        # only then reads the archive full of undefined `Fc*`. The symptom is
+        # identical to never having linked it, which is exactly how the first attempt
+        # burned a CI cycle. Ordering cannot be fixed from here; `--no-as-needed` can.
         find_package(PkgConfig QUIET)
-        if(PkgConfig_FOUND)
-            pkg_check_modules(PHOTON_FONTCONFIG QUIET fontconfig)
+        set(PHOTON_FONTCONFIG_LINK "")
+        # ⚠ BOTH SPELLINGS. FindPkgConfig has set `PKG_CONFIG_FOUND` forever and
+        # `PkgConfig_FOUND` only since FPHSA started mirroring the package name;
+        # testing one of them is a silent skip on the other half of the CMake
+        # versions in the wild.
+        if(PKG_CONFIG_FOUND OR PkgConfig_FOUND)
+            pkg_check_modules(PHOTON_FC QUIET fontconfig)
+            # `_LINK_LIBRARIES` is absolute paths, `_LIBRARIES` bare names needing
+            # `_LIBRARY_DIRS`. Prefer the absolute form — it cannot be defeated by a
+            # search path we forgot to add.
+            if(PHOTON_FC_LINK_LIBRARIES)
+                set(PHOTON_FONTCONFIG_LINK "${PHOTON_FC_LINK_LIBRARIES}")
+            elseif(PHOTON_FC_LIBRARIES)
+                set(PHOTON_FONTCONFIG_LINK "${PHOTON_FC_LIBRARIES}")
+            endif()
         endif()
-        if(PHOTON_FONTCONFIG_FOUND)
-            target_link_libraries(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LIBRARIES})
-            target_link_directories(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LIBRARY_DIRS})
-        else()
-            # ⚠ FALL BACK TO THE BARE NAME rather than failing configure. A distro
-            # without the .pc file may still have the .so, and a hard error here
-            # would block a build that was going to work.
-            message(WARNING
-                "fontconfig not found via pkg-config; linking -lfontconfig by name. "
-                "If the link fails on Fc* symbols, install libfontconfig-dev.")
-            target_link_libraries(photon-installer PRIVATE fontconfig)
+        if(NOT PHOTON_FONTCONFIG_LINK)
+            find_library(PHOTON_FC_LIB NAMES fontconfig)
+            if(PHOTON_FC_LIB)
+                set(PHOTON_FONTCONFIG_LINK "${PHOTON_FC_LIB}")
+            else()
+                # ⚠ NEVER A HARD ERROR. A distro with no `.pc` and no CMake-visible
+                # `.so` may still link `-lfontconfig` fine, and failing configure
+                # would block a build that was going to work.
+                set(PHOTON_FONTCONFIG_LINK "fontconfig")
+            endif()
         endif()
+        # ⚠ UNCONDITIONAL, AND THAT IS THE POINT. The first attempt made every
+        # branch here QUIET, so a green-looking configure said nothing about what it
+        # had resolved and the only evidence was a link failure 8 minutes later.
+        message(STATUS
+            "ToLissPhoton: GUI links fontconfig -> ${PHOTON_FONTCONFIG_LINK}")
+        target_link_options(photon-installer PRIVATE "LINKER:--no-as-needed")
+        target_link_libraries(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LINK})
     endif()
 endif()
 

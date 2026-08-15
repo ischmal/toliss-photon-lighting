@@ -934,20 +934,33 @@ failed to **link**: Corrosion does not propagate Slint's transitive system libra
 the same defect the `opengl32`/`imm32` note in `CMakeLists.txt` describes for Windows.
 Both lists are now explicit, derived from the actual undefined-symbol dumps:
 
-- **Linux — exactly one library.** Every undefined symbol was `Fc*`, from `fontique`
-  under Slint's text stack. ⚠ **Installing `libfontconfig-dev` is not enough**, and
-  that is the trap: the headers satisfy the Rust build script, the compile succeeds,
-  and the failure lands at the final C++ link where nothing put `-lfontconfig` on the
-  line. Resolved through pkg-config, with a link-by-name fallback and a warning rather
-  than a hard configure error.
+- **Linux — exactly one library, and `-l` alone did not fix it.** Every undefined
+  symbol was `Fc*`, from `fontique` under Slint's text stack. ⚠ **Installing
+  `libfontconfig-dev` is not enough** — the headers satisfy the Rust build script and
+  the compile succeeds, so the failure lands at the final C++ link. ⚠ **And adding
+  `-lfontconfig` is not enough either**, which cost a second CI cycle: Ubuntu defaults
+  to `--as-needed`, and CMake expands `Slint::Slint` transitively so `libslint_cpp.a`
+  — the thing that actually references `Fc*` — lands *after* our direct entries. The
+  linker reaches `-lfontconfig`, finds nothing needing it yet, discards it, and only
+  then reads the archive full of undefined `Fc*`. **The symptom is identical to never
+  having linked it at all.** Ordering cannot be fixed from the target, so the fix is
+  `LINKER:--no-as-needed`.
 - **macOS — ten frameworks plus `-lobjc`**: CoreFoundation, Foundation, AppKit,
-  CoreGraphics, CoreText, CoreVideo, QuartzCore, OpenGL, Carbon, CoreServices.
-  ⚠ **This is the least-proven thing in the build.** On Windows exactly two libraries
-  were under-reported; on macOS *nothing* propagated — ~300 symbols across every
-  framework the backend touches — which points at the universal (`arm64;x86_64`) lipo
-  path dropping the link interface wholesale rather than at an incomplete list. **If
-  it regresses, test single-arch first** (`-DCMAKE_OSX_ARCHITECTURES=arm64`) before
-  adding frameworks.
+  CoreGraphics, CoreText, CoreVideo, QuartzCore, OpenGL, Carbon, CoreServices. That
+  list is **confirmed**: with it, the arm64 slice links.
+- ⚠ **macOS cannot produce a universal binary in one build, and this is a hard
+  limit.** `grep -r 'OSX_ARCHITECTURES\|lipo'` over Slint's vendored Corrosion is
+  **empty** — it builds exactly one Rust target, the host, while CMake compiles our
+  C++ for `arm64;x86_64`. The x86_64 slice then links against a `libslint_cpp.a` with
+  no x86_64 in it, and the failure names every *Slint* symbol
+  (`_RectangleVTable`, `_TextInputVTable`, …) "for architecture x86_64" — which reads
+  like a broken Slint build rather than a missing architecture. So the workflow builds
+  the installer **twice**, in separate trees (`build` arm64, `build-x86` x86_64 with
+  `Rust_CARGO_TARGET` stated), and `lipo`s them. ⚠ **The `.xpl` is unaffected and stays
+  universal** from the first pass — it links no Rust, and Intel Macs still run X-Plane
+  12; the second pass is `PHOTON_CORE_ONLY=ON` precisely so it cannot rebuild the
+  plugin single-arch. ⚠ **`lipo -create` succeeds on a single input**, so the step
+  asserts both slices are present rather than trusting the exit code.
 
 ⚠ **Linking was never the whole gap.** `platform::PickFolder` returned "" on
 everything but Windows, so a Unix GUI would have shipped a **Browse button that did

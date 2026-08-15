@@ -223,11 +223,19 @@ jobs:
         shell: bash
         working-directory: src/native
         run: |
+          # ⚠ macOS NARROWS THE INSTALLER TO ONE ARCH. Slint's Corrosion cannot
+          # build Rust for two (see CMakeLists), so the universal binary is made by
+          # lipo in the next step instead. The `.xpl` in this same tree stays
+          # universal — it links no Rust, and Intel Macs still run X-Plane 12.
+          extra=""
+          if [ "$RUNNER_OS" = "macOS" ] && [ "${{ matrix.gui }}" = "ON" ]; then
+            extra="-DPHOTON_INSTALLER_OSX_ARCH=arm64"
+          fi
           if [ "$RUNNER_OS" = "Windows" ]; then
             cmake -S . -B build -A x64 -DPHOTON_GUI=${{ matrix.gui }} 2>&1 | tee configure.log
             cmake --build build --config Release
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPHOTON_GUI=${{ matrix.gui }} 2>&1 | tee configure.log
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPHOTON_GUI=${{ matrix.gui }} $extra 2>&1 | tee configure.log
             cmake --build build
           fi
           test -f "build/ToLissPhoton/${{ matrix.arch }}/ToLissPhoton.xpl"
@@ -256,6 +264,49 @@ jobs:
             }
           fi
 
+      # ── the second macOS slice, and the universal binary ─────────────────────
+      # ⚠ TWO FULL BUILDS IS THE PRICE OF A UNIVERSAL GUI INSTALLER, and it is not
+      # avoidable from here: Slint's vendored Corrosion has no `CMAKE_OSX_ARCHITECTURES`
+      # or `lipo` handling at all, so it builds exactly one Rust target per tree.
+      # The first pass above made the arm64 slice; this one makes x86_64 in its own
+      # tree, and `lipo` welds them.
+      #
+      # ⚠ `PHOTON_CORE_ONLY=ON` so this pass needs no X-Plane SDK and does NOT
+      # rebuild the `.xpl` — the universal plugin from the first pass is the one
+      # that ships, and rebuilding it here single-arch is exactly the mistake this
+      # step must not make.
+      # ⚠ `Rust_CARGO_TARGET` must be stated too: Corrosion picks the HOST triple
+      # otherwise, and would hand an arm64 libslint_cpp.a to an x86_64 link.
+      - name: Build the x86_64 slice and lipo a universal installer (macOS)
+        if: matrix.gui == 'ON' && runner.os == 'macOS'
+        shell: bash
+        working-directory: src/native
+        run: |
+          cmake -S . -B build-x86 -DCMAKE_BUILD_TYPE=Release \
+                -DPHOTON_GUI=ON -DPHOTON_CORE_ONLY=ON \
+                -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                -DRust_CARGO_TARGET=x86_64-apple-darwin
+          cmake --build build-x86 --target photon-installer
+
+          # ⚠ ITS OWN DIRECTORY, KEEPING THE NAME `photon-installer`. The bundle
+          # stages the binary under `exe.name`, so a file called
+          # `photon-installer-universal` would ship under that name and the README's
+          # `./photon-installer` would be wrong on macOS alone.
+          mkdir -p build/universal
+          lipo -create build/photon-installer build-x86/photon-installer \
+               -output build/universal/photon-installer
+
+          # ⚠ ASSERT BOTH SLICES ARE REALLY THERE. `lipo -create` succeeds on a
+          # single input, so "the command worked" is not evidence of a fat binary —
+          # and a silently-thin installer is precisely the bug being fixed.
+          lipo -info build/universal/photon-installer
+          for arch in arm64 x86_64; do
+            lipo -info build/universal/photon-installer | grep -q "$arch" || {
+              echo "::error::the universal installer is missing the $arch slice"
+              exit 1
+            }
+          done
+
       # One `cmake --build` already produced all four targets — the .xpl, the
       # photoncore static lib, photoncore_tests and photon-installer. This step
       # only locates the two executables (multi-config VS puts them under
@@ -277,6 +328,20 @@ jobs:
             exe="$PWD/build/photon-installer"
             tests="$PWD/build/photoncore_tests"
           fi
+          # ⚠ THE LIPO'd BINARY WINS WHERE IT EXISTS. Without this the bundle would
+          # stage the arm64-only first pass and every check downstream would still
+          # pass — the exact silent-thin failure the lipo step asserts against.
+          #
+          # ⚠ EXPORTED AS ITS OWN OUTPUT, and deliberately EMPTY off macOS. These
+          # paths come from bash's `$PWD`, which on Windows is an MSYS path
+          # (`/d/a/...`) that Python cannot open — so `--installer-exe` may only ever
+          # be handed a path from a runner where the two agree.
+          universal=""
+          if [ -f "$PWD/build/universal/photon-installer" ]; then
+            exe="$PWD/build/universal/photon-installer"
+            universal="$exe"
+          fi
+          echo "universal=$universal" >> "$GITHUB_OUTPUT"
           test -x "$exe"   || { echo "::error::photon-installer was not built at $exe"; exit 1; }
           test -x "$tests" || { echo "::error::photoncore_tests was not built at $tests"; exit 1; }
           echo "exe=$exe" >> "$GITHUB_OUTPUT"
@@ -301,8 +366,20 @@ jobs:
       # one step: --bundle stages photon-installer + data/ + README.txt and picks
       # zip/tar.gz per OS. Python is here for the BUILD TOOLING (the DSL emits the
       # OBJs) — it is not a runtime or install-time dependency of what ships.
+      # ⚠ `--installer-exe` IS PASSED ON macOS ONLY, and only because the lipo'd
+      # binary is somewhere `find_installer_binary` does not look: it scans
+      # `build*/` for `photon-installer[.exe]` and would happily stage the arm64-only
+      # first pass. Everywhere else discovery is correct and the flag stays off —
+      # see the note on MSYS paths in the locate step.
       - name: Build platform bundle (own arch)
-        run: python build/make_release.py --plugin-dir src/native/build/ToLissPhoton --bundle
+        shell: bash
+        run: |
+          extra=""
+          if [ -n "${{ steps.native.outputs.universal }}" ]; then
+            extra="--installer-exe ${{ steps.native.outputs.universal }}"
+          fi
+          python build/make_release.py \
+            --plugin-dir src/native/build/ToLissPhoton $extra --bundle
 
       - name: Upload platform bundle
         uses: actions/upload-artifact@v4
