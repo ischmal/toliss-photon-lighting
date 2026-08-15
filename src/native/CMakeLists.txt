@@ -295,6 +295,14 @@ if(PHOTON_GUI)
         # run-installer.ps1 and the CI workflow comes from — bump this tag and
         # re-read Slint's own MSRV before assuming the runners still satisfy it.
         GIT_TAG v1.17.1
+        # ⚠ SAFE ONLY BECAUSE THE TAG ABOVE IS EXACT. `GIT_SHALLOW` clones with
+        # `--depth 1 --branch <tag>`, which needs a real ref — it cannot resolve a
+        # raw commit SHA, and against a MOVING branch it would silently pin to
+        # whatever the tip was on the day of the clone. Slint carries ~99 MB of
+        # history against a ~42 MB tree and has NO submodules (checked 2026-08-15:
+        # no `.gitmodules`), so this is the whole download saved on every runner,
+        # with nothing in the build that reads git metadata.
+        GIT_SHALLOW TRUE
         SOURCE_SUBDIR api/cpp)
     FetchContent_MakeAvailable(Slint)
 

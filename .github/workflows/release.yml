@@ -117,6 +117,40 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('src/native/CMakeLists.txt') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      # rustc's version belongs in the build cache's key: cargo fingerprints the
+      # compiler, so a toolchain bump invalidates every artifact anyway. Keying on
+      # it turns a guaranteed-useless restore into a clean miss.
+      - name: Record the Rust version (for the build cache key)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: echo "RUSTC_V=$(rustc -V | tr -d ' ()' )" >> "$GITHUB_ENV"
+
+      # ── the Slint COMPILE, cached for iteration runs only ────────────────────
+      # ⚠ DELIBERATELY NOT ON TAG PUSHES. A published bundle is built from nothing;
+      # that is a property worth more than the ~20 minutes this saves, because the
+      # failure it prevents is unfalsifiable after the fact — a stale artifact
+      # restored into a release binary leaves no trace in the artifact itself.
+      # `workflow_dispatch` is the iteration loop, where the same commit gets built
+      # repeatedly in one sitting and a hit is near-certain; `v*` is the release,
+      # where a hit would be near-impossible anyway (GitHub evicts caches unused for
+      # 7 days and tags are weeks apart) and would only buy a ~1-3 min upload of
+      # something nothing reads.
+      #
+      # ⚠ THE PATH LOOKS WRONG AND IS NOT. Corrosion passes `--target-dir` outright,
+      # so CARGO_TARGET_DIR is ignored, and it builds
+      #   <build>/[<arch>/<config>/]cargo/.._<sha1-of-manifest-path>/
+      # — one `cargo` glob covers the multi-config (Windows) and single-config
+      # (Unix) layouts. The leaf starts with `..`, so it is invisible to `ls` and
+      # skipped by most globs; matching the `cargo` DIRECTORY and letting tar
+      # recurse is what actually captures it. ~1.4 GB on Windows, ~2x on macOS
+      # (two arches), against a 10 GB per-repo limit shared with everything above.
+      - name: Cache the Slint build (dispatch runs only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/cache@v4
+        with:
+          path: src/native/build/**/cargo
+          key: slintbuild-${{ runner.os }}-${{ env.RUSTC_V }}-${{ hashFiles('src/native/CMakeLists.txt') }}
+
       # unzip (Unix) preserves the macOS XPLM.framework symlinks the linker needs;
       # Expand-Archive (Windows) avoids relying on unzip being on PATH in Git Bash.
       - name: Fetch X-Plane SDK (Unix)
