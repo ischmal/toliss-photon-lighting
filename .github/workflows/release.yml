@@ -181,7 +181,13 @@ jobs:
         if: matrix.gui == 'ON' && github.event_name == 'workflow_dispatch'
         uses: actions/cache@v4
         with:
-          path: src/native/build/**/cargo
+          # ⚠ BOTH TREES. The macOS second pass compiles Slint AGAIN in build-x86/
+          # (Corrosion cannot build two arches in one tree); a cache that covered
+          # only build/ would leave every dispatch iteration paying the x86_64
+          # Slint compile in full.
+          path: |
+            src/native/build/**/cargo
+            src/native/build-x86/**/cargo
           key: slintbuild-${{ runner.os }}-${{ env.RUSTC_V }}-${{ hashFiles('src/native/CMakeLists.txt') }}
 
       # unzip (Unix) preserves the macOS XPLM.framework symlinks the linker needs;
