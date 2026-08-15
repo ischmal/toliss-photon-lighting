@@ -203,6 +203,29 @@ export component InsetGlow inherits Rectangle {
 // with.
 export component PhotonScrollView {
     in property <bool> enabled: true;
+    // Follow the bottom of the content as it grows — the installer log, which is
+    // appended to while the user watches it. Off by default: the aircraft list is
+    // built once and jumping it to the end would be wrong.
+    //
+    // ⚠ IT IS DRIVEN BY THE CONTENT'S HEIGHT CHANGING, NOT BY THE MODEL CHANGING,
+    // and that is the whole reason it works. A `changed` on the model fires before
+    // the repeater has instantiated the new row, so `viewport-height` is still the
+    // OLD height and the view scrolls to the previous bottom — one line short,
+    // every time, which looks like an off-by-one in the scroll maths rather than a
+    // sequencing bug. `viewport-height` changes only once the row has been measured.
+    //
+    // ⚠ IT ALSO CANNOT FIGHT THE USER, for the same reason: it fires when the
+    // CONTENT changes and never otherwise. Once the run is over the log stops
+    // growing, and scrolling back up through it is undisturbed — there is no mode
+    // to leave and nothing to detect a manual scroll against.
+    in property <bool> stick-to-bottom: false;
+
+    // Jump to the end of the content. ⚠ `-maximum`, never a large negative
+    // number: Flickable clamps its own dragging and wheel handling, but a direct
+    // write to `viewport-y` is taken literally and would scroll into empty space.
+    public function scroll-to-bottom() {
+        flick.viewport-y = -root.maximum;
+    }
 
     out property <length> visible-width <=> flick.width;
     out property <length> visible-height <=> flick.height;
@@ -240,6 +263,13 @@ export component PhotonScrollView {
         interactive: false;
         width: parent.width;
         height: parent.height;
+
+        // ⚠ ON THE Flickable's OWN PROPERTY, not on the alias above it. This is
+        // the value the layout writes when a new row has been measured, which is
+        // the event `stick-to-bottom` is defined in terms of.
+        changed viewport-height => {
+            if (root.stick-to-bottom) { root.scroll-to-bottom(); }
+        }
 
         @children
     }
@@ -698,9 +728,43 @@ export component SmallRadio inherits Rectangle {
 // A step's marker has three states and they are three different SVGs, not one
 // tinted shape: done is a filled muted dot, current a filled accent dot, and
 // pending a 2 px muted ring.
+//
+// ⚠ A COMPLETED STEP IS ALSO A WAY BACK TO IT (2026-08-14) — mouse only, and only
+// BACKWARD. `navigable` is the caller's answer to "may the rail be used here at
+// all", and a row is clickable when it is that AND strictly before `current` AND
+// not `blocked`. There is no high-water mark and deliberately no forward jump:
+// walking forward is what rebuilds each screen's data (`GoNext` re-detects
+// aircraft, publishes per-airframe availability, builds the review list), so a jump
+// PAST a screen would arrive with the previous run's answers. Pressing Next
+// therefore puts the user back on rails automatically — the rail can never reach
+// anything ahead.
+//
+// ⚠ `blocked` IS ONE ROW, NOT A LIST, BECAUSE THERE IS ONE (2026-08-14): Run. Every
+// other screen is a set of ANSWERS and re-showing it costs nothing, which is why the
+// rail is live on Complete — going back to look is not the risky move, pressing Next
+// afterwards is, and that already starts the wizard forward again from wherever it
+// was clicked. Run is the exception because it is not a state to restore but an
+// ACTION that has already happened; a rail row landing there would show a finished
+// log with an enabled Next under it and no way to tell it apart from a fresh run.
+// The Complete screen's "View log" button is the sanctioned way to that screen, and
+// it says what it is for.
+//
+// ⚠ THE HOVER LOOK IS THE DESIGN'S OWN `Label/Highlight`, not a new state. The
+// step component has no Hover variant, but its label already has exactly two
+// looks — muted and white — and white is what `current` uses. Borrowing it costs
+// no new color and cannot drift from the palette.
+//
+// ⚠ MOUSE ONLY, ON PURPOSE. Six rail rows in the tab order would sit AHEAD of every
+// screen's content, so Tab would walk the sidebar before reaching the thing the
+// user came to fill in. The keyboard already has this: Escape is Back.
 export component StepRail inherits Rectangle {
     in property <[string]> steps;
     in property <int> current: 0;
+    in property <bool> navigable: false;
+    // The one row that is never a destination, as a rail INDEX. -1 is "none".
+    in property <int> blocked: -1;
+    // The rail INDEX, not the step number — app.slint owns that mapping.
+    callback navigate(int);
 
     width: Tokens.sidebar-w;
     background: Tokens.sidebar-bg;
@@ -728,8 +792,13 @@ export component StepRail inherits Rectangle {
         padding-left: 14px;
         padding-right: 14px;
 
-        for step[idx] in root.steps: Rectangle {
+        for step[idx] in root.steps: row := Rectangle {
             height: 16px;
+
+            // ⚠ STRICTLY BEFORE `current`. The step you are on is not somewhere
+            // to go, and anything after it has not been walked to yet.
+            property <bool> reachable: root.navigable
+                && idx < root.current && idx != root.blocked;
 
             Image {
                 source: idx < root.current
@@ -749,12 +818,33 @@ export component StepRail inherits Rectangle {
                 width: parent.width - 30px;
                 height: 100%;
                 text: step;
-                color: idx == root.current ? Tokens.text : Tokens.muted;
+                // ⚠ `reachable` IS RESTATED HERE ON PURPOSE, even though a
+                // disabled TouchArea does report no hover. Slint clears that
+                // flag from the touch area's event FILTER, so it only happens on
+                // the next mouse event — and the pointer can be sitting on a rail
+                // row at the moment the row stops being reachable, which is
+                // exactly what pressing Enter on the Review screen does. Without
+                // this term one rail label stays white on the Run screen until
+                // the mouse is moved. Naming it makes the color a function of
+                // state rather than of event ordering.
+                color: (idx == root.current || (row.reachable && touch.has-hover))
+                    ? Tokens.text : Tokens.muted;
                 font-family: Tokens.font;
                 font-size: Tokens.label-size;
                 font-weight: Tokens.weight-semibold;
                 vertical-alignment: center;
                 overflow: elide;
+            }
+
+            // ⚠ UNSIZED, so it fills the row and needs no x/y — the 130x16 the
+            // design gives a step, and no invented geometry. A sized-but-unplaced
+            // TouchArea is centered by Slint, which is the trap `SizedItemTests`
+            // exists for.
+            touch := TouchArea {
+                enabled: row.reachable;
+                mouse-cursor: row.reachable
+                    ? MouseCursor.pointer : MouseCursor.default;
+                clicked => { root.navigate(idx); }
             }
         }
     }
@@ -769,23 +859,49 @@ export component StepRail inherits Rectangle {
 // acts on — the aircraft you picked — and Features is where you choose what to
 // ADD. Hidden unless a screen asks for it. Placement is still undecided; see
 // docs/installer_gui_plan.md §3.
+// ⚠ "View log" TAKES BACK'S SLOT ON THE Complete SCREEN (2026-08-14, `212:1676`).
+// It is the same secondary position, relabelled — the design has no screen showing
+// both, and Complete is the only screen with neither a Back nor anything else to
+// put there.
+//
+// ⚠ IT GOES BACK TO THE Run SCREEN — it does NOT open the log file (changed the same
+// day it landed). The file is still written and still flushed per line, but it is a
+// record for afterwards, not the thing to hand someone who asked to see the log:
+// the Run screen is already showing that log, colored and marked up, and sending
+// them to Notepad instead swaps a designed screen for a wall of timestamps. It is
+// still NOT wired to `back()`, so `back()` cannot be pointed at something that is
+// not going back — see gui.cpp, where the target is named.
 export component BottomBar inherits Rectangle {
     in property <string> version;
     in property <bool> back-visible: false;
-    in property <bool> next-visible: true;
+    in property <bool> view-log-visible: false;
     in property <bool> next-enabled: true;
     in property <string> next-label: "Next";
-    // ⚠ THE FORWARD BUTTON IS PRIMARY ON EVERY STEP, Complete's "Exit" included.
-    // It was briefly Danger red there (2026-08-13, withdrawn the same day): red
-    // is this UI's destructive colour and it is spent on Uninstall below, so
-    // spending it again on the button that closes a SUCCESSFUL install made the
-    // one unambiguous signal ambiguous. Do not reintroduce a `next-danger`.
+    // ⚠ PRIMARY ON EVERY STEP BUT ONE, and the exception is Complete (2026-08-14).
+    // There the blue moves to whichever of Exit and "Modify another aircraft" is
+    // the likelier next move, and the OTHER goes Normal — two primaries is no
+    // recommendation at all. See screens/complete.slint for how that is decided.
+    //
+    // ⚠ IT WAS BRIEFLY DANGER RED on Complete (2026-08-13, withdrawn the same day):
+    // red is this UI's destructive colour and it is spent on Uninstall below, so
+    // spending it again on the button that closes a SUCCESSFUL install made the one
+    // unambiguous signal ambiguous. Do not reintroduce a `next-danger`.
+    in property <bool> next-primary: true;
     in property <bool> uninstall-visible: false;
 
     callback back();
     callback next();
     callback uninstall();
+    callback view-log();
     callback version-clicked();
+
+    // Put the keyboard on the forward button, so Enter does the obvious thing on a
+    // screen that is only waiting to be agreed with. ⚠ THIS IS WHY Next IS NOT
+    // WRAPPED IN AN `if` (see below) — Slint refuses to reach an element inside a
+    // conditional from outside it, and a `public function` here is outside.
+    public function focus-next() {
+        nextBtn.focus();
+    }
 
     height: Tokens.bar-h;
     background: Tokens.bar-bg;
@@ -858,9 +974,24 @@ export component BottomBar inherits Rectangle {
             clicked => { root.back(); }
         }
 
-        if root.next-visible: PhotonButton {
+        // ⚠ BACK'S SLOT, AND NEVER BOTH — the two are mutually exclusive by
+        // construction at the call site (Complete has no Back). Written as a
+        // separate button rather than a relabelled Back so that `back()` cannot be
+        // wired to something that is not going back.
+        if root.view-log-visible: PhotonButton {
+            label: "View log";
+            primary: false;
+            clicked => { root.view-log(); }
+        }
+
+        // ⚠ NOT INSIDE AN `if`, and that is load-bearing rather than a
+        // simplification. `focus-next()` above has to reach it, and Slint will not
+        // let an element inside a conditional be referenced from outside one. It
+        // cost nothing: the button was on every screen already — the old
+        // `next-visible` was bound to a literal `true` at its only call site.
+        nextBtn := PhotonButton {
             label: root.next-label;
-            primary: true;
+            primary: root.next-primary;
             enabled: root.next-enabled;
             clicked => { root.next(); }
         }
@@ -881,6 +1012,20 @@ export component AircraftCard inherits Rectangle {
     // for "this is the row you are on". See screens/aircraft.slint.
     in property <bool> highlighted: false;
     callback clicked();
+    // A right-click on this card, in WINDOW coordinates.
+    //
+    // ⚠ THE CARD DOES NOT OWN THE MENU, and it must not. It lives inside a
+    // repeater inside a Flickable: a popup anchored to a card would be re-placed
+    // against that card on every property change, so scrolling the list would
+    // drag an open menu along with the row — and a card recycled out from under
+    // an open popup is a worse problem than a slightly longer callback. The
+    // screen holds one menu; see screens/aircraft.slint.
+    //
+    // ⚠ ABSOLUTE, NOT LOCAL, for that same reason: the screen cannot convert
+    // from a coordinate space belonging to a row it does not track the position
+    // of. `absolute-position` is a reserved output on every element, so the two
+    // ends both measure from the window and the difference cancels.
+    callback context-menu(length, length);
 
     // The badge's own color, by `kind`. Kept as one expression so the three states
     // are readable together rather than spread across three `if` branches.
@@ -1031,6 +1176,19 @@ export component AircraftCard inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+
+        // ⚠ THE RIGHT-CLICK DOES NOT SELECT THE ROW, deliberately. A context
+        // menu acts on what was right-clicked, and selecting as a side effect
+        // would mean opening one aircraft's folder had silently changed which
+        // aircraft is about to be installed to. The screen carries the index
+        // instead, so the menu and the selection can disagree and both be right.
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
+                root.context-menu(self.absolute-position.x + self.mouse-x,
+                                  self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
 
     // ⚠ UNSELECTED ONLY, AND LAST. Figma drops the inset shadow on the selected
@@ -1194,6 +1352,380 @@ export component OptionRow inherits Rectangle {
     }
 }
 
+// ─── the context menu ────────────────────────────────────────────────────────
+// A menu row's text, and the ONE statement of its type.
+//
+// ⚠ IT IS ITS OWN COMPONENT BECAUSE THE MENU MEASURES ITSELF WITH IT. The width
+// comes from a hidden stack of these (see `PhotonContextMenu`), so the measuring
+// copy and the drawn copy must be the same font, size and weight — written twice
+// they drift, and the menu comes out a few pixels too narrow for its own labels
+// with nothing on screen to say why.
+// ⚠ 12 px MEDIUM, which is `label-size` at a weight nothing else pairs it with —
+// every other 12 px line in this UI is semibold (`MutedLabel`, the step rail, the
+// card's sub-lines). That is what the design says, and it is also why this is not
+// `MutedLabel` with a color override: the two would look like the same style until
+// someone retuned the shared one.
+component MenuLabel inherits Text {
+    color: Tokens.text;
+    font-family: Tokens.font;
+    font-size: Tokens.label-size;
+    font-weight: Tokens.weight-medium;
+    vertical-alignment: center;
+}
+
+// One row of the design's context menu (`291:553` Default, `291:555` Hover):
+// 24 px tall, 8 px of side padding, Roboto Medium 14 in white, and an accent fill
+// with a 5 px radius under the pointer.
+//
+// ⚠ `active` IS HOVER *OR* THE KEYBOARD, AND ONE ROW AT MOST. The design has only
+// Default and Hover, so the arrow keys reuse the Hover look — the same move
+// `AircraftCard.highlighted` makes for the same reason, and the reason it is safe
+// both times is that there is only ever one such row. The menu owns the flag; the
+// row reports the pointer to it rather than reading its own TouchArea, or a
+// hovered row and an arrowed-to row would both light up and the menu would appear
+// to have two selections.
+//
+// ⚠ THE DEFAULT ROW'S `text-shadow: 0 1px 2px rgba(0,0,0,.33)` IS DROPPED. Slint
+// has no text-shadow, and the honest stand-in — the same string drawn again a
+// pixel lower in black — cannot carry the 2 px blur and shows as a hard doubling,
+// which at 12 px is worse than the omission. What it is worth is nil either way:
+// white on #2b333a is already at full contrast, which is why Figma itself drops it
+// on the HOVERED row, where the fill is lighter and it would actually have told
+// you something.
+component ContextMenuOption inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback chosen();
+    callback entered();
+
+    height: Tokens.menu-item-h;
+    border-radius: Tokens.radius-menu-item;
+    // ⚠ TRANSPARENT AT REST, never `menu-bg` restated. The design gives the
+    // resting row no fill at all, and painting the panel's color into each row
+    // would put a seam at every 2 px gap the moment the two are retuned apart —
+    // which is precisely the day nobody is looking at the menu.
+    background: root.active ? Tokens.accent : transparent;
+    // Figma's `overflow-clip`. The menu grows to its longest label so this should
+    // never engage — it is the backstop for a label that outgrows the window.
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: Tokens.menu-item-pad-x;
+        padding-right: Tokens.menu-item-pad-x;
+
+        MenuLabel {
+            text: root.label;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+        // ⚠ `changed has-hover`, NOT `moved`. `moved` needs the pointer to keep
+        // moving, so arrowing onto a row and then nudging the mouse without
+        // leaving it would not hand control back to the pointer.
+        changed has-hover => {
+            if (self.has-hover) { root.entered(); }
+        }
+    }
+}
+
+// The menu itself (`291:562`): a rounded panel holding those rows.
+//
+// ⚠ IT DRAWS NO FOCUS RING, AND ITS 1 px EDGE HIGHLIGHT IS NOT ONE. Every other
+// control here marks focus with a 2 px white keyline; a menu is modal for as long
+// as it is open, so a ring saying "this has focus" would be true and useless.
+// What the keyboard is on is the highlighted ROW. See `Tokens.menu-ring-w`.
+//
+// ⚠ A `PopupWindow`, NOT THE BUILT-IN `ContextMenuArea`/`Menu`/`MenuItem`. Those
+// exist as of Slint 1.10 and would be less code — and on this build they draw
+// FLUENT's menu, with the same unreachable literals and the same
+// `dark-color-scheme ? … : …` branch that got std-widgets' ScrollView replaced
+// (see `PhotonScrollView`). A floating menu is the worst place to accept that:
+// there is nothing beside it to compare against, so on a light-mode machine it
+// simply looks like a different program's menu.
+//
+// ⚠ ZERO-SIZED AND PINNED TO ITS PARENT'S ORIGIN, which is what lets `show-at`
+// take plain parent coordinates. Both halves are spelled out on purpose: a sized
+// child with no stated position is CENTERED by Slint (the trap `SizedItemTests`
+// guards on TouchAreas), and a popup's x/y are measured from THIS element's
+// origin — so a centered one would offset every menu by half the parent, in a
+// way that looks like a positioning bug in the caller.
+//
+// ⚠ DECLARE IT IN A NON-LAYOUT PARENT. A layout overrides x/y/width/height on its
+// children, and the origin the coordinates depend on would silently become
+// wherever the layout put the row.
+//
+// ⚠ BOTH DIMENSIONS ARE STATED, AND THE WIDTH IS MEASURED HERE RATHER THAN LEFT
+// TO THE POPUP. Slint's popup layout would in fact size it — the generated
+// `layout_info_h` for a popup does aggregate its children's, straight through the
+// chrome Rectangle. But then the width would exist only inside the runtime, and
+// `flip-x` below has to KNOW it: a popup's x is evaluated before its size is
+// solved, so reading `popup.width` there would decide the flip from the previous
+// menu's width. Measuring it makes the number available to both.
+//
+// ⚠ THE MEASURING STACK IS THE ONLY WAY TO TAKE A MAXIMUM OVER `entries`. Slint
+// has no fold over a repeater — but a VerticalLayout's preferred WIDTH is exactly
+// the widest of its children, which is the same thing said as geometry. It reads
+// `measure.preferred-width`, a LAYOUT's, never a Text's: a Text's is a layout
+// property and is 0 outside one (the trap written up on `SmallRadio`).
+export component PhotonContextMenu inherits Rectangle {
+    in property <[string]> entries;
+    // The floor, not the width. ⚠ Only a floor: a menu narrower than this looks
+    // like a fragment rather than a menu, and a wider label always wins.
+    in property <length> min-w: Tokens.menu-item-min-w;
+    // The index within `entries`. ⚠ Wire, like `AircraftEntry.kind` — the caller
+    // matches on the position of a string it wrote, so the two lists are one
+    // list and must be read together.
+    callback activated(int);
+
+    x: 0;
+    y: 0;
+    width: 0px;
+    height: 0px;
+    background: transparent;
+    // ⚠ LOAD-BEARING, NOT TIDINESS. Slint does not clip by default, and the
+    // measuring stack below is a real column of Texts sitting at this element's
+    // origin — unclipped it would paint the menu's own labels onto the screen
+    // behind it, permanently and nowhere near a menu.
+    clip: true;
+
+    property <length> at-x;
+    property <length> at-y;
+    // What separates the rows from the panel's edge: Figma's 2 px of padding
+    // PLUS the 1 px border, because Slint draws a border inside the bounds and
+    // does not inset children for it.
+    property <length> chrome: Tokens.menu-pad + Tokens.menu-border-w;
+
+    property <length> menu-w: max(root.min-w,
+        measure.preferred-width + 2 * Tokens.menu-item-pad-x) + 2 * root.chrome;
+    property <length> menu-h: root.entries.length * Tokens.menu-item-h
+        + max(0, root.entries.length - 1) * Tokens.menu-gap
+        + 2 * root.chrome;
+
+    // ⚠ ANCHOR THE MENU'S TOP-RIGHT CORNER AT THE POINTER when its top-LEFT would
+    // put it past the right edge of the window. Slint already clamps a popup into
+    // the window, so without this nothing is drawn off-screen — it simply slides
+    // left until it fits, which leaves the pointer sitting in the middle of the
+    // menu over a row it did not open.
+    //
+    // ⚠ THE EDGE IS `Tokens.window-w` BECAUSE THIS WINDOW IS A FIXED SIZE. `App`
+    // binds its width to that token and Slint makes a Window with an explicit size
+    // non-resizable, so the two cannot disagree. A resizable installer would have
+    // to pass the real width down — there is no global for it, and the clamp would
+    // be the only thing left keeping a menu on screen.
+    //
+    // `at-x` is in the PARENT's coordinates and `absolute-position` is this
+    // element's origin in the window's, so their sum is the pointer in window
+    // coordinates. A flip that would push the menu off the LEFT edge is left to
+    // the clamp — it is the better of the two failures and cannot be reached at
+    // any width this window can hold.
+    property <bool> flip-x:
+        root.absolute-position.x + root.at-x + root.menu-w > Tokens.window-w;
+
+    // The highlighted row: hover and the arrow keys share it, so there is only
+    // ever one. -1 is "none", which is what a freshly opened menu shows.
+    property <int> active: -1;
+    // ⚠ WHO PUT IT THERE, WHICH IS NOT THE SAME QUESTION AS WHETHER IT IS THERE.
+    // Leaving the menu with the pointer must drop the highlight — a lit row under
+    // no cursor is a menu claiming a choice nobody is making, and the next Enter
+    // would take it. A row the ARROWS chose must survive exactly that, because the
+    // pointer is not what is driving the menu and moving it out of the way is not a
+    // decision. One flag, written at the two places that can set `active`.
+    property <bool> active-by-key: false;
+
+    // Open it at a point in the PARENT's coordinates.
+    public function show-at(px: length, py: length) {
+        root.at-x = px;
+        root.at-y = py;
+        // ⚠ RESET, or the second menu opens with the first one's row lit and
+        // Enter acts on a choice nobody made this time.
+        root.active = -1;
+        root.active-by-key = false;
+        popup.show();
+    }
+
+    // ⚠ WRAPS, unlike the aircraft list's `step-selection`, which clamps. A menu
+    // is one to four rows and Up from the top meaning "the last one" is what every
+    // menu does; clamping would make Up a dead key on the row the keyboard starts
+    // next to. From "nothing highlighted" Down takes the first row and Up the last,
+    // which the arithmetic below gives for free.
+    function step(delta: int) {
+        if (root.entries.length > 0) {
+            root.active += delta;
+            if (root.active < 0) { root.active = root.entries.length - 1; }
+            if (root.active >= root.entries.length) { root.active = 0; }
+            root.active-by-key = true;
+        }
+    }
+
+    // ⚠ NOT A VISIBLE PART OF ANYTHING — it exists so `menu-w` has something to
+    // measure. It is a real layout holding real Texts, and only this element's
+    // `clip: true` keeps it off the screen.
+    measure := VerticalLayout {
+        for entry in root.entries: MenuLabel {
+            text: entry;
+        }
+    }
+
+    popup := PopupWindow {
+        // ⚠ THE FLIP IS IN THE X BINDING, not in `show-at`. A popup re-evaluates
+        // its position while it is open, so a one-shot decision taken at show time
+        // would be re-derived from the un-flipped `at-x` on the next property
+        // change and the menu would jump.
+        x: root.at-x - (root.flip-x ? root.menu-w : 0px);
+        y: root.at-y;
+        width: root.menu-w;
+        height: root.menu-h;
+        // ⚠ ESCAPE IS COVERED BY THIS. Slint closes a popup on Escape for both
+        // auto-close policies, which is why the key handler below does not — and
+        // must not — try to.
+        close-policy: close-on-click-outside;
+        // Hands the keyboard to the menu the moment it opens, so the arrows work
+        // without a click first. ⚠ This is what `lower_popups` calls
+        // `call_focus_on_init` for; Slint's own ComboBox popup does the same.
+        forward-focus: keys;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: Tokens.menu-bg;
+            border-radius: Tokens.radius-menu;
+            border-width: Tokens.menu-border-w;
+            border-color: Tokens.menu-border;
+            drop-shadow-offset-x: Tokens.menu-shadow-x;
+            drop-shadow-offset-y: Tokens.menu-shadow-y;
+            drop-shadow-blur: Tokens.menu-shadow-blur;
+            drop-shadow-color: Tokens.menu-shadow;
+
+            // ⚠ A TouchArea *AROUND* THE ROWS, NOT BESIDE THEM. Slint sets
+            // `has-hover` from `input_event_filter_before_children`, which runs on
+            // every ANCESTOR of the item under the pointer — so a wrapper sees the
+            // menu as hovered even while a row's own TouchArea has the event. A
+            // SIBLING declared behind the rows would go un-hovered the moment the
+            // pointer touched one, and the highlight would clear on the way IN.
+            //
+            // ⚠ IT DOES NOT SWALLOW THE ROWS' CLICKS. TouchArea's filter returns
+            // ForwardAndInterceptGrab: children get the press first and a row that
+            // takes it keeps it. That is the opposite of the sibling case written
+            // up on `PathField`, where declaration order is the whole contract.
+            //
+            // ⚠ THE CHROME IS INSIDE IT TOO, deliberately — the 3 px of padding
+            // and border is still "in the menu", and clearing the highlight while
+            // crossing it on the way from one row to the next would flicker.
+            hover := TouchArea {
+                changed has-hover => {
+                    if (!self.has-hover && !root.active-by-key) {
+                        root.active = -1;
+                    }
+                }
+
+                VerticalLayout {
+                    padding: root.chrome;
+                    spacing: Tokens.menu-gap;
+                    alignment: start;
+
+                    for entry[idx] in root.entries: ContextMenuOption {
+                        label: entry;
+                        active: root.active == idx;
+                        // The pointer takes the highlight off whatever the arrows
+                        // left it on — one flag, so the two can never both show.
+                        entered => {
+                            root.active = idx;
+                            root.active-by-key = false;
+                        }
+                        // ⚠ `idx`, NOT `root.active`. A click acts on the row that
+                        // was clicked; they agree today only because `entered`
+                        // runs first, and a pointer that arrives without a hover
+                        // event (a tap, a synthetic click) would break that.
+                        //
+                        // ⚠ ACTIVATE, THEN CLOSE — the order Slint's own ComboBox
+                        // uses. `close()` drops the popup's item tree, and this
+                        // handler is running inside it.
+                        chosen => {
+                            root.activated(idx);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+
+            // ⚠ ZERO-WIDTH, like every other FocusScope in this file: at full
+            // size and with `focus-on-click` left at its default it would return
+            // EventAccepted from its own press handler and swallow every click
+            // before a row's TouchArea saw one — a menu that highlights rows and
+            // cannot be clicked. Focus arrives through the popup's
+            // `forward-focus`, which is not geometric.
+            keys := FocusScope {
+                x: 0;
+                width: 0;
+                key-pressed(event) => {
+                    if (event.text == Key.DownArrow) {
+                        root.step(1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.step(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.active = 0;
+                        return accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.active = root.entries.length - 1;
+                        return accept;
+                    }
+                    // ⚠ NOTHING HAPPENS WITH NO ROW HIGHLIGHTED, and the key is
+                    // still ACCEPTED. Rejecting it would send Enter up to the
+                    // App's root scope, which advances the wizard — so opening a
+                    // menu and pressing Enter would step to the next screen with
+                    // the menu still on it.
+                    if (event.text == Key.Return || event.text == Key.Space) {
+                        if (root.active >= 0) {
+                            root.activated(root.active);
+                        }
+                        popup.close();
+                        return accept;
+                    }
+                    // ⚠ SWALLOWED, AND FOR THE REASON ABOVE RATHER THAN A NEW ONE:
+                    // Backspace is Back in the App's root scope (2026-08-14), so
+                    // rejecting it here would step the wizard BACKWARD with the
+                    // menu still on screen. A menu is modal for as long as it is
+                    // open; every key that moves the wizard has to stop at it, and
+                    // this is now the whole list — Enter, Space and Backspace.
+                    // Escape is the deliberate exception, because rejecting it is
+                    // how Slint's own popup handling gets to close the menu.
+                    if (event.text == Key.Backspace) {
+                        return accept;
+                    }
+                    // ⚠ Everything else, Escape and Tab included. Escape is
+                    // Slint's own popup handling and only reaches it if this
+                    // rejects; Tab must reach the window or focus is trapped in
+                    // a menu that is no longer on screen.
+                    return reject;
+                }
+            }
+
+            // ⚠ LAST, as Figma has it, and it has to be: the ring occupies the
+            // 1..3 px band the rows begin at, so drawn first it would be painted
+            // over by the first row's highlight. Input-transparent — a plain
+            // Rectangle takes no hits, so do not give this one a handler.
+            Rectangle {
+                x: Tokens.menu-border-w;
+                y: Tokens.menu-border-w;
+                width: parent.width - 2 * Tokens.menu-border-w;
+                height: parent.height - 2 * Tokens.menu-border-w;
+                border-radius: Tokens.radius-menu - Tokens.menu-border-w;
+                border-width: Tokens.menu-ring-w;
+                border-color: Tokens.menu-ring;
+                background: transparent;
+            }
+        }
+    }
+}
+
 // ─── the path field ──────────────────────────────────────────────────────────
 // A light field on a dark screen, which is what the design specifies. Built on the
 // raw `TextInput` rather than std-widgets' LineEdit, whose own theming would fight
@@ -1218,6 +1750,33 @@ export component PathField inherits Rectangle {
     border-width: input.has-focus ? Tokens.focus-ring-w : 0px;
     border-color: Tokens.accent;
 
+    // ⚠ DECLARED FIRST, AND THAT IS THE WHOLE CONTRACT — the same rule as the
+    // App's dead-space TouchArea, reached from the other direction. Slint
+    // hit-tests the LAST child first, so declared after the TextInput this would
+    // take every LEFT click too: no caret, no drag-selection, no text field. Sat
+    // behind it, the TextInput gets first refusal and returns EventIgnored for a
+    // right press (its `input_event` handles Left and Middle and ignores the
+    // rest), so exactly one kind of click ever arrives here.
+    //
+    // ⚠ IT IS `pointer-event`, NOT `clicked`. TouchArea's `clicked` is
+    // left-button only by construction; the right button is reachable through
+    // nothing else.
+    menuTouch := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
+                // ⚠ FOCUS THE FIELD FIRST. Copy needs a selection and Paste needs
+                // a caret, and a field that was never clicked into has neither —
+                // the menu would open, look right, and do nothing. Showing the
+                // popup takes the focus straight back off it, but Slint's
+                // `FocusOut(PopupActivation)` deliberately PRESERVES the
+                // selection anchor, which is what makes Copy work at all.
+                input.focus();
+                menu.show-at(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+
     input := TextInput {
         x: 12px;
         y: 0;
@@ -1233,5 +1792,22 @@ export component PathField inherits Rectangle {
         selection-foreground-color: Tokens.text;
         edited => { root.edited(self.text); }
         accepted => { root.accepted(); }
+    }
+
+    // ⚠ NOTHING EXTRA IS NEEDED TO KEEP C++ IN STEP. Slint's `cut()` and
+    // `paste()` both raise the TextInput's own `edited` callback (they route
+    // through `delete_selection`/`insert` with TriggerCallbacks), so the binding
+    // above forwards a pasted path to `path-edited` exactly as typing does. Were
+    // that not so, the failure would be the quiet one: paste a path, press Next,
+    // and the installer validates the one you replaced.
+    menu := PhotonContextMenu {
+        entries: ["Cut", "Copy", "Paste", "Select all"];
+        // ⚠ Indices are the list above, positionally. Reorder one, reorder both.
+        activated(index) => {
+            if (index == 0) { input.cut(); }
+            if (index == 1) { input.copy(); }
+            if (index == 2) { input.paste(); }
+            if (index == 3) { input.select-all(); }
+        }
     }
 }

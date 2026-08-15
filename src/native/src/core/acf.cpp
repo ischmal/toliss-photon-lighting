@@ -241,8 +241,36 @@ bool NumericEquals(const std::string& raw, double want) {
     return std::fabs(got - want) <= kTolerance;
 }
 
+int FormatVersion(const std::string& text) {
+    // ⚠ THE FIRST FEW LINES ONLY. The stamp is line 2 of every `.acf` X-Plane
+    // writes; a whole-file search for "Version" would eventually find a livery
+    // name, a comment or a property value and report it as the format.
+    constexpr int kHeaderLines = 6;
+    std::size_t at = 0;
+    for (int line = 0; line < kHeaderLines && at < text.size(); ++line) {
+        const std::size_t eol = text.find('\n', at);
+        const std::string body = fsutil::Trim(
+            text.substr(at, eol == std::string::npos ? std::string::npos : eol - at));
+        at = eol == std::string::npos ? text.size() : eol + 1;
+
+        const std::size_t sp = body.find(' ');
+        if (sp == std::string::npos || sp == 0) continue;
+        if (fsutil::Trim(body.substr(sp + 1)) != "Version") continue;
+        const std::string digits = body.substr(0, sp);
+        if (digits.find_first_not_of("0123456789") != std::string::npos) continue;
+        return std::atoi(digits.c_str());
+    }
+    return 0;
+}
+
+bool IsForXp12(const std::string& text) {
+    const int version = FormatVersion(text);
+    return version == 0 || version >= kXp12FormatVersion;
+}
+
 std::vector<std::string> AcfFilesContaining(const std::string& aircraftDirUtf8,
-                                            const std::string& needle) {
+                                            const std::string& needle,
+                                            Variants which) {
     std::vector<std::string> found;
     const fs::path dir = fsutil::PathFromUtf8(aircraftDirUtf8);
     std::error_code ec;
@@ -265,9 +293,12 @@ std::vector<std::string> AcfFilesContaining(const std::string& aircraftDirUtf8,
     for (const fs::path& p : candidates) {
         std::string text;
         if (!fsutil::ReadFileBytes(p, text)) continue;
-        if (text.find(needle) != std::string::npos) {
-            found.push_back(fsutil::PathToUtf8(p));
-        }
+        if (text.find(needle) == std::string::npos) continue;
+        // ⚠ AFTER THE NEEDLE, NOT BEFORE IT. The stamp only decides between files
+        // that are already the kind we act on, so a folder holding no matching
+        // `.acf` at all still reports "none found" rather than "none for XP12".
+        if (which == Variants::Xp12 && !IsForXp12(text)) continue;
+        found.push_back(fsutil::PathToUtf8(p));
     }
     return found;
 }

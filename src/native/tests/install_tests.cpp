@@ -25,15 +25,18 @@
 #include <vector>
 
 #include "core/actions.h"
+#include "core/backup.h"
 #include "core/constants.h"
 #include "core/detect.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
+#include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/progress.h"
 #include "core/version.h"
+#include "core/wingmod.h"
 
 namespace fs = std::filesystem;
 using namespace photon;
@@ -268,7 +271,10 @@ public:
     const fs::path& folder() const { return folder_; }
     const fs::path& objects() const { return objects_; }
     const fs::path& objPath() const { return objPath_; }
-    fs::path backupDir() const { return objects_ / kBackupDirName; }
+    // ⚠ BESIDE objects/, NOT INSIDE IT. The old location has its own accessor
+    // because several cases below have to BUILD one to migrate.
+    fs::path backupDir() const { return folder_ / kBackupDirName; }
+    fs::path legacyBackupDir() const { return objects_ / kBackupDirName; }
     fs::path pluginRoot() const {
         return root_ / "Resources" / "plugins" / kPluginFolder;
     }
@@ -321,10 +327,13 @@ std::string SkunkCfg(const std::string& module, const std::string& name,
 // PATCHED, and a fixture written with `none` is already-installed — it makes the
 // install a no-op the test still passes, and it makes the reversal look wrong when
 // it is right. Cost an hour on 2026-08-09.
-std::string StockAcf() {
-    return std::string(
-        "I\r\n"
-        "1 version\r\n"
+//
+// ⚠ THE SECOND LINE IS A REAL FORMAT STAMP. `1200 Version` is how X-Plane marks an
+// XP12 `.acf` and `1100 Version` an XP11 one, and `acf::IsForXp12` reads it to
+// decide which variants Photon writes to — so a fixture for the XP11 pair asks for
+// 1100 here rather than being spelled `_XP11` in its filename.
+std::string StockAcf(int formatVersion = 1200) {
+    return std::string("I\r\n") + std::to_string(formatVersion) + " Version\r\n" +
         "ACF\r\n"
         "P acf/_spot1_3d_xyz/1 1.000000000\r\n"
         "P acf/_spot_angle/0 0.000000000\r\n"
@@ -341,7 +350,7 @@ std::string StockAcf() {
         "P _obja/0/_v10_att_y_acf_prt_ref 0.000000000\r\n"
         "P _obja/1/_v10_att_file_stl lights_inn.obj\r\n"
         "P _obja/1/_v10_att_y_acf_prt_ref 0.000000000\r\n"
-        "P _obja/count 2\r\n");
+        "P _obja/count 2\r\n";
 }
 
 actions::NullLog gLog;
@@ -712,6 +721,135 @@ TEST("uninstall: restores the original byte for byte and takes the backup dir") 
     actions::Uninstall(fa.Opts("stock"), gLog);
 
     CHECK_EQ(Read(fa.objPath()), original);
+    CHECK(!Exists(fa.backupDir()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// the backup folder's location, and the move out of objects/
+//
+// ⚠ `objects/` IS THE AIRCRAFT'S ASSET FOLDER — what X-Plane resolves OBJ and
+// texture references against, and what an aircraft update syncs. Photon kept a
+// second, byte-identical copy of ToLiss's own OBJs one level down inside it (on the
+// A330-900, hundreds of megabytes of them), which is a thing waiting to be found by
+// anything that recurses. It moved to the aircraft root on 2026-08-14.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Put a finished install's bookkeeping back where earlier installers kept it, so
+// the next run meets exactly what a real upgrading user has. ⚠ MOVED, NOT COPIED: two folders
+// is a state no released version could produce, and testing against it would prove
+// nothing about the upgrade this exists for.
+void MakeLegacyLayout(const FakeAircraft& fa) {
+    std::error_code ec;
+    fs::create_directories(fa.legacyBackupDir().parent_path(), ec);
+    fs::rename(fa.backupDir(), fa.legacyBackupDir(), ec);
+    CHECK(!ec);
+    CHECK(!Exists(fa.backupDir()));
+}
+
+TEST("backup: the folder lands beside objects/, never inside it") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+
+    actions::Install(fa.Opts("stock"), gLog);
+
+    CHECK(Exists(fa.backupDir() / fa.objPath().filename()));
+    CHECK(Exists(fa.backupDir() / kManifestName));
+    CHECK(!Exists(fa.legacyBackupDir()));
+}
+
+TEST("backup: an install MOVES an older layout's folder out of objects/") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    const std::string original = Read(fa.objPath());
+
+    actions::Install(fa.Opts("stock"), gLog);
+    MakeLegacyLayout(fa);                    // now an older install, exactly
+
+    const std::vector<std::string> steps = actions::Install(fa.Opts("stock"), gLog);
+
+    CHECK(AnyStep(steps, "Moved Photon's backup folder"));
+    CHECK(!Exists(fa.legacyBackupDir()));
+    // ⚠ THE ORIGINAL, not the copy Photon wrote over it. The move carries the
+    // manifest with the files it indexes, so the reinstall reads "already backed
+    // up" instead of taking a fresh backup of its own last install.
+    CHECK_EQ(Read(fa.backupDir() / fa.objPath().filename()), original);
+    const manifest::Manifest m = manifest::Read(U8(fa.objects()));
+    CHECK(m.present);
+    CHECK(HasEntry(m.backedUp, U8(fa.objPath().filename())));
+}
+
+TEST("backup: a migrated install still restores the TRUE original on uninstall") {
+    // The round trip that matters: the whole point of the move is that nothing a
+    // user needs back is lost on the way.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    const std::string original = Read(fa.objPath());
+
+    actions::Install(fa.Opts("stock"), gLog);
+    MakeLegacyLayout(fa);
+    actions::Install(fa.Opts("durantula"), gLog);      // migrates
+    actions::Uninstall(fa.Opts("durantula"), gLog);
+
+    CHECK_EQ(Read(fa.objPath()), original);
+    CHECK(!Exists(fa.backupDir()));
+    CHECK(!Exists(fa.legacyBackupDir()));
+}
+
+TEST("backup: an UNMIGRATED install uninstalls from objects/ without moving first") {
+    // ⚠ A user may never run another install. Uninstall must therefore work off
+    // whichever folder is actually there — and it does NOT migrate on the way,
+    // since it is about to delete the folder either way.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    const std::string original = Read(fa.objPath());
+
+    actions::Install(fa.Opts("stock"), gLog);
+    MakeLegacyLayout(fa);
+    actions::Uninstall(fa.Opts("stock"), gLog);
+
+    CHECK_EQ(Read(fa.objPath()), original);
+    CHECK(!Exists(fa.legacyBackupDir()));     // and objects/ is left clean
+    CHECK(!Exists(fa.backupDir()));
+}
+
+TEST("backup: a dry run over a legacy install moves nothing and says so") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    actions::Install(fa.Opts("stock"), gLog);
+    MakeLegacyLayout(fa);
+    const std::string backedUp = Read(fa.legacyBackupDir() / fa.objPath().filename());
+
+    actions::Options o = fa.Opts("stock");
+    o.dryRun = true;
+    const std::vector<std::string> steps = actions::Install(o, gLog);
+
+    CHECK(AnyStep(steps, "Would move Photon's backup folder"));
+    CHECK(Exists(fa.legacyBackupDir()));
+    CHECK(!Exists(fa.backupDir()));
+    CHECK_EQ(Read(fa.legacyBackupDir() / fa.objPath().filename()), backedUp);
+    // ⚠ And it reported against the folder the files are REALLY in — a dry run
+    // that describes the post-move world would tell a user their backup is
+    // somewhere it is not.
+    CHECK(AnyStep(steps, "already backed up"));
+}
+
+TEST("backup: the folder carries a README, and uninstall takes it too") {
+    // At the aircraft root this folder is somewhere a user browses, so it says what
+    // it is — and it must not be what stops the folder being removed on the way out.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+
+    actions::Install(fa.Opts("stock"), gLog);
+    CHECK(Exists(fa.backupDir() / backup::kReadmeName));
+    CHECK(Contains(Read(fa.backupDir() / backup::kReadmeName), "DO NOT DELETE"));
+
+    actions::Uninstall(fa.Opts("stock"), gLog);
     CHECK(!Exists(fa.backupDir()));
 }
 
@@ -1213,6 +1351,79 @@ TEST("screens: uninstall DETACHES the .acf and DELETES the OBJ") {
     CHECK(!Contains(Read(acf), kScreensObj));
 }
 
+TEST("acf variants: an install writes the XP12 pair and leaves the XP11 pair") {
+    // ⚠ NOTHING PHOTON BUILDS IS FOR X-PLANE 11 — the exterior OBJ is literally
+    // `lights_out3xx_XP12.obj` — so an edit to a file only that sim loads has no
+    // reader. Both patchers are covered here in one install, because they are two
+    // independent call sites of the same scope rule and either could regress alone.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    const fs::path xp12 = fa.folder() / "ToLissA320.acf";
+    const fs::path xp12sd = fa.folder() / "ToLissA320_StdDef.acf";
+    const fs::path xp11 = fa.folder() / "ToLissA320_XP11.acf";
+    Write(xp12, StockAcf(1200));
+    Write(xp12sd, StockAcf(1200));
+    Write(xp11, StockAcf(1100));
+    const std::string stockXp11 = Read(xp11);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    // ⚠ `_StdDef` IS IN, and that is not an accident of the stamp: X-Plane 12 loads
+    // it, so a user who flies the standard-definition variant must get the mod.
+    CHECK(patch_acf::IsPatched(Read(xp12)));
+    CHECK(patch_acf::IsPatched(Read(xp12sd)));
+    CHECK(patch_acf_screens::IsAttached(Read(xp12)));
+    CHECK(patch_acf_screens::IsAttached(Read(xp12sd)));
+    // The XP11 variant is untouched, byte for byte.
+    CHECK_EQ(Read(xp11), stockXp11);
+
+    const manifest::Manifest m = manifest::Read(U8(fa.objects()));
+    CHECK(!HasEntry(m.screens.acfPatched, "ToLissA320_XP11.acf"));
+    CHECK(!HasEntry(m.interior.acfPatched, "ToLissA320_XP11.acf"));
+}
+
+TEST("acf variants: an UNINSTALL still cleans an XP11 file an older Photon wrote") {
+    // ⚠ THE ASYMMETRY IS DELIBERATE — write to the new place, clean up both, the
+    // same rule the backup folder follows. Photon <= 0.8.4 patched all four
+    // variants. An uninstall scoped to XP12 would leave that file with the cockpit
+    // spot block still disabled and an `_obja` row naming `lights_screens.obj` — a
+    // file this very uninstall deletes, so the leftover is a missing-object warning
+    // on every load of a variant nothing will ever revisit.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    const fs::path xp12 = fa.folder() / "ToLissA320.acf";
+    const fs::path xp11 = fa.folder() / "ToLissA320_XP11.acf";
+    Write(xp12, StockAcf(1200));
+    Write(xp11, StockAcf(1100));
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    // Now stand in for the older installer: patch the XP11 file the way it did.
+    int changed = 0;
+    Write(xp11, patch_acf_screens::PatchText(
+                    patch_acf::PatchText(Read(xp11), changed), changed));
+    CHECK(patch_acf::IsPatched(Read(xp11)));
+    CHECK(patch_acf_screens::IsAttached(Read(xp11)));
+
+    const std::vector<std::string> steps = actions::Uninstall(o, gLog);
+
+    CHECK(!patch_acf::IsPatched(Read(xp11)));
+    CHECK(!patch_acf_screens::IsAttached(Read(xp11)));
+    CHECK(!patch_acf::IsPatched(Read(xp12)));
+    CHECK(!patch_acf_screens::IsAttached(Read(xp12)));
+    // ⚠ AND THE COUNT IS OF FILES CHANGED, NOT FILES VISITED. The revert walks all
+    // four variants; here two of them held our edits, and a step line saying "4"
+    // against an install that said "2" reads as one of the two being wrong.
+    CHECK(AnyStep(steps, "Detached the display-glow OBJ from 2 .acf file(s)"));
+    CHECK(AnyStep(steps, "Restored stock cockpit spot lights in 2 .acf file(s)"));
+}
+
 TEST("screens: a DRY RUN of the .acf attachment writes nothing") {
     // Ported from tests/test_screens.py's AcfDryRunTests, which drove the Python
     // patcher. Attaching and detaching are covered as text transforms in
@@ -1291,6 +1502,358 @@ TEST("manifest: a key this build does not model survives an install round trip")
 
     actions::Install(fa.Opts("stock"), gLog);
     CHECK(Contains(Read(mf), "future_axis"));
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wingmod — which wing mod is DRAWING, not which one has files lying around
+//
+// ⚠ EVERY FIXTURE BELOW IS BUILT TO LOOK INSTALLED FROM A FOLDER LISTING. That is
+// the state a real machine is in: the A320 these cases were modelled on carries
+// `RealWings320/`, `Durantula_ToLiss_Wingflex_V1.3/`, `wingL.obj.durantula.bak`
+// and `a320.acf.durantula.bak`, and is running stock wings. A check that answers
+// from `fs::exists` passes every one of these tests by accident and is wrong about
+// every real aircraft.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One `_obja` row per name, then the count. `count` defaults to "all of them";
+// pass a smaller one to model rows past the end, which X-Plane never reads.
+std::string WingAcf(const std::vector<std::string>& attachments,
+                    int count = -1, int formatVersion = 1200) {
+    std::string t = "I\r\n" + std::to_string(formatVersion) + " Version\r\nACF\r\n";
+    for (std::size_t i = 0; i < attachments.size(); ++i) {
+        const std::string n = std::to_string(i);
+        t += "P _obja/" + n + "/_v10_att_file_stl " + attachments[i] + "\r\n";
+        t += "P _obja/" + n + "/_v10_att_y_acf_prt_ref 0.000000000\r\n";
+    }
+    t += "P _obja/count " +
+         std::to_string(count < 0 ? static_cast<int>(attachments.size()) : count) +
+         "\r\n";
+    return t;
+}
+
+// A wing OBJ with `stock` untouched flex chains and `converted` Durantula ones.
+// ⚠ THE CONVERTED FILE KEEPS `anim/winglex` LINES, and that is not sloppiness in
+// the fixture: a real `wingL.obj` has seven of them and Durantula's manual
+// replaces three, so "contains anim/winglex" is true of both states and can only
+// ever answer the negative case. A fixture that dropped them would let a
+// `stock ? …` test pass against a detector that has it backwards.
+std::string WingObj(int stock, int converted) {
+    std::string t = "I\n800\nOBJ\n\nPOINT_COUNTS\t0\t0\t0\t0\n";
+    for (int i = 0; i < stock; ++i) {
+        t += "\tANIM_rotate_begin\t0\t0\t-1\t";
+        t += wingmod::kStockFlexRef;
+        t += "\n";
+    }
+    for (int i = 0; i < converted; ++i) {
+        t += "\tANIM_rotate_begin\t0\t0\t1\t";
+        t += wingmod::kDurantulaFlexRef;
+        t += "[" + std::to_string(2 + i) + "]\n";
+    }
+    return t;
+}
+
+// A stock A320: `.acf` attaches the aircraft's own wings, both OBJs unmodified.
+void MakeStockWings(const FakeAircraft& fa) {
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"fuselage.obj", "wingL.obj", "wingR.obj", "wings_glass.obj"}));
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+}
+
+bool AnyText(const std::vector<std::string>& v, const std::string& needle) {
+    for (const std::string& s : v) {
+        if (Contains(s, needle)) return true;
+    }
+    return false;
+}
+
+TEST("wingmod: a stock aircraft reads as stock, mod folders and all") {
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+    // Everything a reverted install leaves behind, and none of it means a thing.
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+    Write(fa.objects() / "wingL.obj.durantula.bak", WingObj(7, 3));
+    Write(fa.folder() / "a320.acf.durantula.bak", WingAcf({"wingL.obj"}));
+    Write(fa.folder() / "Durantula_ToLiss_Wingflex_V1.3" / "flaps_new_NEO.obj",
+          WingObj(0, 3));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(r.determined);
+    CHECK_EQ(r.wing, std::string(wingmod::kStock));
+    CHECK(r.Healthy());
+    // The dormant RealWings folder is worth SAYING and must not be a problem.
+    CHECK(AnyText(r.Texts(wingmod::Severity::Note), "no .acf attaches it"));
+}
+
+TEST("wingmod: Durantula is read from the DRIVER in the aircraft's own wing OBJ") {
+    // Its install is a find-and-replace inside `wingL.obj` / `wingR.obj`; the
+    // attachment table is untouched, so nothing about the `.acf` changes at all.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+    Write(fa.objects() / "wingL.obj", WingObj(4, 3));
+    Write(fa.objects() / "wingR.obj", WingObj(4, 3));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kDurantula));
+    CHECK(r.Healthy());
+}
+
+TEST("wingmod: an UNEVEN Durantula paste is a problem, not a verdict") {
+    // Six replacement blocks done by hand, three per wing. Miss one and that wing
+    // keeps ToLiss's own flex while the other uses the mod's — which looks like
+    // nothing on the ground.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+    Write(fa.objects() / "wingL.obj", WingObj(4, 3));
+    Write(fa.objects() / "wingR.obj", WingObj(5, 2));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kDurantula));
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "unevenly"));
+}
+
+TEST("wingmod: a wing left entirely unconverted is a problem") {
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+    Write(fa.objects() / "wingL.obj", WingObj(4, 3));   // done
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));   // never touched
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kDurantula));
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "wingR.obj"));
+}
+
+TEST("wingmod: RealWings is read from the ATTACHMENT TABLE, never from the OBJ") {
+    // It replaces the geometry wholesale: the aircraft's own `wingL.obj` stays on
+    // disk, unmodified and undrawn. Reading it would report stock forever.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"fuselage.obj", "RealWings320/MainNEO.obj",
+                   "RealWings320/GlassNEO.obj"}));
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+    Write(fa.objects() / "RealWings320" / "GlassNEO.obj", "OBJ\n");
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kRealWings));
+    CHECK(r.Healthy());
+}
+
+TEST("wingmod: RealWings BESIDE the stock wings is two sets of wings") {
+    // Step 3 of the mod's own instructions is to clear the stock rows. Skipping it
+    // leaves both drawing in the same place.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"wingL.obj", "wingR.obj", "RealWings320/MainNEO.obj"}));
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kRealWings));
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "both sets of wings"));
+}
+
+TEST("wingmod: a RealWings row PAST _obja/count is attached and never read") {
+    // ⚠ The hardest wing-mod failure to see by eye: every instruction the user
+    // followed IS in the file. X-Plane reads rows 0..count-1 and stops.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"fuselage.obj", "RealWings320/MainNEO.obj"}, /*count=*/1));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "past _obja/count"));
+}
+
+TEST("wingmod: a RealWings object named but not on disk is a problem") {
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"fuselage.obj", "RealWings320/MainNEO.obj"}));
+    // No RealWings320/ folder at all — the Plane Maker edit outlived the files.
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kRealWings));
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "not in objects/"));
+}
+
+TEST("wingmod: the four .acf variants must AGREE") {
+    // ⚠ The most likely RealWings mis-install there is — its instructions are a
+    // Plane Maker session on ONE file, and a ToLiss folder holds four. Photon
+    // installs one `lights_out` for all of them, so this cannot be papered over.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"RealWings320/MainNEO.obj"}));
+    Write(fa.folder() / "a320_StdDef.acf",
+          WingAcf({"wingL.obj", "wingR.obj"}));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(!r.agreed);
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "do not agree"));
+    // A tie answers with the FIRST file in sorted order — the plain `a320.acf`,
+    // which is the one the mod's instructions name and the one people fly.
+    CHECK_EQ(r.wing, std::string(wingmod::kRealWings));
+}
+
+TEST("wingmod: the XP11 variants are not asked, so RealWings does not 'disagree'") {
+    // ⚠ THE BUG THIS FIXES, REPORTED 2026-08-15. RealWings' install is a Plane
+    // Maker session on ONE `.acf`, and a ToLiss folder holds four — so a correct,
+    // fully working RealWings aircraft was reported as "its .acf variants do not
+    // agree", naming a file X-Plane 12 never loads as the dissenter. A Problem the
+    // user cannot act on, on an aeroplane where nothing is wrong.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf", WingAcf({"RealWings320/MainNEO.obj"}, -1, 1200));
+    Write(fa.folder() / "a320_StdDef.acf",
+          WingAcf({"RealWings320/MainNEO.obj"}, -1, 1200));
+    // Stock wings, exactly as RealWings' instructions leave them.
+    Write(fa.folder() / "a320_XP11.acf", WingAcf({"wingL.obj", "wingR.obj"}, -1, 1100));
+    Write(fa.folder() / "a320_XP11_StdDef.acf",
+          WingAcf({"wingL.obj", "wingR.obj"}, -1, 1100));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK_EQ(r.wing, std::string(wingmod::kRealWings));
+    CHECK(r.determined);
+    CHECK(r.agreed);
+    CHECK(r.Healthy());
+    // ⚠ And no file is NAMED either — the "something replaced the wings" Note is
+    // per file, so an unread variant must not leak into the report another way.
+    CHECK(!AnyText(r.Texts(wingmod::Severity::Note), "_XP11"));
+    CHECK(!AnyText(r.Texts(wingmod::Severity::Problem), "_XP11"));
+}
+
+TEST("wingmod: a disagreement inside the XP12 pair is STILL reported") {
+    // ⚠ THE HALF THAT MUST NOT GO WITH IT. `_StdDef` is loaded by X-Plane 12, so
+    // "the main .acf has RealWings and the StdDef one does not" is a real
+    // mis-install with a real consequence — whichever variant you load decides
+    // which wings you get, and one Photon build cannot be right for both.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf", WingAcf({"RealWings320/MainNEO.obj"}, -1, 1200));
+    Write(fa.folder() / "a320_StdDef.acf",
+          WingAcf({"wingL.obj", "wingR.obj"}, -1, 1200));
+    Write(fa.folder() / "a320_XP11.acf", WingAcf({"wingL.obj", "wingR.obj"}, -1, 1100));
+    Write(fa.objects() / "RealWings320" / "MainNEO.obj", "OBJ\n");
+    Write(fa.objects() / "wingL.obj", WingObj(7, 0));
+    Write(fa.objects() / "wingR.obj", WingObj(7, 0));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(!r.agreed);
+    CHECK(!r.Healthy());
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "do not agree"));
+    CHECK(AnyText(r.Texts(wingmod::Severity::Problem), "_StdDef"));
+    // ...and the disagreement names only the files that were read.
+    CHECK(!AnyText(r.Texts(wingmod::Severity::Problem), "_XP11"));
+}
+
+TEST("wingmod: the a339 answers stock without reading anything") {
+    // No wing mod exists for it, so there is no wrong answer to find — and
+    // `RealWingsDir` is empty there, which would otherwise make every predicate
+    // vacuously false and the verdict "undetermined" on the one airframe where
+    // stock is the only possibility there has ever been.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path(), "a339", "ToLissA339_V1p0p4");
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a339");
+    CHECK(r.determined);
+    CHECK_EQ(r.wing, std::string(wingmod::kStock));
+    CHECK(r.Healthy());
+}
+
+TEST("wingmod: no readable .acf is UNDETERMINED, never a guess of stock") {
+    // Reporting stock here would turn "I could not tell" into a claim, and the
+    // install would then warn a Durantula user that they picked wrong.
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(!r.determined);
+    CHECK(r.wing.empty());
+}
+
+TEST("wingmod: wings replaced by something UNRECOGNIZED says so, not 'stock'") {
+    // RealWings under a folder the user renamed, or a mod Photon has never heard
+    // of. Guessing which of the other forty attachments is a wing would be
+    // speculation; "these are not ToLiss's wings" is a fact, and it stops
+    // "undetermined" reading as "nothing to see here".
+    TempDir tmp;
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "a320.acf",
+          WingAcf({"fuselage.obj", "MyWingPack/Main.obj"}));
+
+    const wingmod::Result r = wingmod::Detect(U8(fa.folder()), "a320");
+    CHECK(!r.determined);
+    CHECK(AnyText(r.Texts(wingmod::Severity::Note), "does not recognize"));
+}
+
+TEST("wingmod: a name-alike folder in objects/ is not the mod") {
+    // ⚠ Segment-wise, never `find()`. `RealWings320_old.obj` sitting in objects/
+    // contains the folder name as a substring and is a stock aircraft's OBJ.
+    CHECK(wingmod::IsUnderDir("RealWings320/Main.obj", "RealWings320"));
+    CHECK(wingmod::IsUnderDir("realwings320\\Main.obj", "RealWings320"));
+    CHECK(!wingmod::IsUnderDir("RealWings320_old.obj", "RealWings320"));
+    CHECK(!wingmod::IsUnderDir("objects/RealWings320/Main.obj", "RealWings320"));
+}
+
+TEST("wingmod: the A321's wing OBJs are named differently and still match") {
+    // `wing321L.obj` / `wing321R.obj`, not `wingL.obj` — a hard-coded pair of
+    // names would report every A321 as undetermined.
+    CHECK(wingmod::IsStockWingObj("wingL.obj"));
+    CHECK(wingmod::IsStockWingObj("wing321R.obj"));
+    // Glass is stock wing geometry but carries no flex chain to classify.
+    CHECK(!wingmod::IsStockWingObj("wings_glass.obj"));
+    CHECK(wingmod::IsStockWingGlassObj("wings_glass.obj"));
+    // RealWings' own OBJs must not be mistaken for the aircraft's.
+    CHECK(!wingmod::IsStockWingObj("RealWings320/MainNEO.obj"));
+    CHECK(!wingmod::IsStockWingObj("fuselage.obj"));
+}
+
+TEST("wingmod: install WARNS on a mismatch and installs what was asked anyway") {
+    // ⚠ THE CHECK REPORTS; IT NEVER SUBSTITUTES. Silently installing a different
+    // variant than the one on the screen the user clicked through would be
+    // unexplainable — and wrong exactly when the detection is wrong.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+    Write(fa.objects() / "wingL.obj", WingObj(4, 3));
+    Write(fa.objects() / "wingR.obj", WingObj(4, 3));
+
+    const std::vector<std::string> steps = actions::Install(fa.Opts("stock"), gLog);
+    CHECK(AnyStep(steps, "running Durantula wings"));
+    // …and the stock OBJ is what landed, exactly as asked.
+    CHECK(Contains(Read(fa.objPath()), "payload obj a320 stock"));
+}
+
+TEST("wingmod: a matching wing variant adds no warning to the install") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    MakeStockWings(fa);
+
+    const std::vector<std::string> steps = actions::Install(fa.Opts("stock"), gLog);
+    CHECK(!AnyStep(steps, "but you chose"));
 }
 
 
@@ -1400,6 +1963,24 @@ TEST("progress: no phase enters a step the plan never priced") {
                     actions::Uninstall(o, gLog);
                 }
             }
+        }
+        // ⚠ AND THE UPGRADE BRANCH, which no loop above reaches: the move out of
+        // `objects/` only runs on an aircraft that still has the old folder,
+        // and a step entered on a branch the walk never takes is exactly the dead
+        // spot this hook exists to catch.
+        for (bool dry : {false, true}) {
+            FakeAircraft fa(tmp.path(), "a320",
+                            std::string("ToLiss_legacy_") + (dry ? "dry" : "wet"));
+            actions::Options o = fa.Opts("stock");
+            ProgressLog sink;
+            o.progress = &ProgressLog::Callback;
+            o.progressUserData = &sink;
+            actions::Install(o, gLog);
+            MakeLegacyLayout(fa);
+            o.dryRun = dry;
+            actions::Install(o, gLog);
+            CHECK(sink.SawStep("Backup folder"));
+            CHECK(sink.Last() > 0.999);      // priced AND entered, so it still lands
         }
     }
 

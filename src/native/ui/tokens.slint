@@ -223,6 +223,108 @@ export global Tokens {
     out property <brush> radio-press-checked:
         @linear-gradient(180deg, #0000003e 0%, #00000020 25%, #00000000 50%);
 
+    // ─── the context menu ────────────────────────────────────────────────────
+    // The design's `Radio Button/Context Menu` (`291:562`) and its single row
+    // (`291:553` Default / `291:555` Hover), added 2026-08-14.
+    //
+    // ⚠ OPAQUE SINCE 2026-08-14, AND THE BACKDROP BLUR IS GONE WITH IT. The panel
+    // was `rgba(13,21,28,.82)` over a `backdrop-blur(3.55px)` that Slint has no way
+    // to draw on any renderer; the design has since replaced both with a flat fill,
+    // so the one effect this component could not reproduce is no longer asked for.
+    //
+    // ⚠ THE HEX IS `bar-bg`'s AND IS DELIBERATELY NOT AN ALIAS OF IT — that one is
+    // the bottom bar, a fixed piece of the frame; this is a floating surface. Same
+    // duplication-on-purpose rule as `scroll-thumb-active`, for the same reason:
+    // retuning the bar must not silently drag every menu in the app with it.
+    out property <color> menu-bg: #2b333a;
+    out property <color> menu-border: #000000;
+    out property <length> menu-border-w: 1px;
+
+    // ⚠ EXACT, NOT AN APPROXIMATION — the same case as `check-lip-*`. An inset
+    // shadow of ZERO BLUR and a spread is precisely a band just inside the border
+    // box: a border, drawn as one. It needs its own Rectangle only because a Slint
+    // Rectangle carries ONE border and the 1 px black one above is already spent.
+    //
+    // ⚠ 1 px, WHERE FIGMA SAYS 2, AND THAT IS A DELIBERATE DEVIATION (2026-08-14).
+    // A 2 px white keyline means FOCUS in this UI and nothing else — see
+    // `focus-ring-w` below, and the note there about why a decoration that is
+    // always on cannot also be a state. The menu wearing one permanently would
+    // spend that signal on a panel that is never focused, and would leave the
+    // three button styles' Focus variant looking like a menu border. At 1 px the
+    // edge highlight still reads and cannot be confused with the ring.
+    out property <color> menu-ring: #ffffff12;        // 7%
+    out property <length> menu-ring-w: 1px;
+
+    // `2px 2px 4px rgba(0,0,0,.25)`. ⚠ A box-shadow, so its 4 is a RADIUS and
+    // goes into `drop-shadow-blur` unchanged — this is not the filter-versus-
+    // box-shadow sigma trap `lift-strong` and `card-lift` carry, and doubling it
+    // "to match those" would be wrong.
+    out property <color> menu-shadow: #00000040;      // 25%
+    out property <length> menu-shadow-x: 2px;
+    out property <length> menu-shadow-y: 2px;
+    out property <length> menu-shadow-blur: 4px;
+
+    // The row. ⚠ THE DESIGN'S 200 px IS A MOCKUP WIDTH, NOT A RULE — its two
+    // sample rows say "Normal option" and "Hovered option", which is a drawing of
+    // the look and not a measurement of anything that ships. The menu now grows to
+    // its longest label and 128 px is only a floor, so a one-word menu is not a
+    // sliver and a three-row one does not step in width between rows.
+    out property <length> menu-item-min-w: 128px;
+    out property <length> menu-item-h: 24px;
+    out property <length> menu-item-pad-x: 8px;
+    out property <length> menu-pad: 2px;
+    out property <length> menu-gap: 2px;
+
+    // ─── the progress bar ────────────────────────────────────────────────────
+    // TWO states since 2026-08-14 (`302:609`): a run in progress or finished, and
+    // a run that FAILED, which takes the same red a broken install's badge carries.
+    //
+    // ⚠ THE RUNNING FILL IS THE ACCENT, AND THE GREEN IT WORE FOR ONE AFTERNOON IS
+    // WITHDRAWN. Green looks like a verdict, and this bar spends almost all of its
+    // life at 3% — a green sliver reporting a run that has barely started reads as
+    // a claim it has gone well, when what the bar measures is only how far it got.
+    // The accent is the neutral statement, and the red state is the only verdict
+    // the bar makes.
+    //
+    // ⚠ THE INK IS WHITE ON BOTH, and this is the pairing the file already uses
+    // rather than a new one: `badge-ink-dark` exists for the GREEN badge alone
+    // (`AircraftCard`, kind 2) precisely because that fill is too light for white,
+    // and every other badge — the red one included — is white ink. It was briefly
+    // dark on both here, which is what made the green wrong twice over.
+    out property <color> progress-fill: #509ac8;          // = accent
+    out property <color> progress-fill-failed: #f26951;   // = status-broken
+    out property <color> progress-ink: #ffffff;           // = text
+    out property <length> progress-h: 26px;
+    out property <length> progress-inset: 2px;
+
+    // ─── the installer log ───────────────────────────────────────────────────
+    // ⚠ ROBOTO MONO, AND THE MARKER IS A PICTURE, NOT A CHARACTER (2026-08-14).
+    // The design writes the log as `✓ Copying XPL to ...` — and NEITHER Roboto nor
+    // Roboto Mono contains U+2713 (checked against both files' cmap tables; U+2192
+    // `→` is missing too). What has been shipping is therefore a SYSTEM FALLBACK
+    // font for that one character, which is the exact failure mode the fonts are
+    // embedded to avoid — and on a machine with no fallback covering it, a box.
+    // The two glyph SVGs the Complete screen uses are drawn here instead: the same
+    // two shapes mean the same two things in both places, they carry their own
+    // fills, and an SVG cannot go missing.
+    //
+    // The gutter is four monospace columns at 12 px (advance ~7.2 px), which is
+    // what the design's ` ✓  ` prefix measures.
+    out property <length> log-gutter: 28px;
+    out property <length> log-glyph: 12px;
+    out property <length> log-line-gap: 2px;
+    // A line that reported something is red END TO END, not just its marker — it
+    // has to be findable while scrolling past, which a 12 px glyph is not.
+    out property <color> log-ink: #ffffff;
+    out property <color> log-ink-bad: #f26951;        // = status-broken
+
+    // The rule above the log's problem summary (2026-08-14). ⚠ THE PADDING IS THE
+    // POINT, not the line: the summary repeats lines that are already in the log
+    // above it, so what has to read at a glance is that a SECTION has started. A
+    // hairline in the 2 px line gap would read as one more log row. It is `muted`
+    // rather than a new gray — the same hairline the Review attributes use.
+    out property <length> log-section-pad: 16px;
+
     // ─── focus ───────────────────────────────────────────────────────────────
     // ⚠ THE WHITE 2 px KEYLINE NOW MEANS FOCUS, AND ONLY FOCUS (2026-08-12). It
     // used to be Primary's permanent identity — Primary Default carried it and
@@ -236,6 +338,13 @@ export global Tokens {
     // moves selection with the arrow keys rather than moving a separate cursor —
     // focus and selection are the same row there, so the border never has to say
     // two things at once. See screens/aircraft.slint.
+    // ⚠ THE CONTEXT MENU IS EXEMPT FROM ALL OF THIS, deliberately (2026-08-14).
+    // It draws no focus ring of any kind, and its own edge highlight is kept to
+    // 1 px so it cannot be read as one (`menu-ring-w` above). A menu is modal for
+    // as long as it is open — there is nothing else on screen that could hold the
+    // keyboard — so a ring saying "this has focus" would be a true statement that
+    // tells the reader nothing. What the keyboard is actually ON is the
+    // highlighted ROW, and that is shown by the row's own accent fill.
     out property <length> focus-ring-w: 2px;
     // The ring drawn around controls the design has no Focus variant for — the
     // feature checkboxes and the wing radios. OUTSET rather than a border on the
@@ -321,4 +430,10 @@ export global Tokens {
     out property <length> radius: 4px;
     out property <length> radius-small: 2px;
     out property <length> radius-panel: 6px;
+    // The context menu's panel and its hovered row. ⚠ The row's 5 px is not a
+    // rounding of anything above it — Figma states 8 and 5, and a menu whose rows
+    // took `radius` would show a 1 px sliver of panel at each corner of the
+    // highlight, since the row sits only 2 px inside the panel.
+    out property <length> radius-menu: 8px;
+    out property <length> radius-menu-item: 5px;
 }

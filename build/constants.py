@@ -96,15 +96,18 @@ SCREENS_AIRFRAMES = ("a319", "a320", "a321", "a339")
 #
 # ⚠ The A330-900 has NO `lights_inn.obj`; its analogue is `CockpitLighting_XP12.obj`,
 # which shares a frame with its `cockpit_INN` and carries the same `_obj_flags 5`
-# the A3xx template does. BOTH of its spellings are listed — the XP11 pair of `.acf`
-# files calls it `CockpitLighting.obj` — because the patcher runs on all four and
-# omitting one leaves refusal lines on an airframe where nothing is wrong.
+# the A3xx template does.
+#
+# ⚠ Its bare XP11 spelling `CockpitLighting.obj` was a third entry and is GONE
+# (2026-08-15). It existed only so the attach would not refuse on the two `.acf`
+# variants X-Plane 12 never loads, and attaching is now scoped to the XP12 pair
+# (`acf::Variants` in core/acf.h). If a future ToLiss XP12 `.acf` drops the suffix,
+# add the bare spelling back here — do not widen the scope.
 # Mirrors ScreensFrameTemplates() in core/constants.cpp; tests/test_version.py pins
 # the two together.
 SCREENS_FRAME_TEMPLATES = (
     "lights_inn.obj",
     "CockpitLighting_XP12.obj",
-    "CockpitLighting.obj",
 )
 
 # ─── the plugin folder ────────────────────────────────────────────────────────

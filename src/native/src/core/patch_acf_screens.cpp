@@ -236,14 +236,20 @@ std::string UnpatchText(const std::string& text, int& changed) {
     return out;
 }
 
-std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8) {
-    return acf::AcfFilesContaining(aircraftDirUtf8, kCountProp);
+std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8,
+                                  acf::Variants which) {
+    return acf::AcfFilesContaining(aircraftDirUtf8, kCountProp, which);
 }
 
 RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
               const progress::StepProgress& onProgress) {
     RunResult result;
-    const std::vector<std::string> files = AcfFiles(aircraftDirUtf8);
+    // ⚠ THE SCOPE FOLLOWS THE DIRECTION — see `acf::Variants`. Detaching must
+    // reach the XP11 pair because Photon ≤ 0.8.4 attached our row there, and the
+    // OBJ that row names is deleted by the same uninstall.
+    const std::vector<std::string> files =
+        AcfFiles(aircraftDirUtf8, reverse ? acf::Variants::Every
+                                          : acf::Variants::Xp12);
     if (files.empty()) {
         result.log.push_back("  ! no .acf with an attachment table under " +
                              aircraftDirUtf8);
@@ -288,6 +294,9 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
             }
         }
         result.touched.push_back(pathUtf8);
+        // ⚠ FROM `changed`, NOT FROM `out != text` — a dry run must report what it
+        // WOULD change rather than nothing at all.
+        if (changed > 0) result.changed.push_back(pathUtf8);
     }
     if (onProgress) onProgress(1.0);
     return result;

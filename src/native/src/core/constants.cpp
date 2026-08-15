@@ -79,12 +79,6 @@ const std::vector<std::string>& InteriorLiveryExts() {
     return kExts;
 }
 
-const std::vector<std::string>& AcfSuffixes() {
-    static const std::vector<std::string> kSuffixes = {
-        "", "_StdDef", "_XP11", "_XP11_StdDef"};
-    return kSuffixes;
-}
-
 const std::vector<std::string>& ScreensAirframes() {
     // ⚠ A339 IS IN (2026-08-11), unlike the interior. The two were excluded
     // together and for a stated reason — "a different cockpit model, so these six
@@ -116,25 +110,24 @@ const std::vector<std::string>& ScreensFrameTemplates() {
     // decides, not the airframe key — the same rule detection already follows,
     // and it means a file carrying both would take the A3xx frame, correctly.
     //
-    // ⚠ BOTH A330-900 SPELLINGS, and the XP11 one is not an oversight to remove.
-    // A ToLiss folder holds four `.acf` variants and the patcher runs on all of
-    // them; on the A3xx every one attaches `lights_inn.obj`, so all four get our
-    // row. The A330-900 names its cockpit lighting `CockpitLighting_XP12.obj` in
-    // the XP12 pair and `CockpitLighting.obj` in the XP11 pair — so listing only
-    // the first leaves two REFUSAL lines in the installer's output on an airframe
-    // where nothing is actually wrong, which reads as a broken install and is the
-    // kind of asymmetry that costs somebody an afternoon.
+    // ⚠ THE A330-900's XP11 SPELLING WAS HERE AND IS GONE (2026-08-15). That
+    // airframe names its cockpit lighting `CockpitLighting_XP12.obj` in the XP12
+    // pair and plain `CockpitLighting.obj` in the XP11 pair — verified on disk, the
+    // two spellings do not co-occur in one file — so the second entry existed
+    // purely to stop the attach REFUSING on the two variants Photon no longer
+    // writes to. Attaching is now scoped to the XP12 pair (`acf::Variants`), so it
+    // is unreachable. ⚠ If a future ToLiss XP12 `.acf` drops the suffix, the fix is
+    // to add the bare spelling back HERE — not to widen the scope.
     //
-    // The two rows carry the same origin and a DIFFERENT FIELD SET (XP11 has
-    // `_v10_att_part` where XP12 has body/gear/wing, and renders floats `0.0`
-    // against `0.000000000`) — which is precisely why the row is copied verbatim
-    // per file instead of being written from constants.
+    // The rows carry a DIFFERENT FIELD SET per era (XP11 has `_v10_att_part` where
+    // XP12 has body/gear/wing, and renders floats `0.0` against `0.000000000`),
+    // which is why the row is copied verbatim from the file being patched rather
+    // than written from constants.
     //
     // Mirrored by SCREENS_FRAME_TEMPLATES in build/constants.py.
     static const std::vector<std::string> kTemplates = {
-        "lights_inn.obj",              // A319 / A320 / A321, all four .acf
-        "CockpitLighting_XP12.obj",    // A330-900, the XP12 pair
-        "CockpitLighting.obj",         // A330-900, the XP11 pair
+        "lights_inn.obj",              // A319 / A320 / A321
+        "CockpitLighting_XP12.obj",    // A330-900
     };
     return kTemplates;
 }

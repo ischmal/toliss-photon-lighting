@@ -120,6 +120,25 @@ static const char* kIsLedDataref   = "ToLissPhoton/exterior/is_led";        // d
 static const char* kBeaconAlwaysOn = "ToLissPhoton/debug/beacon_always_on"; // hidden screenshot flag
 static const char* kStrobeAlwaysOn = "ToLissPhoton/debug/strobe_always_on"; // hidden screenshot flag
 
+// ─── the waveform override switch ────────────────────────────────────────────
+// Whether Photon reshapes the beacon/strobe FLASH TIMING at all. On is what the
+// add-on has always done; off leaves ToLiss's own strike-and-decay exactly as it
+// is, and the exterior COLORS still apply — those are the OBJ's business and the
+// timing is the flight loop's, which is the whole reason this can be split.
+//
+// It exists because the two halves are separable and a user may want only one of
+// them: "make my strobes LED-colored but stop touching how they flash" had no
+// answer short of uninstalling.
+//
+// ⚠ NOT a per-livery choice, for the same reason `optimized` is not: it answers
+// "how much may this plugin change?", which is a statement about the user rather
+// than about the paint scheme. It lives in the prefs file's global block
+// (kExteriorKey), beside the Displays and Cockpit ones.
+struct ExteriorSettings {
+    bool waveform = true;
+};
+static ExteriorSettings gExterior;
+
 // ------------------------------- interior ------------------------------------
 // The cockpit ("Gus Mod") lights — a SEPARATE axis: own categories, own profile
 // enum, own persisted keys. TERNARY (0 old halogen / 1 new halogen / 2 LED),
@@ -450,7 +469,13 @@ static float ClampGain(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v)
 // installed. One definition removes the class.
 static const char*  kInteriorObjName     = photon::kInteriorObj;
 static const char*  kInteriorObjNeedle   = photon::kInteriorObjNeedle;
-static const size_t kInteriorObjMaxBytes = 4u * 1024u * 1024u;   // sanity cap
+// The other half of the same question, asked of the EXTERIOR OBJ: is Photon still
+// installed on this aircraft at all? See core/constants.h — the exterior OBJ is
+// the file every install patches and every ToLiss update reverts.
+static const char*  kExteriorObjNeedle   = photon::kExteriorObjNeedle;
+// Sanity cap for the whole-file scans below. The largest OBJ either scan opens is
+// ~35 KB; this only guards against being pointed at something absurd.
+static const size_t kObjScanMaxBytes     = 4u * 1024u * 1024u;
 
 // profiles
 enum { PROFILE_AUTO = 0, PROFILE_CLASSIC = 1, PROFILE_HYBRID = 2,
@@ -1218,12 +1243,59 @@ static std::map<std::string, Entry> gProfiles;   // liveryKey -> entry
 // over every aircraft in the sim (fixed 2026-08-11).
 static bool gIsToLiss = false;
 
+// ⚠ IS THE INSTALL ON THIS AIRCRAFT STILL THERE — the second half of the same
+// question, and the second flag every per-frame path has to ask. True when the
+// aircraft IS one of ours and its exterior OBJ no longer binds a single Photon
+// dataref (DetectInstall), i.e. a ToLiss update or a reinstall put the stock
+// files back and took every OBJ we shipped with them.
+//
+// ⚠ THE RESPONSE IS TO DO NOTHING AT ALL, not to keep doing the half that still
+// works. The waveform engine and the panel-FX compositor drive ToLiss's own
+// datarefs and would go on working perfectly — but a user who has just
+// reinstalled their aircraft has either done it to troubleshoot something or to
+// get rid of every modification, and in both cases an add-on still quietly
+// reshaping their strobes and tinting their PFDs is the wrong answer. It is also
+// the only state in which the add-on cannot explain itself from the menu it
+// normally builds, which is what the "Reinstall required..." row is for.
+//
+// Read through PhotonRuns(), never on its own — see there.
+static bool gInstallStale = false;
+
+// Which supported airframe is loaded ("a319".."a339"), or empty for a ToLiss we
+// do not have a row for. Identified from the exterior OBJ's filename in the same
+// pass that reads it, so it costs nothing extra. Used for the airframe's name on
+// the Error tab and to answer the question below.
+static std::string gAirframeKey;
+
 // Whether THIS aircraft carries the cockpit mod (see kInteriorObjNeedle).
 // Re-detected on every aircraft load; false for any non-ToLiss.
 static bool gInteriorInstalled = false;
 
+// Whether the cockpit mod EXISTS for this airframe — Gus's mod covers the A3xx
+// three and not the A330-900 (photon::AirframeHasInterior). The distinction the
+// flag above cannot make on its own: "not installed" is an opt-in the user can
+// still take, and "not available" is not, so only the first gets a Cockpit tab
+// saying how.
+static bool gInteriorSupported = false;
+
+// ⚠ MAY PHOTON TOUCH THIS AIRCRAFT? The one question every per-frame entry point
+// asks, and it is a function rather than a test spelled out at each site because
+// it is now TWO flags and a site that asks only one of them fails silently in
+// whichever direction it forgot. That is not hypothetical: the panel-FX
+// compositor asked NEITHER and painted A3xx tints over every cockpit in the sim
+// (2026-08-11), and `gInstallStale` has just added a second half to forget.
+//
+// `tests/test_aircraft_gate.py` lists every caller — a new flight loop or draw
+// callback needs a line in it.
+static bool PhotonRuns() { return gIsToLiss && !gInstallStale; }
+
 // menu
 static bool       gMenuCreated = false;
+// Whether the menu was built in its STALE shape (one "Reinstall required..." row
+// and About) rather than its ordinary one. Compared on every aircraft load for
+// the same reason gMenuHasInterior is: the shape is decided at build time, so
+// crossing this line between two aircraft has to rebuild.
+static bool       gMenuStale = false;
 // What gInteriorInstalled was when the menu was BUILT. The Cockpit submenu is
 // decided at build time, so switching between two ToLiss aircraft that disagree
 // about the cockpit mod has to rebuild — see UpdateMenuVisibility.
@@ -1266,6 +1338,12 @@ static float       gGlow[kGlowArraySize] = {0};   // backing store the OBJ reads
 static GlowMap     gGlowMap = { {kGlowNone,kGlowNone,kGlowNone,kGlowNone},
                                 {kGlowNone,kGlowNone,kGlowNone,kGlowNone} };
 static bool        gGlowMapActive = false;
+// ToLiss's OWN glow array — the one the install redirects those OBJ regions AWAY
+// from. Read for exactly one purpose: to feed them again while the waveform
+// override is off, so switching it off does not black out the painted skin glow.
+// See MirrorToLissGlow. ⚠ A ToLiss handle, so it is rebound per aircraft load and
+// retried at 1 Hz like every other one.
+static XPLMDataRef gToLissGlowRef = nullptr;
 
 // forward decls
 static void UpdateChecks();
@@ -1296,8 +1374,19 @@ static float ReadIntOptimizedFloat(void*) { return gCockpit.optimized ? 1.0f : 0
 // DisplayFeatureOn like every other consumer of that switch.
 //
 // Inverted, because the dataref is named for the OFF state (kScreensDisabledRef).
-static int   ReadScreensDisabledInt(void*)   { return DisplayFeatureOn(gDisplays.spill) ? 0 : 1; }
-static float ReadScreensDisabledFloat(void*) { return DisplayFeatureOn(gDisplays.spill) ? 0.0f : 1.0f; }
+//
+// ⚠ gInstallStale FIRST, and not folded into PhotonRuns(): this is not a
+// per-frame path but a dataref an OBJ reads, and the OBJ in question is one we
+// installed. A stale install normally takes lights_screens.obj with it, but the
+// `.acf` attachment and the OBJ are two separate edits and only one of them has
+// to survive for six of our spill lights to still be drawing on an aircraft we
+// have decided to leave alone.
+static int ReadScreensDisabledInt(void*) {
+    return !gInstallStale && DisplayFeatureOn(gDisplays.spill) ? 0 : 1;
+}
+static float ReadScreensDisabledFloat(void*) {
+    return !gInstallStale && DisplayFeatureOn(gDisplays.spill) ? 0.0f : 1.0f;
+}
 
 // The map spot's 9-float custom-light dataref.
 //
@@ -1477,6 +1566,16 @@ static void ResolveGlowMap() {
     } else {
         for (float& g : gGlow) g = 0.0f;
     }
+}
+
+// ToLiss's own ExternalLightBrightnesses, the pass-through source for
+// MirrorToLissGlow. ⚠ A ToLiss dataref, so it is bound from the aircraft-load
+// path AND retried on the 1 Hz loop: ToLiss's plugin starts after our
+// aircraft-loaded hook and loses that race on a stock install every time, so a
+// handle resolved only here would stay null for the whole session. That has been
+// learned three times in this file (see AutoLoop) and this is the fourth handle.
+static void ResolveToLissGlow() {
+    gToLissGlowRef = XPLMFindDataRef(photon::kGlowOldDataRef);
 }
 
 // Read any numeric dataref as a double, regardless of how it is typed. Per
@@ -1901,6 +2000,18 @@ static void CockpitFromJson(const json::Value& v) {
     if (p && p->type == json::Value::Int) gCockpit.optimized = p->i != 0;
 }
 
+// The third global block: the waveform override (see ExteriorSettings). Its own
+// key rather than a field of one of the two above, for the same reason those two
+// are separate from each other — a reader looking for a switch should find it
+// under the axis it belongs to, not have to know which block it ended up in.
+static const char* kExteriorKey = "$exterior";
+
+static void ExteriorFromJson(const json::Value& v) {
+    if (v.type != json::Value::Obj) return;
+    const json::Value* p = v.find("waveform");
+    if (p && p->type == json::Value::Int) gExterior.waveform = p->i != 0;
+}
+
 static void LoadProfilesFile() {
     gProfiles.clear();
     std::ifstream f(ProfilesFilePath(), std::ios::binary);
@@ -1912,6 +2023,7 @@ static void LoadProfilesFile() {
     for (const auto& kv : root.obj) {
         if (kv.first == kDisplaysKey) { DisplaysFromJson(kv.second); continue; }
         if (kv.first == kCockpitKey)  { CockpitFromJson(kv.second);  continue; }
+        if (kv.first == kExteriorKey) { ExteriorFromJson(kv.second); continue; }
         Entry e;
         if (EntryFromJson(kv.second, e)) gProfiles[kv.first] = e;
     }
@@ -1952,6 +2064,15 @@ static void SaveProfilesFile() {
             char buf[96];
             std::snprintf(buf, sizeof(buf), ",\n  \"%s\": {\"optimized\": %d}",
                           kCockpitKey, gCockpit.optimized ? 1 : 0);
+            f << buf;
+        }
+        // And the third. Always written, same argument again: "absent means
+        // default" reads an old prefs file correctly, but it cannot express a
+        // switch the user has deliberately turned off.
+        {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), ",\n  \"%s\": {\"waveform\": %d}",
+                          kExteriorKey, gExterior.waveform ? 1 : 0);
             f << buf;
         }
         for (const auto& kv : gProfiles) {
@@ -2104,6 +2225,18 @@ static void SetCockpitOptimized(bool on) {
     UpdateChecks();
     Log(std::string("cockpit lights: ")
         + (on ? "optimized (one light per position)" : "full stack"));
+}
+
+// The waveform override, same shape as the two above: one flag, no per-livery
+// half, every writer through here. Nothing else to do — EngineLoop reads the
+// field each frame, and stopping our write is all it takes for ToLiss's own
+// per-frame write to be the last one in.
+static void SetWaveformOverride(bool on) {
+    if (gExterior.waveform == on) return;
+    gExterior.waveform = on;
+    SaveProfilesFile();
+    Log(std::string("beacon/strobe flash timing: ")
+        + (on ? "shaped by Photon" : "left to ToLiss (override off)"));
 }
 
 // Defined with the menu, below — the config windows drive profile selection
@@ -2312,17 +2445,32 @@ static void UiItemTooltip(const char* fmt, ...) {
 //
 // The tabs are not symmetrical, deliberately:
 //
+//   * Error REPLACES the three axis tabs when the install on this aircraft has
+//     been reverted (gInstallStale). Not shown beside them and not a grayed
+//     version of them: a stale install is not a setting anyone can adjust their
+//     way out of, and a page of dead controls next to the explanation invites
+//     trying them.
 //   * Exterior and Cockpit are PROFILE axes — a dropdown plus a grid of
 //     per-category overrides. They share one implementation (ConfigAxis) so the
 //     two cannot drift apart.
 //   * Displays is not a profile axis at all: one look per effect, so it is
 //     switches and strengths. See DisplaySettings.
-//   * About is static text.
+//   * About is static text, and is the one tab that is always there.
 //
-// ⚠ The COCKPIT TAB APPEARS ONLY WHERE THE COCKPIT MOD DOES, on exactly the same
-// gInteriorInstalled test that decides the submenu. A tab that is present but
-// inert reads as "the mod is broken"; an absent one reads as "not installed",
-// which is the truth.
+// ⚠ THE COCKPIT TAB HAS THREE STATES, not two (2026-08-14). It used to appear
+// only where the cockpit mod did, on the same gInteriorInstalled test as the
+// submenu, on the reading that a present-but-inert tab says "the mod is broken"
+// while an absent one says "not installed". That is true as far as it goes, but
+// an absent tab says nothing about how to CHANGE the answer — and the cockpit
+// mod is an opt-in on a screen the user has already clicked past once. So:
+//
+//   installed                       -> the tab, live
+//   available but not installed     -> the tab, every control disabled, with the
+//                                      reason and the fix stated at the top
+//   not available for this airframe -> no tab (gInteriorSupported; the A330-900,
+//                                      which Gus's mod does not cover)
+//
+// See CockpitTabVisible and BuildConfigTab's `inert`.
 //
 // Buttons sit in a TABLE — one column per look, measured by ImGui — and a row
 // may carry fewer buttons than there are columns, in which case its first button
@@ -2332,13 +2480,20 @@ static const int kMaxCols = 3;
 static const int kMaxBtns = kMaxCols;   // a row can never have more buttons than columns
 
 // Which tab the window opens on. The menu's "Custom..." / "Displays..." /
-// "About..." items all open the SAME window, so each has to be able to say where.
+// "Reinstall required..." / "About..." items all open the SAME window, so each
+// has to be able to say where.
+//
+// ⚠ THE ORDER IS THE ORDER THE TABS ARE SUBMITTED IN, and that is wire rather
+// than taste: gWantTab is turned into ImGuiTabItemFlags_SetSelected by the
+// BeginTabItem that matches, so an enum whose order disagrees with BuildMainUi's
+// would still compile and still open a window — just not always on the tab the
+// menu item named. kTabError leads because the Error tab does.
 //
 // The performance tool is NOT in here: it is its own floating window, opened
 // from a button at the bottom of the Displays tab. A measurement wants the
 // cockpit visible and the window out of the way, which a tab in the settings
 // window cannot be.
-enum { kTabExterior = 0, kTabCockpit, kTabDisplays, kTabAbout, kTabCount };
+enum { kTabError = 0, kTabExterior, kTabCockpit, kTabDisplays, kTabAbout, kTabCount };
 // -1 = "leave whichever tab is showing alone", which is what an already-open
 // window gets when the user clicks the menu item for the tab they are on.
 static int gWantTab = -1;
@@ -2482,17 +2637,46 @@ static void BuildCockpitPerformance() {
     ImGui::PopID();
 }
 
-static void BuildConfigTab(const ConfigAxis& w) {
+// The Exterior tab's one non-color control, and the only place in the plugin
+// where a user can tell Photon to leave something alone.
+//
+// COLLAPSED by default and under its own header: every other control on this tab
+// answers "what should this light look like?", and this one answers "how much of
+// this aeroplane may the plugin drive?". Open by default it would be the first
+// thing read on a tab whose subject is the first question.
+//
+// Scoped like every other helper called from more than one pane — the shipping
+// window and the Dev window's Exterior tab both build this.
+static void BuildExteriorAdvanced() {
+    ImGui::PushID("exterior-advanced");
     ImGui::Spacing();
-    BuildProfileCombo(w);
-    ImGui::Spacing();
-    // No hint under this heading. "Changing any row below switches this axis to
-    // Custom" described the mechanism rather than the choice, and the combo
-    // already shows it happening — it flips to Custom with "(from the rows
-    // below)" beside it the moment a row is touched.
-    ImGui::SeparatorText("Configure");
-    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Advanced")) {
+        ImGui::Spacing();
+        bool on = gExterior.waveform;
+        if (ImGui::Checkbox("Allow plugin to override beacon/strobe flash timing", &on))
+            SetWaveformOverride(on);
+        UiItemTooltip(
+            "On, Photon reshapes the beacon and strobe flashes to suit the "
+            "fitting: a crisp square pulse for LED, a strike-and-decay for "
+            "xenon. Off, ToLiss's own flash timing is left exactly as it is.\n"
+            "The light colors chosen above still apply either way - the colors "
+            "come from the aircraft's objects and the timing from this plugin.");
+    }
+    ImGui::PopID();
+}
 
+// The grid of per-category looks — the body of both axis tabs.
+//
+// ⚠ SPLIT OUT OF BuildConfigTab so its early return on a failed BeginTable stays
+// an early return. The tab around it now owes an EndDisabled (see `inert`
+// there), and a return between BeginDisabled and EndDisabled leaves ImGui's
+// disabled stack unbalanced for every window drawn afterwards — a whole-UI
+// failure reported from somewhere else entirely.
+//
+// `inert` is passed rather than re-derived: it also decides whether a row's
+// label may light under the mouse, and one caller with two answers to the same
+// question is how the two come apart.
+static void BuildCategoryGrid(const ConfigAxis& w, bool inert) {
     const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchSame
                                 | ImGuiTableFlags_RowBg
                                 | ImGuiTableFlags_BordersInnerV;
@@ -2525,8 +2709,14 @@ static void BuildConfigTab(const ConfigAxis& w) {
             // Hover lights a label as well, so a dimmed option answers "is this
             // clickable?" the moment the mouse is on it. See UiRadioHovered for
             // why that takes a predicted rect and not IsItemHovered.
+            //
+            // ⚠ No hover-lighting on an inert tab. UiRadioHovered answers from a
+            // predicted RECT, not from IsItemHovered, so ImGui's disabled state
+            // does not suppress it — and a control that lights up under the
+            // mouse and then refuses the click is a worse answer than one that
+            // stays gray.
             const bool on  = cur == btn[i].value;
-            const bool lit = on || UiRadioHovered(btn[i].label);
+            const bool lit = on || (!inert && UiRadioHovered(btn[i].label));
             if (!lit)
                 ImGui::PushStyleColor(ImGuiCol_Text,
                                       ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
@@ -2542,13 +2732,47 @@ static void BuildConfigTab(const ConfigAxis& w) {
         ImGui::PopID();
     }
     ImGui::EndTable();
+}
 
-    // The light-COUNT switch, on the Cockpit tab only. It sits under its own
-    // heading rather than as a sixth row of the grid above, because it is not a
-    // look: every row up there answers "which era?", and this one answers "how
-    // many lights may that cost?". Put in the grid it would read as a profile
-    // the user had never heard of.
+static void BuildConfigTab(const ConfigAxis& w) {
+    // ⚠ THE COCKPIT TAB IS ALSO BUILT WHERE THE MOD IS NOT INSTALLED — see the
+    // block comment above the tab enum. Everything below is then submitted
+    // disabled, under a line saying why and what to do about it. The exterior
+    // never takes this branch: it is the base install, and an aircraft without it
+    // has no tabs at all (gInstallStale).
+    const bool inert = w.interior && !gInteriorInstalled;
+    if (inert) {
+        ImGui::Spacing();
+        UiHint("Modified cockpit lighting is not installed on this aircraft. You "
+               "can enable it by running the installer again and checking the "
+               "option \"Cockpit Lighting by Gus Rodrigues\".");
+        ImGui::Spacing();
+        ImGui::Separator();
+    }
+    ImGui::BeginDisabled(inert);
+
+    ImGui::Spacing();
+    BuildProfileCombo(w);
+    ImGui::Spacing();
+    // No hint under this heading. "Changing any row below switches this axis to
+    // Custom" described the mechanism rather than the choice, and the combo
+    // already shows it happening — it flips to Custom with "(from the rows
+    // below)" beside it the moment a row is touched.
+    ImGui::SeparatorText("Configure");
+    ImGui::Spacing();
+    BuildCategoryGrid(w, inert);
+
+    // One extra section per axis, each under its own heading rather than as a
+    // sixth/tenth row of the grid above — every row up there answers "which
+    // era?", and neither of these does. In the grid they would read as profiles
+    // nobody had heard of.
+    //
+    //   Cockpit  — the light COUNT: "how many lights may that look cost?"
+    //   Exterior — the waveform override: "may the plugin reshape the flash?"
     if (w.interior) BuildCockpitPerformance();
+    else            BuildExteriorAdvanced();
+
+    ImGui::EndDisabled();
 }
 
 // ---- the Displays tab -------------------------------------------------------
@@ -2753,6 +2977,71 @@ static void BuildAboutTab() {
     UiHint("Not affiliated with or endorsed by ToLiss.");
 }
 
+// ================================ Error tab ==================================
+// The whole of the user interface while gInstallStale — see there for what that
+// state is and why the answer to it is to stop rather than to carry on with the
+// half that still works. This tab is the only thing that tells the user any of
+// that happened, so it has to say all three of: what the plugin did, what to do
+// about it, and how to stop being asked.
+//
+// ⚠ The folder path is built from photon::kPluginFolder rather than typed out,
+// because it is an instruction to delete something and it must name the folder
+// the installer actually writes. The separator is the HOST's: this string is read
+// off the screen and typed into a file manager.
+static std::string PluginFolderHint() {
+#if defined(_WIN32)
+    return std::string("Resources\\plugins\\") + photon::kPluginFolder;
+#else
+    return std::string("Resources/plugins/") + photon::kPluginFolder;
+#endif
+}
+
+// Wrapped body text at the window's own width. UiHint does this too, but grays
+// the text — which is right for an aside under a control and wrong for the only
+// thing on the page.
+static void UiParagraph(const char* text) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+}
+
+static void BuildErrorTab() {
+    ImGui::Spacing();
+    UiParagraph("ToLiss Photon has been disabled due to an aircraft update or a "
+                "reinstall.");
+    ImGui::Spacing();
+    // NAMED when we know which airframe it is. "Run the installer again" is a
+    // different errand per aircraft and a user may well have all three, so the
+    // one fact this screen can supply for free is which one needs it. The
+    // unnamed form is unreachable today — gInstallStale is only ever set for a
+    // recognized airframe — and is here so that stays a property of DetectInstall
+    // rather than an assumption baked into the wording.
+    const photon::Airframe* af = photon::AirframeByKey(gAirframeKey);
+    ImGui::PushTextWrapPos(0.0f);
+    if (af) ImGui::Text("Please run the installer for your %s again.", af->prettyName);
+    else    ImGui::TextUnformatted("Please run the installer for this aircraft again.");
+    ImGui::PopTextWrapPos();
+
+    ImGui::Spacing();
+    // Same width as the About tab's link buttons, and for the same reason: this
+    // window is narrow enough to sit beside a cockpit view and a button sized to
+    // its label sets a minimum width of its own.
+    if (ImGui::Button("Get latest version here...", ImVec2(280.0f, 0.0f)))
+        OpenUrl(kOrgUrl);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    UiParagraph("If you wish to completely remove ToLiss Photon, you can "
+                "uninstall it using the Installer program.");
+    ImGui::Spacing();
+    const std::string folder = PluginFolderHint();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::Text("To manually delete this plugin, remove the folder: %s",
+                folder.c_str());
+    ImGui::PopTextWrapPos();
+}
+
 // ---- the window -------------------------------------------------------------
 // A tab is opened programmatically by setting gWantTab and letting the frame that
 // follows pass ImGuiTabItemFlags_SetSelected. There is no SetSelectedTab call to
@@ -2762,28 +3051,50 @@ static ImGuiTabItemFlags TabFlags(int tab) {
     return gWantTab == tab ? ImGuiTabItemFlags_SetSelected : 0;
 }
 
+// Is there a Cockpit tab on this aircraft at all? Three states, two of which get
+// one — see the block comment above the tab enum. Not the same test as the
+// Cockpit SUBMENU's, which is still gInteriorInstalled alone: a menu row that
+// opens a page of disabled controls is a worse thing than a tab that is honest
+// about being disabled once you are looking at it.
+static bool CockpitTabVisible() {
+    return !gInstallStale && (gInteriorInstalled || gInteriorSupported);
+}
+
 static void BuildMainUi() {
     if (!UiBeginTabBar("photon_tabs")) return;
 
     // Each tab's content sits on its own panel — see UiBeginPanel. The tab bar
     // itself deliberately does not.
-    if (ImGui::BeginTabItem("Exterior", nullptr, TabFlags(kTabExterior))) {
-        if (UiBeginPanel("##pane")) BuildConfigTab(kExtAxis);
-        UiEndPanel();
-        ImGui::EndTabItem();
+    //
+    // ⚠ The Error tab REPLACES the three axis tabs rather than joining them.
+    // Every control on those three either selects a look this aircraft can no
+    // longer show or drives an effect the plugin has just switched off, and a
+    // grayed page beside the explanation invites trying it anyway.
+    if (gInstallStale) {
+        if (ImGui::BeginTabItem("Error", nullptr, TabFlags(kTabError))) {
+            if (UiBeginPanel("##pane")) BuildErrorTab();
+            UiEndPanel();
+            ImGui::EndTabItem();
+        }
+    } else {
+        if (ImGui::BeginTabItem("Exterior", nullptr, TabFlags(kTabExterior))) {
+            if (UiBeginPanel("##pane")) BuildConfigTab(kExtAxis);
+            UiEndPanel();
+            ImGui::EndTabItem();
+        }
+        if (CockpitTabVisible()
+            && ImGui::BeginTabItem("Cockpit", nullptr, TabFlags(kTabCockpit))) {
+            if (UiBeginPanel("##pane")) BuildConfigTab(kIntAxis);
+            UiEndPanel();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Displays", nullptr, TabFlags(kTabDisplays))) {
+            if (UiBeginPanel("##pane")) BuildDisplaysTab();
+            UiEndPanel();
+            ImGui::EndTabItem();
+        }
     }
-    // Present only where the cockpit mod is — see the block comment above.
-    if (gInteriorInstalled
-        && ImGui::BeginTabItem("Cockpit", nullptr, TabFlags(kTabCockpit))) {
-        if (UiBeginPanel("##pane")) BuildConfigTab(kIntAxis);
-        UiEndPanel();
-        ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Displays", nullptr, TabFlags(kTabDisplays))) {
-        if (UiBeginPanel("##pane")) BuildDisplaysTab();
-        UiEndPanel();
-        ImGui::EndTabItem();
-    }
+    // The one tab that is always here, in both shapes.
     if (ImGui::BeginTabItem("About", nullptr, TabFlags(kTabAbout))) {
         if (UiBeginPanel("##pane")) BuildAboutTab();
         UiEndPanel();
@@ -2874,9 +3185,10 @@ static void InteriorMenuHandler(void*, void* itemRef) {
     SelectIntProfile(kIntProfileItems[i].value);
 }
 
-// The top level's two clickable items — Displays... and About... — both open the
-// one settings window, on their own tab. The refcon carries the tab index
-// directly; there is no submenu here to index into, so nothing else needs it.
+// The top level's clickable items — Displays... and About..., or "Reinstall
+// required..." and About... in the stale menu — all open the one settings window,
+// on their own tab. The refcon carries the tab index directly; there is no
+// submenu here to index into, so nothing else needs it.
 static void MenuHandler(void*, void* itemRef) {
     const intptr_t tab = (intptr_t)itemRef;
     ShowMainWindow(tab >= 0 && tab < kTabCount ? (int)tab : kTabAbout);
@@ -2944,6 +3256,39 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     gPluginsMenuItem = XPLMAppendMenuItem(XPLMFindPluginsMenu(), "ToLiss Photon", nullptr, 0);
     gMenuID = XPLMCreateMenu("ToLiss Photon", XPLMFindPluginsMenu(), gPluginsMenuItem,
                              MenuHandler, nullptr);
+
+    // ⚠ A STALE INSTALL GETS A DIFFERENT MENU, not a grayed version of this one:
+    //
+    //   Plugins > ToLiss Photon > Reinstall required...
+    //                           ─────────
+    //                           > About...
+    //
+    // Every row below this block either selects a look the aircraft's OBJs can no
+    // longer show or opens a page of controls the plugin has just switched off.
+    // One row saying so — pointing at the Error tab, which is the only place the
+    // reason is written down — plus About is the whole of what is still true.
+    //
+    // ⚠ gMenuHasInterior is stated FALSE rather than left over: it is compared
+    // against gInteriorInstalled on every aircraft load to decide whether the
+    // menu must be rebuilt, and gInteriorInstalled stays honest through a stale
+    // install (the cockpit OBJ is a separate file and may well have survived).
+    // Left at whatever the last build set, a stale A320 with an intact
+    // lights_inn.obj would tear its menu down and put it back on every load.
+    gMenuStale = gInstallStale;
+    gMenuHasInterior = false;
+    if (gMenuStale) {
+        XPLMAppendMenuItem(gMenuID, "Reinstall required...",
+                           (void*)(intptr_t)kTabError, 0);
+        XPLMAppendMenuSeparator(gMenuID);
+        XPLMAppendMenuItem(gMenuID, "About...", (void*)(intptr_t)kTabAbout, 0);
+        // Dev builds still get their submenu — the tooling is not what the
+        // aircraft update broke, and a tuning session on a reverted install is a
+        // reasonable thing to be doing.
+        AppendDebugMenu(gMenuID);
+        gMenuCreated = true;
+        Log("menu built (reinstall required - every feature is off here)");
+        return;
+    }
 
     int extItem = XPLMAppendMenuItem(gMenuID, "Exterior", nullptr, 0);
     gExtMenuID = XPLMCreateMenu("Exterior", gMenuID, extItem, ExteriorMenuHandler, nullptr);
@@ -3027,33 +3372,101 @@ static bool IsToLiss() {
     return blob.find("toliss") != std::string::npos;
 }
 
-// ======================= cockpit-mod ("Gus Mod") detection ===================
-// Does <aircraft>/objects/lights_inn.obj bind our interior datarefs? See
-// kInteriorObjNeedle for why that is the test. The OBJ is ~13 KB either way, so
-// this reads it whole; the cap only guards against an absurd file.
-static bool InteriorObjIsModded(const fs::path& obj) {
+// ========================= install detection =================================
+// Does `obj` bind one of our dataref families? THREE answers, not two, and the
+// third is what makes this safe to switch the whole add-on off with: "yes",
+// "no — this is a stock file", and "could not tell".
+//
+// ⚠ ONLY kObjStock MAY DISABLE ANYTHING. A file we opened and read is evidence; a
+// file we could not stat, could not open or found implausibly large is not, and
+// answering "no" for it would turn a transient read error into an add-on that
+// switched itself off and told the user to reinstall their aircraft. Both callers
+// fail OPEN on kObjUnreadable.
+//
+// The OBJs this opens are ~13-35 KB, so they are read whole; the cap only guards
+// against being pointed at something absurd.
+enum ObjScan { kObjModded, kObjStock, kObjUnreadable };
+
+static ObjScan ScanObj(const fs::path& obj, const char* needle) {
     std::error_code ec;
-    if (!fs::is_regular_file(obj, ec)) return false;   // clears ec on success
+    if (!fs::is_regular_file(obj, ec)) return kObjUnreadable;   // clears ec on success
     uintmax_t size = fs::file_size(obj, ec);
-    if (ec || size == 0 || size > kInteriorObjMaxBytes) return false;
+    if (ec || size == 0 || size > kObjScanMaxBytes) return kObjUnreadable;
     std::ifstream f(obj, std::ios::binary);
-    if (!f) return false;
+    if (!f) return kObjUnreadable;
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    return text.find(kInteriorObjNeedle) != std::string::npos;
+    return text.find(needle) != std::string::npos ? kObjModded : kObjStock;
 }
 
-// Re-detected per aircraft load, never per frame. XPLM_USE_NATIVE_PATHS is
-// enabled in XPluginStart, so the model path is a real filesystem path.
-static void DetectInterior() {
+// Everything the plugin needs to know about the install on THIS aircraft, from
+// one walk of its objects/ folder. Re-detected per aircraft load, never per
+// frame. XPLM_USE_NATIVE_PATHS is enabled in XPluginStart, so the model path is a
+// real filesystem path.
+//
+// ⚠ IT IS ALSO THE OFF SWITCH. `gInstallStale` is what a ToLiss update or a
+// reinstall looks like from in here: the aircraft is one we have a row for, its
+// exterior OBJ is exactly where it always was, and it no longer names a single
+// Photon dataref — i.e. ToLiss's own file is back and everything we shipped
+// beside it went with it. See gInstallStale for why that means "do nothing".
+//
+// The airframe falls out of the same walk for free: Airframe::objName is a
+// FINGERPRINT (core/constants.h), so the exterior OBJ that is present both names
+// the aeroplane and is the file whose contents answer the question above.
+static void DetectInstall() {
     char fileName[512] = {0}, path[512] = {0};
     XPLMGetNthAircraftModel(0, fileName, path);
+    gAirframeKey.clear();
     gInteriorInstalled = false;
-    if (path[0]) {
-        fs::path obj = fs::path(path).parent_path() / "objects" / kInteriorObjName;
-        gInteriorInstalled = InteriorObjIsModded(obj);
+    gInteriorSupported = false;
+    gInstallStale      = false;
+    // No path, no claim. Every flag stays at the value that changes nothing.
+    if (!path[0]) { Log("install check skipped - no aircraft path"); return; }
+    const fs::path objects = fs::path(path).parent_path() / "objects";
+
+    ObjScan ext = kObjUnreadable;
+    for (const photon::Airframe& af : photon::Airframes()) {
+        const fs::path obj = objects / af.objName;
+        std::error_code ec;
+        // Presence identifies the airframe; CONTENT answers whether we are still
+        // installed on it. Split deliberately — folding the two into one scan
+        // would make "present but unreadable" indistinguishable from "a different
+        // airframe" and walk on to try the other three.
+        if (!fs::is_regular_file(obj, ec)) continue;
+        gAirframeKey = af.key;
+        ext = ScanObj(obj, kExteriorObjNeedle);
+        break;
+    }
+
+    if (gAirframeKey.empty()) {
+        // A ToLiss we have no row for — an A340, say. Photon was never installed
+        // here and nothing was reverted, so this is not the stale state; it is
+        // the same "menu that does nothing" the add-on has always had on an
+        // unsupported ToLiss, and narrowing that is a separate question.
+        Log("install check: no recognized ToLiss exterior OBJ in this aircraft");
+        return;
+    }
+
+    gInstallStale      = ext == kObjStock;
+    gInteriorSupported = photon::AirframeHasInterior(gAirframeKey);
+    // Asked even when the install is stale, and kept honest: the cockpit OBJ is a
+    // separate file and may well have survived whatever reverted the exterior
+    // one. Nothing acts on it while stale — CockpitTabVisible and the submenu
+    // both check that first — but a log line saying "cockpit mod NOT installed"
+    // about an aircraft that still has it would send the next investigation the
+    // wrong way.
+    gInteriorInstalled = ScanObj(objects / kInteriorObjName, kInteriorObjNeedle)
+                       == kObjModded;
+
+    if (gInstallStale) {
+        Log("INSTALL REVERTED: " + gAirframeKey + "/objects/"
+            + std::string(photon::AirframeByKey(gAirframeKey)->objName)
+            + " no longer binds our datarefs - an aircraft update or reinstall "
+              "replaced it. Every Photon feature is OFF on this aircraft.");
+        return;
     }
     Log(gInteriorInstalled ? "cockpit mod detected (lights_inn.obj binds our datarefs)"
-                           : "cockpit mod NOT installed - hiding the Cockpit menu");
+        : gInteriorSupported ? "cockpit mod NOT installed - Cockpit tab shown disabled"
+                             : "cockpit mod not available for this airframe");
 }
 
 // Defined far below, with the panel-FX drivers, and called from the aircraft-load
@@ -3095,19 +3508,65 @@ static void DbgAutoSaveTuning();
 static void DbgLoadTuning();
 #endif
 
+// Every handle and cached value that belongs to the LOADED aircraft, released.
+// Called from the two states in which nothing may keep reading them: leaving a
+// ToLiss altogether, and finding that the install on the ToLiss we are on has
+// been reverted.
+//
+// ⚠ The last two are not tidiness. Everything above them is a stale READ if it is
+// kept; those are handles into ToLiss's OWN plugin, which is unloaded with the
+// aircraft — a kept panel-FX driver is a dangling read and a kept CPDLC command
+// is a dangling handler registration, and that is the one way any of this could
+// take the sim down rather than merely look wrong.
+static void DropAircraftBindings() {
+    gGlowMapActive = false;
+    gMapRheostat = nullptr;
+    gMapRheostatType = 0;
+    gDUBrightness = nullptr;
+    gDUBrightnessCount = 0;
+    gToLissGlowRef = nullptr;
+    gDcBusRef = nullptr;
+    gDcBusTypes = 0;
+    gDcBusCount = 0;
+    gDcBusLogged = false;
+    gDisplayFallbackRef = nullptr;   // null = full-res, which is the safe set
+    gDisplayFallbackLogged = false;
+    FxForgetDrivers();
+    UnbindDcduCommands();
+}
+
 static void UpdateMenuVisibility() {
     // ⚠ FIRST, and stored before anything below reads it: ResolveFxFamily (both
     // branches) and every per-frame gate downstream answer from the flag, not
     // from IsToLiss(). This function is the ONLY writer.
     gIsToLiss = IsToLiss();
     if (gIsToLiss) {
-        DetectInterior();
-        // The submenu is decided at menu-BUILD time, so switching between two
-        // ToLiss aircraft that disagree about the cockpit mod has to rebuild —
-        // otherwise it lingers on one without the mod or stays missing on one with.
-        if (gMenuCreated && gMenuHasInterior != gInteriorInstalled) DestroyPhotonMenu();
+        DetectInstall();
+        // The menu's SHAPE is decided at build time — both which top-level rows
+        // it has and whether the Cockpit submenu is among them — so crossing
+        // either line between two ToLiss aircraft has to rebuild. The interior
+        // half is only asked of a live install: gInteriorInstalled stays honest
+        // through a stale one, and the stale menu states gMenuHasInterior false.
+        if (gMenuCreated && (gMenuStale != gInstallStale
+                             || (!gInstallStale
+                                 && gMenuHasInterior != gInteriorInstalled)))
+            DestroyPhotonMenu();
         if (!gMenuCreated) CreatePhotonMenu();
+        // ⚠ THE OFF SWITCH, and it goes here — after the menu, which is the one
+        // thing a stale install still needs, and before every binding below it,
+        // which exist to serve features that are now off. Same teardown as the
+        // not-a-ToLiss branch, minus the menu.
+        if (gInstallStale) {
+            DropAircraftBindings();
+            ResolveFxFamily();
+            PerfShutdown();
+            return;
+        }
         ResolveGlowMap();      // pick the skin-glow index map for this airframe
+        // ToLiss's own glow array, the pass-through source for the redirected
+        // regions while the waveform override is off. Bound here and retried at
+        // 1 Hz like every other ToLiss handle — see ResolveToLissGlow.
+        ResolveToLissGlow();
         // Cached whether or not the mod is installed: gating it would turn a
         // detection false negative from "no menu" into "the map spot is black".
         ResolveMapRheostat();  // cache ckpt/lights/map off the per-frame path
@@ -3155,22 +3614,15 @@ static void UpdateMenuVisibility() {
     } else {
         if (gMenuCreated) DestroyPhotonMenu();
         gInteriorInstalled = false;
-        gGlowMapActive = false;
-        gMapRheostat = nullptr;
-        gMapRheostatType = 0;
-        gDUBrightness = nullptr;
-        gDUBrightnessCount = 0;
-        gDcBusRef = nullptr;
-        gDcBusTypes = 0;
-        gDcBusCount = 0;
-        gDcBusLogged = false;
-        gDisplayFallbackRef = nullptr;   // null = full-res, which is the safe set
-        gDisplayFallbackLogged = false;
-        // Dropped on the way OUT of a ToLiss too. Everything above is a stale
-        // READ if it is kept; these two are handles into a plugin that is being
-        // unloaded, and the command handlers are registered against them.
-        FxForgetDrivers();
-        UnbindDcduCommands();
+        gInteriorSupported = false;
+        // ⚠ CLEARED, not left. It is the flag that switches everything off, and
+        // on the way out of a ToLiss it has done its job — carried onto the next
+        // aircraft it would keep the add-on dark on a perfectly good install
+        // until something happened to re-run detection. gIsToLiss is false here
+        // anyway, so nothing reads it; this is about what the NEXT load sees.
+        gInstallStale = false;
+        gAirframeKey.clear();
+        DropAircraftBindings();
         // ⚠ AND THE FX FAMILY GOES WITH THEM. It is the value that decides
         // whether a SCOPED stack may paint, and it was resolved on the ToLiss
         // branch only: switching to any other aircraft left it reading "a3xx",
@@ -3225,6 +3677,29 @@ static void WriteGlow(int idx, float value) {
     gGlow[idx] = value;
 }
 
+// ⚠ WITH THE WAVEFORM OVERRIDE OFF, SOMETHING STILL HAS TO DRIVE OUR GLOW ARRAY.
+// The install repointed this airframe's ATTR_light_level regions from ToLiss's
+// ExternalLightBrightnesses at ToLissPhoton/exterior/glow (core/patch_glow.cpp) —
+// a permanent edit to the mesh OBJs that a runtime switch does not undo. So an
+// array nobody writes reads 0, and those painted strobe and beacon regions go
+// DARK: a dead patch on the skin, which is a good deal worse than the soft xenon
+// fade the user asked to keep.
+//
+// Mirroring ToLiss's own array into exactly the indices we redirected turns the
+// redirect back into a pass-through. Only the A339 has a glow map today
+// (GlowRedirect), so on every other airframe this costs one bool test.
+static void MirrorToLissGlow() {
+    if (!gGlowMapActive || !gToLissGlowRef) return;
+    float src[kGlowArraySize] = {0.0f};
+    const int got = XPLMGetDatavf(gToLissGlowRef, src, 0, kGlowArraySize);
+    for (int i = 0; i < 4; ++i) {
+        const int s = gGlowMap.strobe[i];
+        if (s != kGlowNone && s < got) WriteGlow(s, src[s]);
+        const int b = gGlowMap.beacon[i];
+        if (b != kGlowNone && b < got) WriteGlow(b, src[b]);
+    }
+}
+
 static bool BeaconActive(int index, double sampledValue, double simTime) {
     if (sampledValue > kActivityThreshold) gLastActiveBeacon[index] = simTime;
     return (simTime - gLastActiveBeacon[index]) < kActivityWindowSeconds;
@@ -3237,11 +3712,12 @@ static bool StrobeGateOn() {
 }
 
 static float EngineLoop(float, float, int, void*) {
-    // ⚠ Only drive lights on a ToLiss. Everything below this line either writes
-    // a ToLiss dataref or reads one, so on anything else it is at best wasted
-    // and at worst a write into whatever plugin happens to own that name.
-    // Gated on the aircraft, not on gMenuCreated as it used to be — see gIsToLiss.
-    if (!gIsToLiss) { gLastSimTime = -1.0; return -1.0f; }
+    // ⚠ Only drive lights on a ToLiss WE ARE STILL INSTALLED ON. Everything below
+    // this line either writes a ToLiss dataref or reads one, so on anything else
+    // it is at best wasted and at worst a write into whatever plugin happens to
+    // own that name. Gated on the aircraft, not on gMenuCreated as it used to be
+    // — see PhotonRuns, gIsToLiss and gInstallStale.
+    if (!PhotonRuns()) { gLastSimTime = -1.0; return -1.0f; }
 
     double simTime = SimTime();
     if (gLastSimTime < 0) gLastSimTime = simTime;
@@ -3311,6 +3787,19 @@ static float EngineLoop(float, float, int, void*) {
                 ? BrightnessResponse((float)ClampBrightness(du[idx])) * kScreenGain * userGain
                 : 0.0f;
         }
+    }
+
+    // ⚠ THE USER'S OWN OFF SWITCH FOR THE REST OF THIS LOOP — the Exterior tab's
+    // Advanced section (see ExteriorSettings). Everything ABOVE it stays: the map
+    // spill alpha and the six screen-glow sizes are not waveform work and belong
+    // to two features this switch says nothing about.
+    //
+    // Off simply means we stop writing the two ratio arrays. ToLiss holds
+    // override_beacons_and_strobes and writes them itself every frame, so its own
+    // value is then the last one in and there is nothing for us to restore.
+    if (!gExterior.waveform) {
+        MirrorToLissGlow();
+        return -1.0f;
     }
 
     int beaconLed = gValues[5] >= 1 ? 1 : 0;   // index 5 = beacon
@@ -3394,9 +3883,10 @@ static void StopEngine() {
 static float AutoLoop(float, float, int, void*) {
     // Same gate as the engine, and for the same reason: every retry below binds
     // a ToLiss handle. ⚠ Its corollary is that NOTHING here runs on another
-    // aircraft, so anything that must be cleaned up when one loads belongs in
-    // UpdateMenuVisibility's else branch, not in a "if it changed" check here.
-    if (!gIsToLiss) return 1.0f;
+    // aircraft — or on one whose install has been reverted — so anything that
+    // must be cleaned up when one loads belongs in UpdateMenuVisibility's else
+    // branch (or its gInstallStale branch), not in a "if it changed" check here.
+    if (!PhotonRuns()) return 1.0f;
     // ToLiss's own datarefs AND COMMANDS appear when ITS plugin starts, which can
     // be after our aircraft-loaded hook ran. Retry here (1 Hz) rather than from
     // the per-frame engine loop.
@@ -3416,6 +3906,11 @@ static float AutoLoop(float, float, int, void*) {
     // fine. Anything that caches at load time needs a line here instead.
     if (!gMapRheostat) ResolveMapRheostat();
     if (!gDUBrightness) ResolveDUBrightness();
+    // The fourth instance, added with the waveform override (2026-08-14). Its
+    // failure mode is the quietest yet: it is only READ while that override is
+    // off, so an unbound handle costs nothing at all until the day someone
+    // unticks the box — and then it is a dark patch on an A339's skin.
+    if (!gToLissGlowRef) ResolveToLissGlow();
     if (!gDcBusRef) ResolveDcBus();
     // ⚠ The third instance of this exact bug, found 2026-08-02 from "the panel FX
     // works on the MCDUs but not the PFDs". Only the six DUs are
@@ -7125,7 +7620,11 @@ static void DrawPanelFx() {
     // The caller checks this too. That is not redundancy for its own sake: the
     // caller's check is what stops the work, this one is what makes the rule
     // true for whoever calls DrawPanelFx next.
-    if (!gIsToLiss) return;
+    //
+    // PhotonRuns, not gIsToLiss: the compositor drives ToLiss's OWN datarefs and
+    // would go on working perfectly through a reverted install, which is exactly
+    // why it has to be told not to. See gInstallStale.
+    if (!PhotonRuns()) return;
     if (!gFxEnabled || gFxStacks.empty()) return;
 
     // ⚠ The overlay folder is NOT polled from here (2026-08-04). Picking up a
@@ -7283,7 +7782,7 @@ static int PanelPassDraw(XPLMDrawingPhase, int, void* refcon) {
     // ReseatPanelPass early-returns when nothing is registered, so a pass torn
     // down for a Cessna would never come back for the ToLiss loaded after it —
     // a silent, whole-session loss of the effect, traded for a branch per frame.
-    if (!gIsToLiss) return 1;
+    if (!PhotonRuns()) return 1;
 
     const int slot = (int)(intptr_t)refcon;
 

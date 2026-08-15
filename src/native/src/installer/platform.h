@@ -58,6 +58,29 @@ bool OpenUrl(const std::string& url);
 // regardless of association, and is a GUI app so it never writes to our console.
 bool OpenInEditor(const std::string& pathUtf8);
 
+// Show a DIRECTORY in the platform's file browser — the aircraft list's
+// "Open aircraft folder..." context-menu row.
+//
+// ⚠ NOT `OpenInEditor` WITH A DIRECTORY, and not `OpenUrl` with a path either,
+// even though all three end up in the same two system calls. `OpenInEditor` hands
+// its argument to notepad.exe by name, which would open a Save-As-style dialog on
+// a folder; `OpenUrl` documents its argument as a URL, and a Windows path with a
+// space in it is not one. The shell association this relies on is the only one
+// that is always registered — `Directory\shell\open` — which is exactly why the
+// association hazard written up on `OpenInEditor` does not apply here.
+bool OpenFolder(const std::string& pathUtf8);
+
+// Put UTF-8 text on the system clipboard — the installer log's "Copy log".
+//
+// ⚠ NOT SLINT'S. Slint exposes the clipboard only on its `Platform` interface, for
+// code that IMPLEMENTS a backend; there is no app-facing setter, and the one place
+// the toolkit uses it (`TextInput::copy`) is unreachable now that the log is drawn
+// as colored rows rather than as one editable string. Hence a system call here.
+//
+// Best effort like everything else in this file: false when the platform call
+// failed, and never a throw.
+bool SetClipboardText(const std::string& textUtf8);
+
 // ─── the folder chooser (GUI only) ───────────────────────────────────────────
 // A native "pick a folder" dialog, for the Browse button on the X-Plane directory
 // screen. Returns the chosen path as UTF-8, or "" if the user cancelled.

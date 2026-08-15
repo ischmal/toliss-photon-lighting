@@ -19,6 +19,12 @@
 //    the "please close X-Plane" screen relies on via `PluginIsCurrent`.
 //  * `_BackupOnce` NEVER OVERWRITES AN EXISTING BACKUP. That would clobber the true
 //    original with a Photon file on reinstall or upgrade.
+//  * THE BACKUP FOLDER IS ASKED FOR, NEVER BUILT. It sits beside `objects/` now and
+//    inside it on anything an earlier installer wrote; `backup::Dir` is the one
+//    place that decides, and an install migrates a legacy folder out of `objects/`
+//    before it touches a backup. Resolving it by hand reads an empty folder on an
+//    un-migrated aircraft, and an install that finds no manifest backs up its OWN
+//    last install as the stock original.
 //  * `backed_up[]` RESTORES; `added[]` DELETES. Restoring a backup that never
 //    existed leaves the added files in place forever.
 //  * SCREENS DETACH THE `.acf` FIRST, THEN DELETE THE OBJ. An `.acf` naming an OBJ

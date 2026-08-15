@@ -79,7 +79,13 @@ struct Manifest {
     std::string unknownJson;
 };
 
-// Path of the manifest for an aircraft's `objects/` folder.
+// Path of the manifest for an aircraft, addressed by its `objects/` folder — the
+// key every caller already has.
+//
+// ⚠ IT IS NOT INSIDE `objects/`. The manifest lives in the backup folder, beside
+// the files it accounts for, and that folder moved to the aircraft root on
+// 2026-08-14 while the old location stays readable. `backup::Dir` decides; nothing
+// here or anywhere else may build the path by hand.
 std::string PathFor(const std::string& objectsDirUtf8);
 
 // ⚠ Never throws. Missing/corrupt comes back with `present == false`.

@@ -51,6 +51,21 @@ struct Airframe {
 const std::vector<Airframe>& Airframes();
 const Airframe* AirframeByKey(const std::string& key);
 
+// ─── exterior ────────────────────────────────────────────────────────────────
+// ⚠ THE "IS PHOTON STILL INSTALLED ON THIS AIRCRAFT" SENTINEL. Every supported
+// airframe has an exterior OBJ (`Airframe::objName` above, which is why that slot
+// is a fingerprint), the base install always patches it, and a ToLiss update or a
+// reinstall is exactly the event that puts the stock one back. So an aircraft we
+// recognize whose exterior OBJ names none of our datarefs is an install that has
+// been reverted — which the plugin reads as "do nothing at all here" (see
+// `gInstallStale` in plugin.cpp).
+//
+// Same rule as the interior needle below: the test is the OBJ BINDING our
+// datarefs, never the installer's version marker, because a
+// `build_objs.py build --write` OBJ carries no marker and drives the plugin
+// perfectly well.
+constexpr char kExteriorObjNeedle[] = "ToLissPhoton/exterior/";
+
 // ─── interior ("Gus Mod") ────────────────────────────────────────────────────
 // A SEPARATE, OPT-IN install axis from the exterior one.
 constexpr char kInteriorObj[] = "lights_inn.obj";
@@ -79,13 +94,6 @@ bool InteriorTextureIsAdded(const std::string& name);
 // names, so a livery shipping chairs_LIT.dds wins over our chairs_LIT.png and the
 // mod is invisible in that livery. Matched by stem against InteriorTextures().
 const std::vector<std::string>& InteriorLiveryExts();
-
-// The four .acf files per airframe that carry the cockpit spot block. All four
-// hold identical spot values, so this is one constant patch applied four times.
-// Photon's OBJ work is XP12-only but this patch is not: lights_inn.obj is shared
-// by every variant, so an XP11 user would otherwise get patched OBJ lights
-// alongside unpatched sim spots.
-const std::vector<std::string>& AcfSuffixes();
 
 // ─── display (screen) glow ───────────────────────────────────────────────────
 // ⚠ Unlike every other OBJ we install, this one has NO stock counterpart and is
@@ -145,6 +153,12 @@ std::string WingActionLabel(const std::string& wing);
 std::string RealWingsDir(const std::string& airframeKey);
 
 // ─── bookkeeping ─────────────────────────────────────────────────────────────
+// ⚠ THE NAME ONLY — WHERE THE FOLDER SITS IS `core/backup.h`'s to answer, and no
+// other file may spell the path out. It moved out of `objects/` to the aircraft
+// root on 2026-08-14 and BOTH locations are still live, so a hand-built
+// `objects / kBackupDirName` reads the wrong folder on an aircraft that has not
+// been migrated yet — and reading no manifest is how an install comes to back
+// Photon's own OBJ up as the stock original.
 constexpr char kBackupDirName[] = "Photon Backup Files";
 constexpr char kManifestName[] = "photon_manifest.json";
 

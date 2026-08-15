@@ -16,22 +16,31 @@ export struct Attribute {
     value: string,
 }
 
-// ⚠ THE ROW IS 260 px WIDE AND INDENTED 10 px — it does NOT span the content.
-// The design lays the Attributes frame out as 442x78 holding four 260x18 rows at
-// x=10 on a 20 px pitch, i.e. 18 px of row and 2 px of gap. Stretching them full
-// width put the values hard against the right edge of the pane, a long way from
+// ⚠ THE ROW IS 260 px WIDE — it does NOT span the content. Stretching it full
+// width puts the values hard against the right edge of the pane, a long way from
 // the labels they belong to, which is what made the list read as unaligned.
+//
+// ⚠ RESPACED 2026-08-14 (`194:683` and the Review frame's own `Attributes`): the
+// row is 22 px on a 24 px pitch, and the 10 px indent is GONE — the list now starts
+// flush with the headings above it. It was 18 px on a 20 px pitch, indented. The
+// gap either side is unchanged at 2 px; what grew is the room around the text and
+// its rule, which is what the extra 4 px buys.
 component AttributeRow inherits Rectangle {
     in property <Attribute> attribute;
 
     width: 260px;
-    height: 18px;
+    height: 22px;
+
+    // ⚠ 20, NOT 22 — Figma's `bottom-[11.11%]` of the row. The text box stops
+    // short of the hairline rather than sitting on it, which is what stops a
+    // descender touching the rule.
+    property <length> text-h: 20px;
 
     MutedLabel {
         x: 0;
         y: 0;
         width: parent.width / 2;
-        height: 16px;
+        height: root.text-h;
         text: root.attribute.label;
         overflow: elide;
     }
@@ -40,7 +49,7 @@ component AttributeRow inherits Rectangle {
         x: parent.width / 2;
         y: 0;
         width: parent.width / 2;
-        height: 16px;
+        height: root.text-h;
         text: root.attribute.value;
         color: Tokens.text;
         font-family: Tokens.font;
@@ -102,31 +111,48 @@ export component ReviewScreen inherits Rectangle {
             value: root.version-transition;
         }
 
-        Header2 {
-            height: 24px;
-            text: "Selected Options";
-            font-weight: Tokens.weight-medium;
-        }
-
-        // 10 px indent and a 20 px pitch (18 px row + 2 px gap), per the design.
+        // The design's `Features` frame (`212:1642`): the head and the list are ONE
+        // block, 24 px + 94 px, with NO GAP BETWEEN THEM — the Attributes frame sits
+        // at y = 24 inside it, flush under the heading.
         //
-        // ⚠ WRAPPED IN A start-ALIGNED HorizontalLayout SO ITS FIXED WIDTH DOES NOT
-        // SET THE COLUMN'S. A VerticalLayout takes its preferred width from its
-        // widest child, and these rows are a hard 260 px — so the whole Review
-        // column collapsed to ~270 px, and the X-Plane path in the PropertyRow
-        // above elided at half the space it actually had. The wrapper absorbs the
-        // fixed width and reports "as wide as you like" upward. Same fix as the
-        // Complete screen's 215 px button stack.
-        HorizontalLayout {
+        // ⚠ THIS GROUPING IS NOT COSMETIC — WITHOUT IT THE SCREEN OVERFLOWS. Every
+        // other child of this column is separated by `content-gap`, and the head and
+        // its list taking that gap too made the page 426 px in a 416 px content area:
+        // 10 px of overflow, which a VerticalLayout resolves by growing — pushing the
+        // bottom bar, which is a fixed part of the frame, down off the window. It read
+        // as "too much padding under the Features heading" because that is exactly
+        // where the 10 px was. ⚠ So the arithmetic is tight and there is no slack:
+        // 24 pad + 40 head + 4x(10 + 40) rows + 10 + 24 + 94 + 24 pad = 416 exactly.
+        // Anything added here has to come out of something else.
+        VerticalLayout {
             alignment: start;
+            spacing: 0px;
 
-            VerticalLayout {
+            Header2 {
+                height: 24px;
+                text: "Selected Options";
+                font-weight: Tokens.weight-medium;
+            }
+
+            // A 24 px pitch (22 px row + 2 px gap) and NO indent, per the design.
+            //
+            // ⚠ WRAPPED IN A start-ALIGNED HorizontalLayout SO ITS FIXED WIDTH DOES
+            // NOT SET THE COLUMN'S. A VerticalLayout takes its preferred width from
+            // its widest child, and these rows are a hard 260 px — so the whole
+            // Review column collapsed to ~270 px, and the X-Plane path in the
+            // PropertyRow above elided at half the space it actually had. The
+            // wrapper absorbs the fixed width and reports "as wide as you like"
+            // upward. Same fix as the Complete screen's 215 px button stack.
+            HorizontalLayout {
                 alignment: start;
-                spacing: 2px;
-                padding-left: 10px;
 
-                for attribute in root.attributes: AttributeRow {
-                    attribute: attribute;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+
+                    for attribute in root.attributes: AttributeRow {
+                        attribute: attribute;
+                    }
                 }
             }
         }

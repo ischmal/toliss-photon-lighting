@@ -90,11 +90,48 @@ manifest, same wire order as the XPPython3 tool documented under
 [§ Live light debug](#live-light-debug) below — that section is still the reference for
 *why* each piece exists; this one is what is different.
 
-Build the OBJ in its tunable shape first, exactly as before:
+The tab has **two modes, and which one you get is decided by the OBJ that is installed**,
+not by a setting:
+
+| Installed OBJ | Manifest beside it | The tab |
+|---|---|---|
+| `--debug` build | `lights_inn.debug.json` / `lights_screens.debug.json` | **tunable** — every knob drives `ToLissPhoton/debug/light/*` live |
+| plain build | `lights_inn.info.json` / `lights_screens.info.json` | **read-only** — the same tree and the same numbers, disabled |
+
+A build writes one manifest and **deletes the other**, so exactly one exists at a time and
+there is nothing to infer: which file is present *is* the answer to "can this be driven".
+The fallback is decided **per target**, so an interior built `--debug` sits happily beside
+stock screens — its knobs work, the screens' are shown disabled, and neither is quietly
+the other.
+
+Build the OBJ in its tunable shape to *edit*:
 
 ```bash
 python build/build_objs.py build --target interior --debug --write
 ```
+
+...but nothing has to be rebuilt to *look*. The read-only mode (2026-08-10) exists because
+a `--debug` OBJ is a poor way to answer "what is this light set to": it is not installable,
+it drops the category gates, and getting one costs a redeploy and an aircraft reload. A
+plain `deploy.ps1 -Dev` now drops the metadata beside the normal OBJ, so the Lights tab
+answers that question at any time.
+
+- ⚠ **A read-only light shows the profile branch that is DRAWING.** A shipping OBJ bakes
+  each lamp once per look, behind an `ANIM_hide` on its category dataref, so "what colour
+  is the map spot" has three answers and only one of them is on screen. The manifest
+  carries all of them and **the position in that list is the dataref value** — the same
+  contract `branch_gate` emits the gates from. The toolbar's **branch** picker reads
+  another era without touching the aircraft's setting; the editor names which one you are
+  looking at and whether it is live.
+- **What disappears in read-only mode**: Save tuning, Isolate, Mark, Blink, the A/B
+  Tunable switch, the markers, the slot probe, the aim presets, both Reverts and the
+  tuning-file row. Every one of them drives a dataref a shipping OBJ does not bind, so
+  hiding beats disabling — a greyed-out row invites "what would these do", and the answer
+  is "nothing, ever, in this build". **Log DSL stays**, since printing the authored values
+  is exactly what an inspector is for.
+- ⚠ **A read-only session never touches the tuning file** — not saved from, not restored
+  into. Those records are edits made against a *debug* OBJ; applying them over an
+  installable one would put numbers on screen that nothing in the cockpit is rendering.
 
 - **The hierarchy is the manifest's own: category ▸ fixture ▸ light.** That is not
   cosmetic. A category is what the Cockpit menu switches and a fixture is what was authored
@@ -467,6 +504,20 @@ installs both debug OBJs in one command. The Python tool (`PI_PhotonDevReload.py
 still drives one manifest at a time, the most recently written, and names it in the
 window (`screens: 6 lights`).
 
+**A PLAIN build of those same two targets writes the read-only twin instead** —
+`lights_inn.info.json` / `lights_screens.info.json` (`INFO_MANIFESTS`, 2026-08-10) — and
+deletes the debug one; a `--debug` build deletes the info one. So exactly one manifest per
+target exists at any moment, which is what lets the Lights tab tell "tunable" from
+"inspectable" by filename alone. The info rows carry the **same slot numbers** as the debug
+rows (same bases, same order), so slot 12 names one light whichever build you are looking
+at — `test_a_light_is_the_same_light_and_the_same_slot_in_both` pins it. They add a
+`variants` list, one entry per profile branch, **ordered by the category dataref's value**.
+The exterior gets neither manifest: frozen goldens, no debug build, nothing to read against.
+
+⚠ These are **dev-only sidecars that nothing ships.** They land in `dist/` and, under
+`--write`, in the installed aircraft; `make_release.py` stages OBJs by name and so has no
+way to pick one up.
+
 A debug interior build also keeps the `ToLissPhoton/interior/optimized` gate and
 emits the **simplified flood copies as tunable lights of their own** (manifest rows
 carrying `boost`), so the Dev window's Cockpit tab can drive the `optimize: boost`
@@ -509,9 +560,19 @@ emits *both* the untouched original light line and the tunable spill copy for ev
 light, gated on `ToLissPhoton/debug/compare` (0 = original, 1 = debug). This exists
 because converting a light to `LIGHT_SPILL_CUSTOM` is not self-evidently a no-op:
 `airplane_panel_sp` is a **named** light whose `SPILL_SW` overload X-Plane resolves
-through its own handler, and whether that handler treats position, direction or a
-non-normalized `dir` differently from a raw custom spill is not documented anywhere
-checkable. So:
+through its own handler, and whether that handler treats position, direction, a
+non-normalized `dir` — or **overall intensity** — differently from a raw custom spill
+is not documented anywhere checkable. ⚠ **Intensity is the live suspect** (reported
+2026-08-11: the dome extremely dim under `-DebugObjs`, normal on regular OBJs): in
+XP12's photometric pipeline a raw custom spill gets the fixed legacy-luminance
+calibration, while the named handler can scale its lights however it likes, and our
+conversion replicates only the rheostat (linearly, into alpha). An audit that day found
+the rest of the chain sound — wire order translated, the omni encoding right, the
+rheostat name/index corroborated by the `.acf` spot rows, handles dropped on aircraft
+load — so if Original is bright and Debug is dim **with identical numbers**, that is
+the conversion's calibration, not a Photon bug, and brightness judged on the tunable
+side is biased dim for every `airplane_{panel,inst}_sp` light. Geometry judgments
+(position, aim, cone) are unaffected. So:
 
 - **Original looks right, Debug does not** → the conversion is at fault, and the tuned
   numbers are not trustworthy until it is understood.

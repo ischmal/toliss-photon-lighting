@@ -12,6 +12,20 @@ name: Build installers
 # (deleted 2026-08-09). The install/uninstall/detect coverage they carried lives in
 # `photoncore_tests` now — see src/native/tests/install_tests.cpp.
 #
+# ⚠ THE ONE EXECUTABLE IS THE **GUI** INSTALLER (2026-08-15). `PHOTON_GUI` is OFF
+# by default — a contributor's checkout still builds with no Rust — so this
+# workflow states `-DPHOTON_GUI=ON` explicitly, and that one flag is the whole
+# difference between publishing the designed Slint front-end and publishing the
+# terminal fallback. It went unstated from the GUI landing until 2026-08-15, and
+# NOTHING FAILED: the job stayed green, the bundle was well-formed, and the only
+# symptom was that the thing users double-clicked opened a console. Hence the
+# `grep` tripwire on the configure log below — a silent downgrade to the TUI is
+# not allowed to be a green run.
+#
+# Turning it ON is what adds a Rust toolchain (Slint's C++ API is a Rust library;
+# there is no pure-C++ path) and, on Linux, a handful of system -dev packages.
+# Both are installed per-runner below.
+#
 # The C++ toolchain cannot cross-compile, so each per-OS `build` job compiles its
 # own .xpl and packs its own bundle on its own runner, and there is no longer any
 # cross-job hand-off: the transient xpl-<arch> artifact existed only to let the
@@ -44,14 +58,64 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # ⚠ `rust_targets` IS NOT BOILERPLATE ON macOS. CMakeLists asks for
+      # `arm64;x86_64`, but cargo builds ONE architecture at a time — Corrosion
+      # drives it once per arch and lipos the results, which it can only do if
+      # rustc has BOTH std libraries. The runner is arm64, so `x86_64-apple-darwin`
+      # is the one nobody has locally and the one CI must add; CMakeLists FATAL_ERRORs
+      # on it rather than letting cargo fail deep inside a Slint build log.
       matrix:
         include:
-          - { os: windows-latest, os_name: Windows, arch: win_x64 }
-          - { os: macos-latest, os_name: macOS, arch: mac_x64 }
-          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64 }
+          - { os: windows-latest, os_name: Windows, arch: win_x64, rust_targets: x86_64-pc-windows-msvc }
+          - { os: macos-latest, os_name: macOS, arch: mac_x64, rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64, rust_targets: x86_64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # ── the GUI's two extra prerequisites ────────────────────────────────────
+      # ⚠ SLINT'S winit/FemtoVG BACKEND NEEDS THESE HEADERS AT BUILD TIME on Linux
+      # and the runner image does not carry them. Without them the failure is a
+      # pkg-config or cc error raised from inside a Rust build script, which names
+      # a crate nobody here has heard of rather than a missing apt package.
+      # fontconfig/freetype are the text stack; the xcb/xkbcommon/wayland set is
+      # winit's two display backends; the mesa pair is what glutin makes its GL
+      # context through.
+      - name: Install Slint's Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      # ⚠ INSTALLED EXPLICITLY RATHER THAN TAKEN FROM THE IMAGE. The runners do
+      # ship a Rust toolchain, but its version is theirs to change: Slint v1.17.1
+      # declares `rust-version = "1.92"`, and an image that drifts below that
+      # breaks the release build with an MSRV error on a tag push — the one run
+      # nobody wants to debug. `stable` is deliberate: the *reproducibility* that
+      # matters is pinned at the Slint tag (see CMakeLists), and pinning rustc too
+      # would instead break the day a transitive crate needs something newer.
+      - name: Install Rust (Slint v1.17.1 needs >= 1.92)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      # Saves the crates.io downloads, not the Slint compile itself — Corrosion
+      # builds that inside the CMake tree, which is not cached because a release
+      # build has to be able to start from nothing. Keyed on CMakeLists because
+      # that is where the Slint tag lives, so bumping the tag retires the cache.
+      - name: Cache cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('src/native/CMakeLists.txt') }}
+          restore-keys: cargo-${{ runner.os }}-
 
       # unzip (Unix) preserves the macOS XPLM.framework symlinks the linker needs;
       # Expand-Archive (Windows) avoids relying on unzip being on PATH in Git Bash.
@@ -77,18 +141,40 @@ jobs:
       # Windows uses the multi-config VS generator (-A x64 + --config Release);
       # macOS/Linux use single-config (CMAKE_BUILD_TYPE). CMakeLists emits to
       # build/ToLissPhoton/<arch>/ToLissPhoton.xpl for all three.
-      - name: Configure & build plugin (Release)
+      #
+      # ⚠ ONE TREE, UNLIKE A DEV MACHINE. run-installer.ps1 keeps build-gui/ and
+      # build-core/ on PHOTON_CORE_ONLY so installer work needs no X-Plane SDK, and
+      # the .xpl in its own build/ so plugin work needs no Rust. A runner has both
+      # and is thrown away afterwards, so splitting the trees here would only
+      # compile photoncore twice.
+      #
+      # ⚠ PHOTON_GUI IS STATED, NEVER LEFT TO THE CACHE — the same rule deploy.ps1
+      # and run-installer.ps1 follow for PHOTON_DEV and PHOTON_GUI, and the reason
+      # is sharper here: the default is OFF, so an omitted flag does not fall back
+      # to the old behavior, it silently publishes the wrong front-end.
+      - name: Configure & build plugin + GUI installer (Release)
         shell: bash
         working-directory: src/native
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cmake -S . -B build -A x64
+            cmake -S . -B build -A x64 -DPHOTON_GUI=ON 2>&1 | tee configure.log
             cmake --build build --config Release
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPHOTON_GUI=ON 2>&1 | tee configure.log
             cmake --build build
           fi
           test -f "build/ToLissPhoton/${{ matrix.arch }}/ToLissPhoton.xpl"
+
+          # ⚠ THE TRIPWIRE. `option()` is a no-op against a cached value and a
+          # typo'd -D is simply ignored, so "we passed the flag" is not evidence
+          # the GUI is in. CMakeLists prints this line only from inside
+          # `if(PHOTON_GUI)`; matching it is the one check that fails a build
+          # which would otherwise pack a perfectly working terminal installer
+          # into a bundle labelled as the GUI.
+          grep -q "GUI build - photon-installer links Slint" configure.log || {
+            echo "::error::PHOTON_GUI did not take effect - this build would ship the TUI installer"
+            exit 1
+          }
 
       # One `cmake --build` already produced all four targets — the .xpl, the
       # photoncore static lib, photoncore_tests and photon-installer. This step

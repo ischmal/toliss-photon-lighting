@@ -56,6 +56,7 @@ set(PHOTON_CORE_SOURCES
     src/core/fsutil.cpp
     src/core/marker.cpp
     src/core/acf.cpp
+    src/core/backup.cpp
     src/core/manifest.cpp
     src/core/patch_acf.cpp
     src/core/patch_acf_screens.cpp
@@ -63,6 +64,7 @@ set(PHOTON_CORE_SOURCES
     src/core/patch_realwings.cpp
     src/core/config.cpp
     src/core/detect.cpp
+    src/core/wingmod.cpp
     src/core/payload.cpp
     src/core/progress.cpp
     src/core/actions.cpp)
@@ -143,8 +145,74 @@ if(PHOTON_GUI)
     list(APPEND PHOTON_INSTALLER_SOURCES src/installer/gui.cpp)
 endif()
 
+if(WIN32)
+    # --- the executable icon -------------------------------------------------
+    # The whole wiring: one .rc naming one .ico. `project()` above declares CXX
+    # only, but CMake's Windows-MSVC platform module enables RC on its own, so no
+    # `enable_language(RC)` is needed — verified 2026-08-13 with both the Visual
+    # Studio and the Ninja generators, each of which embedded the icon from this
+    # line alone. (A stated `enable_language(RC)` was tried and removed: it changed
+    # neither build, and a no-op line under a ⚠ reads as load-bearing forever.)
+    #
+    # res/photon.ico is GENERATED from src/icons/*.png by `build/make_icon.py` and
+    # COMMITTED — CMake has to build the installer on a runner with no Python, so
+    # here it is an input. `tests/test_icon.py` is what stops it drifting from the
+    # artwork; the script's header has the rest.
+    list(APPEND PHOTON_INSTALLER_SOURCES res/photon.rc)
+
+    # --- executable metadata (VERSIONINFO) -----------------------------------
+    # What fills Explorer's Properties ▸ Details for the file a user downloads and
+    # double-clicks. A lighting mod's .exe arriving with that tab entirely blank is
+    # what people look at when a binary gets flagged, and some AV heuristics score
+    # a no-version-info binary higher. It is NOT what silences SmartScreen — that
+    # is an Authenticode signature plus download reputation, neither of which this
+    # project has yet.
+    #
+    # ⚠ THE VERSION IS READ, NEVER TYPED. `core/version.h` is the one definition
+    # (see its header, and tests/test_version.py, which fails any build script that
+    # hard-codes one). The `^` anchor is load-bearing: that header discusses
+    # `kPhotonVersion` in its own comments, and the first Python reader written
+    # against it matched a COMMENT and reported the placeholder as the release.
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.h" PHOTON_VERSION_LINE
+         REGEX "^constexpr char kPhotonVersion\\[\\]")
+    if(NOT PHOTON_VERSION_LINE)
+        message(FATAL_ERROR
+            "kPhotonVersion is not defined in src/core/version.h — it must stay on "
+            "one line as a `constexpr char` array with a plain string literal, "
+            "because CMake and the Python build tooling both read it by regex")
+    endif()
+    string(REGEX MATCH "\"([^\"]*)\"" PHOTON_VERSION_MATCH "${PHOTON_VERSION_LINE}")
+    set(PHOTON_VERSION "${CMAKE_MATCH_1}")
+
+    # ⚠ FILEVERSION IS ALWAYS FOUR NUMBERS, whatever kPhotonVersion carries: pad
+    # rather than assume, so "0.9" does not produce a malformed resource script.
+    # Each field is 16-bit, which is fine for dotted release numbers and would
+    # overflow silently under a date-based scheme.
+    string(REPLACE "." ";" PHOTON_VERSION_PARTS "${PHOTON_VERSION}")
+    list(LENGTH PHOTON_VERSION_PARTS PHOTON_VERSION_N)
+    while(PHOTON_VERSION_N LESS 4)
+        list(APPEND PHOTON_VERSION_PARTS 0)
+        math(EXPR PHOTON_VERSION_N "${PHOTON_VERSION_N} + 1")
+    endwhile()
+    string(REPLACE ";" "," PHOTON_VERSION_COMMAS "${PHOTON_VERSION_PARTS}")
+
+    configure_file(res/version_rc.h.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/generated/photon_version_rc.h" @ONLY)
+endif()
+
 add_executable(photon-installer ${PHOTON_INSTALLER_SOURCES})
 target_link_libraries(photon-installer PRIVATE photoncore)
+
+if(WIN32)
+    # ⚠ rc.exe TAKES ITS INCLUDE PATH FROM THE TARGET'S, so the generated version
+    # header has to be on it — CMake passes <INCLUDES> to the RC compile rule under
+    # Ninja/Makefiles and fills ResourceCompile/AdditionalIncludeDirectories under
+    # the Visual Studio generator. Without this line the .rc fails to compile
+    # outright, which at least fails loudly; the quiet failure mode lives in the
+    # .rc itself (see the codepage note there).
+    target_include_directories(photon-installer
+                               PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+endif()
 
 # --- the Slint GUI front-end -------------------------------------------------
 # ⚠ SLINT IS GPLv3 HERE, AND THAT IS A DELIBERATE CHOICE (2026-08-12). Slint's
@@ -216,11 +284,17 @@ if(PHOTON_GUI)
     FetchContent_Declare(
         Slint
         GIT_REPOSITORY https://github.com/slint-ui/slint.git
-        # ⚠ PIN THIS TO AN EXACT TAG BEFORE THE FIRST RELEASE BUILD. `release/1` is
-        # a MOVING tag: it is the right thing while the UI is being written and the
-        # wrong thing for a reproducible bundle, because two CI runs a month apart
-        # would compile different Slint versions into the same Photon version.
-        GIT_TAG release/1
+        # ⚠ AN EXACT TAG, NEVER A MOVING ONE (pinned 2026-08-15, was `release/1`).
+        # `release/1` tracks the newest 1.x, so two CI runs a month apart would
+        # compile different Slint into the same Photon version — and the GUI is
+        # now built by CI on all three runners, which is exactly where that
+        # unreproducibility would land in a published bundle.
+        #
+        # v1.17.1 is the version the GUI was developed and verified against here.
+        # ⚠ ITS `rust-version` IS 1.92, and that is where the toolchain floor in
+        # run-installer.ps1 and the CI workflow comes from — bump this tag and
+        # re-read Slint's own MSRV before assuming the runners still satisfy it.
+        GIT_TAG v1.17.1
         SOURCE_SUBDIR api/cpp)
     FetchContent_MakeAvailable(Slint)
 

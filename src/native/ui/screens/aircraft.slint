@@ -6,15 +6,25 @@
 
 import { Tokens } from "../tokens.slint";
 import {
-    AircraftEntry, AircraftCard, Header1, WellRecess, PhotonScrollView
+    AircraftEntry, AircraftCard, Header1, WellRecess, PhotonScrollView,
+    PhotonContextMenu
 } from "../widgets.slint";
 
 export component AircraftScreen inherits Rectangle {
     in property <[AircraftEntry]> aircraft;
     in property <int> selected: -1;
     callback select(int);
+    // Right-clicked row -> "Open aircraft folder...". ⚠ NOT `selected` — the
+    // menu acts on the row under the pointer, which the card deliberately does
+    // not select. See AircraftCard's `context-menu`.
+    callback open-folder(int);
 
     background: Tokens.screen-bg;
+
+    // Which row the open menu belongs to. ⚠ Captured at right-click and read
+    // when a row is chosen, because by then the pointer has moved on and the
+    // card that raised it is no longer under it.
+    property <int> menu-row: -1;
 
     // ⚠ THE LIST IS ONE TAB STOP AND THE ARROWS MOVE THE SELECTION ITSELF —
     // there is no separate focus cursor travelling over unselected rows. That is
@@ -139,6 +149,16 @@ export component AircraftScreen inherits Rectangle {
                             keys.focus();
                             root.select(idx);
                         }
+                        // Window coordinates in, screen coordinates out — the
+                        // menu sits at this screen's origin, so subtracting the
+                        // screen's own absolute position is the whole
+                        // conversion. Both ends read `absolute-position`, so a
+                        // rail that changes width moves neither.
+                        context-menu(ax, ay) => {
+                            root.menu-row = idx;
+                            menu.show-at(ax - root.absolute-position.x,
+                                         ay - root.absolute-position.y);
+                        }
                     }
                 }
             }
@@ -194,6 +214,25 @@ export component AircraftScreen inherits Rectangle {
                     // wizard once a row is chosen.
                     return reject;
                 }
+            }
+        }
+    }
+
+    // ⚠ OUTSIDE THE LAYOUT AND OUTSIDE THE WELL. Three separate reasons, and
+    // only the first is about this screen:
+    //   * `PhotonContextMenu` pins itself to its parent's origin, and a layout
+    //     overrides its children's x/y — inside one, every menu would open
+    //     offset by wherever the layout put the row.
+    //   * the well is `clip: true`, and while a popup is drawn by the window
+    //     rather than by the item tree (so it is not actually clipped), putting a
+    //     floating element inside a clipping container is a claim about it that
+    //     is not true.
+    //   * one menu for the whole list, not one per card — see AircraftCard.
+    menu := PhotonContextMenu {
+        entries: ["Open aircraft folder..."];
+        activated(index) => {
+            if (index == 0 && root.menu-row >= 0) {
+                root.open-folder(root.menu-row);
             }
         }
     }

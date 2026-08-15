@@ -71,7 +71,7 @@ give you.
 | 8 | `.acf`: patch the variant-independent geometry at install, move **color** into the OBJ where it becomes runtime-switchable (§3.4). An `.acf` requirement is a problem to solve, not a hard block. |
 | 9 | Category granularity: the **four rheostat-derived categories** of §2.2. |
 | 10 | Interior selection persists **per livery**, same as exterior. |
-| 11 | Patch **all four `.acf`** per airframe (XP12 HD + StdDef, XP11 HD + StdDef). |
+| 11 | Patch the **XP12 pair** per airframe (HD + StdDef). ⚠ Was all four until 2026-08-15; an *uninstall* still reverts all four (§3.5). |
 | 12 | Install-state validation reads **whether our modified lines are present**, never a file hash — the `.acf` legitimately carries other mods' edits (§3.5). |
 | 13 | The third `.acf` spot (`ckpt/lights/map`) is re-added as **`LIGHT_SPILL_CUSTOM`** (§3.4). |
 | 14 | **A330-900 is out of scope** for interior lighting entirely. |
@@ -204,7 +204,8 @@ normalize, it is visually irrelevant, but *decide* rather than drift.
 
 The installer's backup of the untouched aircraft file is the authority for what is
 Gus's and what is ToLiss's, and it answers several standing questions at once. Read it
-at `<X-Plane>/Aircraft/ToLiss<type>/objects/Photon Backup Files/lights_inn.obj`.
+at `<X-Plane>/Aircraft/ToLiss<type>/Photon Backup Files/lights_inn.obj` (an install written by an
+earlier installer keeps that folder one level down, inside `objects/`).
 
 | Lamp | Stock lines | Stock `INDEX` | Stock `dir` | Stock `cone` | Stock `SIZE` | Gus lines | Gus `INDEX` |
 |---|---|---|---|---|---|---|---|
@@ -803,11 +804,20 @@ The only per-airframe difference in the whole spot block is `_spot*_3d_xyz/2`
 
 ### 3.5 `.acf` patching: scope, format, detection
 
-**Scope (decision #11):** all four files per airframe — `a3xx.acf`, `a3xx_StdDef.acf`,
-`a3xx_XP11.acf`, `a3xx_XP11_StdDef.acf`. All four carry identical spot values, so it is
-one constant patch applied four times. (Photon's OBJ work stays XP12-only; the `.acf`
-patch does not, because `lights_inn.obj` is shared by every variant — an XP11 user would
-otherwise get patched OBJ lights alongside unpatched sim spots.)
+**Scope (decision #11, NARROWED 2026-08-15):** the **XP12 pair** — `a3xx.acf` and
+`a3xx_StdDef.acf`. Both carry identical spot values, so it is one constant patch applied
+twice.
+
+⚠ **It was all four until 2026-08-15**, on the argument that `lights_inn.obj` is shared by
+every variant, so an XP11 user would otherwise get patched OBJ lights alongside unpatched
+sim spots. That argument describes a user Photon does not have: the exterior OBJ is
+`lights_out3xx_XP12.obj` and the installer validates an X-Plane **12** root, so there is no
+supported way to reach the mod from XP11. The narrowing came out of the wing-mod check,
+where reading those two files was an actual bug rather than wasted work — full account in
+`docs/installer.md` §*Which `.acf` variants Photon touches*.
+
+⚠ **An UNINSTALL still reverts all four**, because Photon ≤ 0.8.4 patched all four and
+those edits are in the wild. `acf::Variants::Every` vs `::Xp12`; the direction picks.
 
 **⚠ Format trap — XP12 and XP11 are written differently:**
 

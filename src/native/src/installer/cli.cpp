@@ -14,6 +14,7 @@
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/version.h"
+#include "core/wingmod.h"
 #include "third_party/nlohmann/json.hpp"
 
 namespace photon {
@@ -263,6 +264,22 @@ int CmdStatus(const Args& a) {
                        {"version", inter.version},
                        {"stale", inter.stale}};
     out["manifest"] = ManifestSummary(manifest::Read(objects));
+
+    // ⚠ A THIRD AXIS, AND IT IS ABOUT THE AIRCRAFT RATHER THAN ABOUT PHOTON. The
+    // `exterior.wing` above is the variant Photon was BUILT for, out of the
+    // manifest; this is the wing mod the aircraft is actually RUNNING, read from
+    // the `.acf` table and the wing OBJs. The two disagreeing is the whole reason
+    // the check exists, so they have to be reported separately — folding either
+    // into the other would make the mismatch unreportable. See core/wingmod.h.
+    const wingmod::Result wm = wingmod::Detect(aircraft, airframe);
+    out["wing_mod"] = {
+        {"detected", wm.wing},
+        {"determined", wm.determined},
+        {"acf_variants_agree", wm.agreed},
+        {"healthy", wm.Healthy()},
+        {"summary", wm.summary},
+        {"problems", json(wm.Texts(wingmod::Severity::Problem))},
+        {"notes", json(wm.Texts(wingmod::Severity::Note))}};
     out["ok"] = true;
     return Emit(out, asJson, true);
 }

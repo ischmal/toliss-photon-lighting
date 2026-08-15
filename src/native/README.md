@@ -147,8 +147,11 @@ layout X-Plane expects — `build/ToLissPhoton/<arch>/ToLissPhoton.xpl`, arch =
 src\native\run-installer.ps1 -DryRun            # the GUI. THE usual one.
 src\native\run-installer.ps1 -Tui -DryRun       # the terminal installer
 src\native\run-installer.ps1 -Cli detect --json # a headless subcommand
-src\native\run-installer.ps1 -Payload -Test -DryRun   # restage + both suites first
+src\native\run-installer.ps1 -Test -DryRun      # + both suites first
 ```
+
+It **builds the plugin and restages the payload by itself** — `-Payload` forces a
+restage, `-NoPlugin` skips the `.xpl` build. See the table below for why.
 
 ⚠ **`-DryRun` is how you test an install.** Without it the installer writes to a
 real X-Plane install — it is the shipping tool, not a sandbox.
@@ -167,7 +170,17 @@ remember:
 | GUI and no-GUI builds share a tree → Slint recompiles on every flip | separate `build-gui/` and `build-core/` |
 | A cached `PHOTON_GUI=ON` silently makes a "plain" build need Rust | states the flag explicitly every configure |
 | A **GUI-subsystem process does not block the shell**, so `-Cli` would return before it ran | `Start-Process -Wait`, and propagates the exit code |
-| The `.xpl` needs the X-Plane SDK | configures `-DPHOTON_CORE_ONLY=ON`; the installer never needs it |
+| The `.xpl` needs the X-Plane SDK | keeps `build-gui`/`build-core` on `-DPHOTON_CORE_ONLY=ON`; the plugin gets its own tree, and a missing SDK **skips** that step with a warning rather than failing |
+| **Nothing built the `.xpl`**, so a test install laid down whatever plugin `deploy.ps1` last sent to the sim | builds the `ToLissPhoton` target into `build/` before staging |
+| **`--payload-only` staged `<repo>\payload` while the script ran against `release\payload`** — restaging a tree nothing read | one payload location, `release/payload`, for every mode |
+| A staged plugin silently older than the source | restages when the staged `.xpl` is older than the built one, prints its build time before every run, and `make_release.py` refuses to stage one older than `src/native/src/` |
+
+⚠ **THE LAST THREE ROWS ARE ONE SHIPPED BUG** (2026-08-14) and it had no symptom:
+the installer reported success, the files landed, X-Plane loaded a plugin — last
+week's. The only visible trace is the About tab reporting an old version, which
+looks exactly like a half-finished install. That is why the `.xpl`'s build time is
+now printed next to the binary on every run: it is the one fact that makes this
+failure legible from outside.
 
 Only the first Slint build is slow (it compiles from source); after that it is
 cached in `build-gui/` and a rebuild is seconds.
@@ -177,7 +190,8 @@ cached in `build-gui/` and a rebuild is seconds.
 Rarely necessary, and the script's header is the reference. The one flag worth
 knowing on its own is `--payload-dir`: it is accepted by **every** mode, because it
 is handled before the GUI/TUI/CLI split. Stage the bundle **once**
-(`python build\make_release.py --payload-only`) and the loop is a rebuild —
+(`python build\make_release.py --payload-only`, which writes `release\payload`)
+and the loop is a rebuild —
 restaging re-copies ~58 MiB of interior textures every time, which is why the flag
 exists. ⚠ A path that is not a directory is refused **by name** (exit 2) rather
 than falling through to "this build is incomplete", which would send you to
@@ -204,11 +218,25 @@ flag is a copy, not a full recompile. `deploy.ps1` always passes `-DPHOTON_DEV` 
 because a cached `ON` would otherwise be sticky.
 
 **The settings window** (Plugins ▸ ToLiss Photon ▸ … ) is the SHIPPING UI and is one tabbed
-window: Exterior / Cockpit / Displays / About, and every menu path that opens it names a tab.
-The Cockpit tab is present only where the cockpit mod is, on the same test as its submenu.
-The **performance tool is a separate window**, opened from a button at the bottom of the
-Displays tab and from nowhere else — a run is watched against the cockpit, so it has to be
-able to sit somewhere the settings window is not.
+window: Error / Exterior / Cockpit / Displays / About, and every menu path that opens it
+names a tab. The **performance tool is a separate window**, opened from a button at the
+bottom of the Displays tab and from nowhere else — a run is watched against the cockpit, so
+it has to be able to sit somewhere the settings window is not.
+
+⚠ **Two of those five tabs come and go, on two different questions**, and both used to be
+one bool:
+
+- **Error** appears when `gInstallStale` — a ToLiss update or a reinstall has put the stock
+  exterior OBJ back — and when it does it **replaces** Exterior / Cockpit / Displays rather
+  than joining them, because the plugin has switched every feature off and a grayed page
+  beside the explanation invites trying it. The menu changes shape with it: one row,
+  *Reinstall required…*, and About. See CLAUDE.md §*A reverted install*.
+- **Cockpit** has THREE states, not two (2026-08-14): live where the mod is installed;
+  **present but wholly disabled**, under a line naming the installer option, where the
+  airframe supports the mod and it is not installed; and absent where the airframe has no
+  cockpit mod at all (the A330-900). Its **submenu** is still installed-only — a menu row
+  that opens a page of dead controls is worse than a tab that says so once you are looking
+  at it.
 
 ⚠ **`ImGuiCol_WindowBg` is TRANSPARENT** and the opaque `#23282e` surface is painted by each
 pane, as a child window (`UiBeginPanel` / `UiEndPanel`, color from `PhotonImgui::PanelBg()`).

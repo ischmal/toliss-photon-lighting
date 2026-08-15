@@ -74,10 +74,17 @@ bool IsAttached(const std::string& text);
 std::string PatchText(const std::string& text, int& changed);
 std::string UnpatchText(const std::string& text, int& changed);
 
-std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8);
+// The `.acf` files in an aircraft folder carrying an attachment table. ⚠ `which`
+// IS NOT A DEFAULT-ABLE ARGUMENT: attaching acts on `Xp12` and detaching on
+// `Every` — see `acf::Variants`, which carries the reason both are right.
+std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8,
+                                  acf::Variants which);
 
 struct RunResult {
     std::vector<std::string> touched;
+    // ⚠ The subset that actually differed — see the note on `patch_acf::RunResult`.
+    // Detaching visits four files and changes the two attaching wrote to.
+    std::vector<std::string> changed;
     std::vector<std::string> log;
 };
 

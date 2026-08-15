@@ -16,9 +16,10 @@
 
   What it does, in order:
     1. (-Test only) photoncore_tests + the Python suite; stops if either fails
-    2. (-Payload only) stages release/payload/ -- make_release.py --payload-only
-    3. cmake configure + build, into the tree that matches the mode
-    4. runs the binary, pointed at release/payload/ if one is staged
+    2. builds the PLUGIN (.xpl) into build/, so the payload can stage a current one
+    3. stages release/payload/ when it is missing or stale (-Payload forces)
+    4. cmake configure + build the INSTALLER, into the tree that matches the mode
+    5. runs the binary, pointed at release/payload/
 
   MODES (pick one; default is the GUI)
     (none)               the Slint GUI. Needs Rust; builds into build-gui/.
@@ -33,11 +34,11 @@
     -DryRun              pass --dry-run: every action logged, nothing written.
                          THE DEFAULT WAY TO TEST AN INSTALL. Without it a run
                          edits the aircraft in your live X-Plane for real.
-    -Payload             restage release/payload/ before running. Needed after a
-                         .phdsl or overlay change; the installer reads OBJs from
-                         there, not from dist/.
+    -Payload             force a restage even when nothing looks stale.
     -Test                run both suites first and stop if either fails.
-    -NoBuild             skip cmake; run whatever is already built.
+    -NoPlugin            skip the .xpl build (step 2). Use when you are working on
+                         the installer alone and know the staged plugin is current.
+    -NoBuild             skip cmake for the INSTALLER; run whatever is built.
     -NoRun               build (and stage) but do not launch.
     -Config <cfg>        build config (default: Release).
     -Clean               delete the build tree for the chosen mode first. The
@@ -49,6 +50,30 @@
   detection and every screen still work, but installing fails with "this build is
   incomplete". This script passes --payload-dir automatically when
   release/payload/ exists, and tells you when it does not.
+
+  ⚠ THE PLUGIN IS BUILT AND RESTAGED AUTOMATICALLY, AND THAT IS A 2026-08-14 FIX
+  FOR A REAL STALE INSTALL. Two things went wrong together and each hid the other:
+
+    * `-Payload` ran `make_release.py --payload-only`, whose --out defaulted to the
+      REPO ROOT -- so it staged <repo>\payload while this script ran the binary
+      against release\payload. Restaging updated a tree nothing read. One payload
+      location now, release\payload, for every mode.
+    * Nothing built the .xpl. make_release COPIES one out of
+      src\native\build\ToLissPhoton, and the only thing that ever refreshed that
+      folder was deploy.ps1 -- so an installer test run happily installed whatever
+      plugin was last deployed to the sim, hours or days old.
+
+  Neither has a symptom. The installer reports success, the files land, X-Plane
+  loads a plugin -- last week's. So: step 2 builds the .xpl in its own tree (the
+  installer's build-gui/build-core stay PHOTON_CORE_ONLY, which is what keeps
+  installer work possible with no X-Plane SDK), step 3 restages when the staged
+  copy is older than the built one, and `make_release.py` REFUSES outright to
+  stage an .xpl older than its own sources.
+
+  ⚠ THE .xpl BUILD NEEDS THE X-PLANE SDK at src\native\SDK. Without it step 2 is
+  SKIPPED WITH A WARNING rather than failing: working on the installer with no SDK
+  is a supported thing to do (that is what PHOTON_CORE_ONLY is for), and the
+  payload keeps whatever plugin it already had.
 
   ⚠ THE GUI BUILD NEEDS RUST, and on this machine Rust is installed but NOT on
   PATH (it lives in %USERPROFILE%\.cargo\bin). The script adds it. A shell without
@@ -69,6 +94,7 @@ param(
     [switch] $DryRun,
     [switch] $Payload,
     [switch] $Test,
+    [switch] $NoPlugin,
     [switch] $NoBuild,
     [switch] $NoRun,
     [switch] $Clean,
@@ -86,6 +112,18 @@ $repo = Split-Path -Parent (Split-Path -Parent $here)   # src/native -> src -> r
 $gui   = -not $Tui
 $build = Join-Path $here $(if ($gui) { 'build-gui' } else { 'build-core' })
 $exe   = Join-Path $build "$Config\photon-installer.exe"
+
+# ⚠ A THIRD TREE, AND THE PLUGIN'S ALONE. build/ is deploy.ps1's -- the shipping
+# (PHOTON_DEV=OFF) .xpl, and the folder make_release.py copies from by default.
+# The .xpl is NOT built into build-gui/build-core: those are configured
+# PHOTON_CORE_ONLY so installer work needs no X-Plane SDK, and putting the plugin
+# in with them would make Slint and the SDK each other's prerequisite.
+$pluginBuild = Join-Path $here 'build'
+$pluginDir   = Join-Path $pluginBuild 'ToLissPhoton'
+$sdkHeader   = Join-Path $here 'SDK\CHeaders\XPLM\XPLMDefs.h'
+$payloadDir  = Join-Path $repo 'release\payload'
+$stagedXpl   = Join-Path $payloadDir 'plugin\ToLissPhoton\win_x64\ToLissPhoton.xpl'
+$builtXpl    = Join-Path $pluginDir 'win_x64\ToLissPhoton.xpl'
 
 function Find-CMake {
     $c = (Get-Command cmake -ErrorAction SilentlyContinue).Source
@@ -166,14 +204,97 @@ if ($Test) {
     Invoke-RepoPython $py @('-m','unittest','discover','-s','tests') "Running the Python suite..."
 }
 
-# ---- 2. payload -------------------------------------------------------------
-$payloadDir = Join-Path $repo 'release\payload'
-if ($Payload) {
-    $py = Find-Python
-    Invoke-RepoPython $py @('build/make_release.py','--payload-only') "Staging release/payload..."
+# ---- 2. the plugin ----------------------------------------------------------
+# ⚠ See the header. The payload's .xpl is COPIED from $pluginDir by make_release,
+# and before this step existed the only thing that ever wrote that folder was
+# deploy.ps1 -- so testing the installer installed whatever plugin had last been
+# deployed to the sim.
+if (-not $NoPlugin) {
+    if (-not (Test-Path $sdkHeader)) {
+        Write-Host ""
+        Write-Host "X-Plane SDK not found at $sdkHeader" -ForegroundColor Yellow
+        Write-Host "Skipping the plugin build - the payload keeps the .xpl it already has." -ForegroundColor Yellow
+        Write-Host "Installer work does not need the SDK; a plugin TEST does." -ForegroundColor DarkGray
+    } else {
+        $cmake = Find-CMake
+        # PHOTON_DEV stated explicitly for the reason deploy.ps1 states it: a
+        # cached ON is sticky, and a dev .xpl in a payload is a build that can
+        # paint magenta over the captain's PFD, handed to a tester.
+        Write-Host "Building the plugin (.xpl, Release)..." -ForegroundColor Cyan
+        & $cmake -S $here -B $pluginBuild -A x64 -DPHOTON_DEV=OFF
+        if ($LASTEXITCODE -ne 0) { throw "plugin cmake configure failed (exit $LASTEXITCODE)" }
+        # ONLY the .xpl target: this tree also holds a photon-installer and the
+        # core tests, and rebuilding those here would duplicate step 4 for nothing.
+        & $cmake --build $pluginBuild --config $Config --target ToLissPhoton
+        if ($LASTEXITCODE -ne 0) { throw "plugin build failed (exit $LASTEXITCODE)" }
+    }
 }
 
-# ---- 3. build ---------------------------------------------------------------
+# ---- 3. payload -------------------------------------------------------------
+# Restaged when it is MISSING or STALE, not only when asked. -Payload is now the
+# force, not the correctness switch: "you must remember a flag or your install is
+# silently a day old" is the bug this whole section exists to close.
+#
+# ⚠ The plugin is compared to its OWN staged copy, not to the payload's newest
+# file. copytree preserves mtimes, so the staged .xpl carries its build time and
+# the two are directly comparable -- and the payload-wide newest is exactly the
+# wrong stamp for it, since freshly built OBJs would mask a year-old .xpl.
+function Get-NewestWrite {
+    param([string[]] $Paths)
+    $newest = [datetime]::MinValue
+    foreach ($p in $Paths) {
+        if (-not (Test-Path $p)) { continue }
+        $item = Get-Item $p
+        if ($item.PSIsContainer) {
+            # __pycache__ is excluded: a .pyc rewritten by any python run is not
+            # a payload input, and "a payload input changed" is a message that
+            # has to be true or nobody reads it.
+            $f = Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\__pycache__\\' } |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($f -and $f.LastWriteTime -gt $newest) { $newest = $f.LastWriteTime }
+        } elseif ($item.LastWriteTime -gt $newest) { $newest = $item.LastWriteTime }
+    }
+    return $newest
+}
+
+function Get-PayloadStaleReason {
+    if (-not (Test-Path $payloadDir)) { return "no payload staged yet" }
+    if ((Test-Path $builtXpl) -and (-not (Test-Path $stagedXpl))) {
+        return "a plugin has been built but none is staged"
+    }
+    if ((Test-Path $builtXpl) -and (Test-Path $stagedXpl)) {
+        $built  = (Get-Item $builtXpl).LastWriteTime
+        $staged = (Get-Item $stagedXpl).LastWriteTime
+        if ($staged -lt $built) {
+            return ("the staged plugin is older than the built one ({0:yyyy-MM-dd HH:mm} vs {1:yyyy-MM-dd HH:mm})" -f $staged, $built)
+        }
+    }
+    # The payload's OTHER inputs. Coarse on purpose -- a spurious restage costs
+    # seconds and a missed one costs a debugging session.
+    $inputs = @(
+        (Join-Path $repo 'src\lights'),
+        (Join-Path $repo 'build'),
+        (Join-Path $here 'overlays')
+    )
+    $newestIn  = Get-NewestWrite $inputs
+    $newestOut = Get-NewestWrite @($payloadDir)
+    if ($newestIn -gt $newestOut) {
+        return ("a payload input changed at {0:yyyy-MM-dd HH:mm}, after the last staging" -f $newestIn)
+    }
+    return $null
+}
+
+$staleReason = Get-PayloadStaleReason
+if ($Payload -or $staleReason) {
+    $why = if ($Payload -and -not $staleReason) { "forced with -Payload" } else { $staleReason }
+    $py = Find-Python
+    Invoke-RepoPython $py @('build/make_release.py','--payload-only') "Staging release/payload ($why)..."
+} else {
+    Write-Host "Payload is current - not restaging (-Payload forces one)." -ForegroundColor DarkGray
+}
+
+# ---- 4. build the installer -------------------------------------------------
 if ($Clean -and (Test-Path $build)) {
     Write-Host "Removing $build..." -ForegroundColor Yellow
     Remove-Item $build -Recurse -Force
@@ -186,8 +307,11 @@ if (-not $NoBuild) {
     # in a shared tree is how a "plain" build quietly keeps needing Rust; the same
     # reasoning as deploy.ps1 stating PHOTON_DEV every time.
     $guiArg = if ($gui) { "-DPHOTON_GUI=ON" } else { "-DPHOTON_GUI=OFF" }
-    # PHOTON_CORE_ONLY skips the .xpl, so no X-Plane SDK is needed to work on the
-    # installer. deploy.ps1 is what builds the plugin.
+    # ⚠ PHOTON_CORE_ONLY skips the .xpl, so no X-Plane SDK is needed to work on
+    # the installer -- and that stays true now that this script builds the plugin
+    # too, because the plugin goes in its OWN tree (step 2). Turning it off here
+    # to "get both in one build" would make the SDK a hard requirement for every
+    # installer change and drag Slint into every plugin change.
     Write-Host ("Configuring ({0})..." -f $(if ($gui) { 'GUI, Slint' } else { 'no GUI' })) -ForegroundColor Cyan
     if ($gui) { Write-Host "  first Slint build compiles from source - several minutes, then cached." -ForegroundColor DarkGray }
     & $cmake -S $here -B $build -A x64 $guiArg -DPHOTON_CORE_ONLY=ON
@@ -205,16 +329,33 @@ $info = Get-Item $exe
 Write-Host ("built -> {0}" -f $exe) -ForegroundColor Green
 Write-Host ("         {0:N1} MB, {1}" -f ($info.Length / 1MB), $info.LastWriteTime)
 
-# ---- 4. run -----------------------------------------------------------------
-$args = @()
+# ---- 5. run -----------------------------------------------------------------
+# ⚠ $runArgs, not $args. `$args` is a PowerShell AUTOMATIC variable (a function's
+# own unbound arguments), and assigning to it is a trap waiting for the first
+# helper this file grows.
+$runArgs = @()
 if (Test-Path $payloadDir) {
-    $args += @('--payload-dir', $payloadDir)
+    $runArgs += @('--payload-dir', $payloadDir)
+    # ⚠ THE .xpl THIS RUN WILL INSTALL, named on screen right before the run.
+    # There is no other way to see it: the installer reports success either way,
+    # and the plugin's own version only moves between releases, so a plugin days
+    # older than the source reads as a perfectly good install until someone
+    # notices a fix is missing. That is the whole bug this line exists for.
+    if (Test-Path $stagedXpl) {
+        $x = Get-Item $stagedXpl
+        Write-Host ("payload -> {0}" -f $payloadDir) -ForegroundColor Green
+        Write-Host ("           ToLissPhoton.xpl  {0:N2} MB, built {1}" -f ($x.Length / 1MB), $x.LastWriteTime)
+    } else {
+        Write-Host ""
+        Write-Host "Payload has NO plugin - an install will lay down OBJs with no .xpl." -ForegroundColor Yellow
+        Write-Host "Build it (drop -NoPlugin, or check the X-Plane SDK is at src\native\SDK)." -ForegroundColor Yellow
+    }
 } else {
     Write-Host ""
     Write-Host "No payload staged at release\payload - DETECTION WORKS BUT INSTALLING WILL FAIL." -ForegroundColor Yellow
     Write-Host "Re-run with -Payload to stage it." -ForegroundColor Yellow
 }
-if ($DryRun) { $args += '--dry-run' }
+if ($DryRun) { $runArgs += '--dry-run' }
 
 if ($NoRun) {
     Write-Host ""
@@ -227,12 +368,12 @@ if ($Cli) {
         throw "-Cli needs a subcommand, e.g. -Cli detect --json"
     }
     # The subcommand FIRST: IsCliInvocation only looks at args[1].
-    $exitCode = Invoke-Installer ($Rest + $args) -Wait
+    $exitCode = Invoke-Installer ($Rest + $runArgs) -Wait
     Write-Host ("exit {0}" -f $exitCode) -ForegroundColor $(if ($exitCode -eq 0) { 'Green' } else { 'Red' })
     exit $exitCode
 }
 
-if ($Tui) { $args += '--tui' }
+if ($Tui) { $runArgs += '--tui' }
 if ($DryRun) {
     Write-Host "DRY RUN - the installer will log every action and write nothing." -ForegroundColor Yellow
 } else {
@@ -240,4 +381,4 @@ if ($DryRun) {
 }
 # The TUI draws in this console and must run in the foreground; the GUI opens its
 # own window, so waiting on it would just block the shell for no reason.
-[void] (Invoke-Installer $args -Wait:$Tui)
+[void] (Invoke-Installer $runArgs -Wait:$Tui)

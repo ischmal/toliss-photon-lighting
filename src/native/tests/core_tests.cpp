@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "core/acf.h"
+#include "core/backup.h"
 #include "core/constants.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
@@ -73,13 +74,22 @@ std::string Read(const fs::path& p) {
     return out;
 }
 
+bool Exists(const fs::path& p) {
+    std::error_code ec;
+    return fs::exists(p, ec) && !ec;
+}
+
 // ── .acf fixtures ────────────────────────────────────────────────────────────
 // The two float styles, same values, as the two file generations really write
 // them. Every `.acf` test runs against BOTH: the format trap's whole nature is
 // that a patch works on one and silently no-ops on the other.
+// ⚠ THE SECOND LINE IS A REAL STAMP, NOT DECORATION. `1200 Version` / `1100
+// Version` is how X-Plane marks an `.acf`'s format, and it is what `acf::IsForXp12`
+// reads to decide which variants Photon writes to. These two fixtures said
+// `1 version` until 2026-08-15, which is neither.
 const char* kAcfXp12 =
     "I\r\n"
-    "1 version\r\n"
+    "1200 Version\r\n"
     "ACF\r\n"
     "P acf/_spot1_3d_xyz/1 1.000000000\r\n"
     "P acf/_spot_angle/0 0.000000000\r\n"
@@ -95,7 +105,7 @@ const char* kAcfXp12 =
 
 const char* kAcfXp11 =
     "I\r\n"
-    "1 version\r\n"
+    "1100 Version\r\n"
     "ACF\r\n"
     "P acf/_spot1_3d_xyz/1 1.0\r\n"
     "P acf/_spot_angle/0 0.0\r\n"
@@ -111,11 +121,10 @@ const char* kAcfXp11 =
 
 std::string AttachmentAcf(bool xp12) {
     const std::string y = xp12 ? "20.750000000" : "20.75";
-    return std::string(
-        "I\r\n"
+    return std::string("I\r\n") + (xp12 ? "1200" : "1100") + " Version\r\n"
         "ACF\r\n"
         "P _obja/0/_v10_att_file_stl fuselage.obj\r\n"
-        "P _obja/0/_v10_att_y_acf_prt_ref ") + y + "\r\n"
+        "P _obja/0/_v10_att_y_acf_prt_ref " + y + "\r\n"
         "P _obja/1/_v10_att_file_stl lights_inn.obj\r\n"
         "P _obja/1/_v10_att_y_acf_prt_ref " + y + "\r\n"
         "P _obja/count 2\r\n";
@@ -127,6 +136,7 @@ std::string AttachmentAcf(bool xp12) {
 std::string AttachmentAcfA339() {
     return std::string(
         "I\r\n"
+        "1200 Version\r\n"
         "ACF\r\n"
         "P _obja/0/_obj_hide_dataref AirbusFBW/ObjectKill\r\n"
         "P _obja/0/_v10_att_file_stl Fuselage_Fwd.obj\r\n"
@@ -371,9 +381,13 @@ TEST("acf: NumericEquals compares numerically, never as a string") {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST("patch_acf: patches BOTH float styles and round-trips each") {
     // ⚠ THE REGRESSION THIS EXISTS FOR: a literal string patch works on the two
-    // XP12 files and silently no-ops on the two XP11 ones. Every airframe ships
-    // all four, so a one-style test would have passed while half the install did
-    // nothing.
+    // XP12 files and silently no-ops on the two XP11 ones.
+    //
+    // ⚠ STILL BOTH STYLES, EVEN THOUGH AN INSTALL NOW ONLY WRITES XP12 FILES
+    // (2026-08-15). The text engine is what a REVERSAL runs on, and a reversal
+    // still reaches the XP11 pair to undo what Photon ≤ 0.8.4 wrote there — so a
+    // renderer that lost the narrow style would leave those files half-reverted.
+    // Which files each direction visits is `acf::Variants`, tested separately.
     for (const char* fixture : {kAcfXp12, kAcfXp11}) {
         const std::string original(fixture);
         CHECK(!patch_acf::IsPatched(original));
@@ -436,15 +450,64 @@ TEST("patch_acf: Run finds .acf files by content and skips .bak siblings") {
     // would corrupt that mod's uninstall.
     Write(tmp / "a320.acf.durantula.bak", kAcfXp12);
 
-    const auto files = patch_acf::AcfFiles(fsutil::PathToUtf8(tmp.path()));
-    CHECK_EQ(files.size(), static_cast<std::size_t>(2));
+    const auto files =
+        patch_acf::AcfFiles(fsutil::PathToUtf8(tmp.path()), acf::Variants::Xp12);
+    CHECK_EQ(files.size(), static_cast<std::size_t>(1));
     for (const std::string& f : files) CHECK(f.find(".bak") == std::string::npos);
 
     const auto res = patch_acf::Run(fsutil::PathToUtf8(tmp.path()), false, false);
-    CHECK_EQ(res.touched.size(), static_cast<std::size_t>(2));
+    CHECK_EQ(res.touched.size(), static_cast<std::size_t>(1));
     CHECK(patch_acf::IsPatched(Read(tmp / "a320.acf")));
-    CHECK(patch_acf::IsPatched(Read(tmp / "a320_XP11.acf")));
+    // ⚠ The XP11 variant is NOT patched (2026-08-15). Nothing Photon builds is for
+    // X-Plane 11, so writing to a file that sim alone loads is work with no reader.
+    CHECK(!patch_acf::IsPatched(Read(tmp / "a320_XP11.acf")));
+    CHECK_EQ(Read(tmp / "a320_XP11.acf"), std::string(kAcfXp11));
     CHECK_EQ(Read(tmp / "a320.acf.durantula.bak"), std::string(kAcfXp12));
+}
+
+TEST("patch_acf: a REVERSAL still reaches the XP11 pair an older Photon patched") {
+    // ⚠ THE ASYMMETRY IS THE POINT, and it is the same rule as the backup folder:
+    // write to the new place, clean up both. Photon <= 0.8.4 patched all four
+    // variants, so an uninstall scoped to XP12 would leave a cockpit spot block
+    // permanently disabled in a file nothing this installer will ever touch again.
+    TempDir tmp;
+    int changed = 0;
+    Write(tmp / "a320.acf", patch_acf::PatchText(kAcfXp12, changed));
+    Write(tmp / "a320_XP11.acf", patch_acf::PatchText(kAcfXp11, changed));
+
+    CHECK_EQ(patch_acf::AcfFiles(fsutil::PathToUtf8(tmp.path()),
+                                 acf::Variants::Every).size(),
+             static_cast<std::size_t>(2));
+
+    const auto res = patch_acf::Run(fsutil::PathToUtf8(tmp.path()), true, false);
+    CHECK_EQ(res.touched.size(), static_cast<std::size_t>(2));
+    // Byte-for-byte back to stock, in each file's OWN float style.
+    CHECK_EQ(Read(tmp / "a320.acf"), std::string(kAcfXp12));
+    CHECK_EQ(Read(tmp / "a320_XP11.acf"), std::string(kAcfXp11));
+}
+
+TEST("acf: the format stamp decides, not the filename") {
+    // ⚠ CONTENT, NOT `_XP11` IN THE NAME. The four-variant naming is ToLiss's
+    // convention; the stamp on line 2 is X-Plane's own.
+    CHECK_EQ(acf::FormatVersion(kAcfXp12), 1200);
+    CHECK_EQ(acf::FormatVersion(kAcfXp11), 1100);
+    CHECK(acf::IsForXp12(kAcfXp12));
+    CHECK(!acf::IsForXp12(kAcfXp11));
+
+    // A later format is still XP12-or-newer, not "unrecognized".
+    CHECK(acf::IsForXp12("I\r\n1300 Version\r\nACF\r\n"));
+
+    // ⚠ NO STAMP READS AS XP12, because the failure to avoid is a SILENT SKIP —
+    // an install that quietly does nothing to a file it was meant to patch. A
+    // caller has already matched a content needle by the time this is asked.
+    CHECK_EQ(acf::FormatVersion("I\r\nACF\r\nP acf/_a 1.0\r\n"), 0);
+    CHECK(acf::IsForXp12("I\r\nACF\r\nP acf/_a 1.0\r\n"));
+
+    // ⚠ THE HEADER ONLY. A whole-file search would find this and call the file
+    // XP11 on the strength of a livery name.
+    CHECK_EQ(acf::FormatVersion(
+                 "I\r\n1200 Version\r\nACF\r\nP acf/_name 1100 Version\r\n"),
+             1200);
 }
 
 TEST("patch_acf: a dry run writes nothing") {
@@ -669,11 +732,13 @@ TEST("manifest: missing and corrupt both read as ABSENT, never as an error") {
     // caller reports honestly — rather than aborting an uninstall the user still
     // needs.
     TempDir tmp;
-    CHECK(!manifest::Read(fsutil::PathToUtf8(tmp.path())).present);
-    Write(tmp.path() / kBackupDirName / kManifestName, "{not json at all");
-    CHECK(!manifest::Read(fsutil::PathToUtf8(tmp.path())).present);
-    Write(tmp.path() / kBackupDirName / kManifestName, "[1,2,3]");
-    CHECK(!manifest::Read(fsutil::PathToUtf8(tmp.path())).present);
+    const fs::path objects = tmp.path() / "objects";
+    const fs::path mf = tmp.path() / kBackupDirName / kManifestName;
+    CHECK(!manifest::Read(fsutil::PathToUtf8(objects)).present);
+    Write(mf, "{not json at all");
+    CHECK(!manifest::Read(fsutil::PathToUtf8(objects)).present);
+    Write(mf, "[1,2,3]");
+    CHECK(!manifest::Read(fsutil::PathToUtf8(objects)).present);
 }
 
 TEST("manifest: a Python-installer manifest round-trips") {
@@ -780,6 +845,7 @@ TEST("manifest: keys this build does not model survive a round trip") {
 
 TEST("manifest: write then read through a real directory") {
     TempDir tmp;
+    const std::string objects = fsutil::PathToUtf8(tmp.path() / "objects");
     manifest::Manifest m;
     m.present = true;
     m.version = kPhotonVersion;
@@ -788,12 +854,133 @@ TEST("manifest: write then read through a real directory") {
     m.screens.installed = true;
     m.screens.added = {kScreensObj};
     std::string err;
-    CHECK(manifest::Write(fsutil::PathToUtf8(tmp.path()), m, err));
-    const manifest::Manifest back = manifest::Read(fsutil::PathToUtf8(tmp.path()));
+    CHECK(manifest::Write(objects, m, err));
+    // ⚠ WHERE it landed is half the test. The manifest indexes the backups and has
+    // to sit with them, and they are no longer in the aircraft's asset folder.
+    CHECK(Exists(tmp.path() / kBackupDirName / kManifestName));
+    CHECK(!Exists(tmp.path() / "objects" / kBackupDirName / kManifestName));
+    const manifest::Manifest back = manifest::Read(objects);
     CHECK(back.present);
     CHECK_EQ(back.wing, std::string("durantula"));
     CHECK_EQ(back.backedUp.size(), static_cast<std::size_t>(2));
     CHECK(back.screens.installed);
+}
+
+TEST("manifest: an older layout's manifest inside objects/ is still FOUND") {
+    // ⚠ THE EXPENSIVE FAILURE, and the reason the location is resolved rather than
+    // spelled out. An installer that cannot see an existing manifest believes
+    // nothing is installed — and then backs up the OBJ it wrote last time as though
+    // it were ToLiss's, which no later uninstall can undo.
+    TempDir tmp;
+    const std::string objects = fsutil::PathToUtf8(tmp.path() / "objects");
+    Write(tmp.path() / "objects" / kBackupDirName / kManifestName,
+          R"({"version":"0.8.4","wing":"stock","backed_up":["lights_out320_XP12.obj"]})");
+    const manifest::Manifest m = manifest::Read(objects);
+    CHECK(m.present);
+    CHECK_EQ(m.version, std::string("0.8.4"));
+    CHECK_EQ(m.backedUp.size(), static_cast<std::size_t>(1));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// backup — which folder the bookkeeping lives in, and moving an old one out
+// ─────────────────────────────────────────────────────────────────────────────
+TEST("backup: the folder sits beside objects/, not inside it") {
+    TempDir tmp;
+    CHECK_EQ(backup::Dir(tmp.path()), tmp.path() / kBackupDirName);
+    CHECK_EQ(backup::DirForObjects(tmp.path() / "objects"),
+             tmp.path() / kBackupDirName);
+}
+
+TEST("backup: a trailing separator does not resolve one level short") {
+    // `…/objects/` has an EMPTY filename, so a bare `parent_path()` answers
+    // `…/objects` — which would put the backups back inside the asset folder, by
+    // way of a path that came in as text from a config file or a CLI flag.
+    TempDir tmp;
+    const fs::path withSlash =
+        fsutil::PathFromUtf8(fsutil::PathToUtf8(tmp.path() / "objects") + "/");
+    CHECK_EQ(backup::DirForObjects(withSlash), tmp.path() / kBackupDirName);
+}
+
+TEST("backup: a legacy folder WINS while it still holds files") {
+    // One resolver, so the manifest and the files it indexes can never end up in
+    // two different folders — including when a migration fails halfway.
+    TempDir tmp;
+    Write(tmp.path() / "objects" / kBackupDirName / "lights_out320_XP12.obj", "stock");
+    CHECK(backup::LegacyDirInUse(tmp.path()));
+    CHECK_EQ(backup::Dir(tmp.path()), backup::LegacyDir(tmp.path()));
+}
+
+TEST("backup: an EMPTY legacy folder does not keep sending backups into objects/") {
+    // ⚠ Files, not merely a folder. An uninstall that could not remove the old
+    // directory, or a half-finished move, leaves an empty one — and treating that
+    // as "still in use" would put every future backup right back where this whole
+    // change is getting them out of.
+    TempDir tmp;
+    std::error_code ec;
+    fs::create_directories(backup::LegacyDir(tmp.path()), ec);
+    CHECK(!backup::LegacyDirInUse(tmp.path()));
+    CHECK_EQ(backup::Dir(tmp.path()), backup::PreferredDir(tmp.path()));
+}
+
+TEST("backup: migrate moves the whole folder, liveries subfolder and all") {
+    TempDir tmp;
+    const fs::path legacy = backup::LegacyDir(tmp.path());
+    Write(legacy / "lights_out320_XP12.obj", "STOCK OBJ");
+    Write(legacy / kManifestName, R"({"version":"0.8.4"})");
+    Write(legacy / "liveries" / "liveries__Air France__objects__chairs_LIT.dds",
+          "STOCK DDS");
+
+    const backup::MigrateResult r = backup::Migrate(tmp.path(), /*dryRun=*/false);
+    CHECK(r.needed);
+    CHECK(r.complete);
+    CHECK_EQ(r.files, 3);
+    CHECK(!Exists(legacy));
+    const fs::path now = backup::PreferredDir(tmp.path());
+    CHECK_EQ(Read(now / "lights_out320_XP12.obj"), std::string("STOCK OBJ"));
+    CHECK_EQ(Read(now / "liveries" /
+                      "liveries__Air France__objects__chairs_LIT.dds"),
+             std::string("STOCK DDS"));
+    CHECK(Exists(now / kManifestName));
+}
+
+TEST("backup: a legacy file OVERWRITES a same-named one at the destination") {
+    // ⚠ The merge rule, and it runs the opposite way to "newest wins". Nothing has
+    // written to objects/ since the upgrade, so the legacy copy is the OLDER one —
+    // and under the backup-once rule the oldest copy is the closest to stock. A
+    // newer file at the destination can only be a backup of Photon's own work.
+    TempDir tmp;
+    Write(backup::LegacyDir(tmp.path()) / "lights_out320_XP12.obj", "TRUE STOCK");
+    Write(backup::PreferredDir(tmp.path()) / "lights_out320_XP12.obj",
+          "PHOTON'S OWN OBJ");
+
+    CHECK(backup::Migrate(tmp.path(), /*dryRun=*/false).complete);
+    CHECK_EQ(Read(backup::PreferredDir(tmp.path()) / "lights_out320_XP12.obj"),
+             std::string("TRUE STOCK"));
+    CHECK(!Exists(backup::LegacyDir(tmp.path())));
+}
+
+TEST("backup: a dry run reports the move and performs none of it") {
+    TempDir tmp;
+    Write(backup::LegacyDir(tmp.path()) / "lights_out320_XP12.obj", "STOCK");
+    const backup::MigrateResult r = backup::Migrate(tmp.path(), /*dryRun=*/true);
+    CHECK(r.needed);
+    CHECK(!r.complete);
+    CHECK_EQ(r.files, 1);
+    CHECK(Exists(backup::LegacyDir(tmp.path()) / "lights_out320_XP12.obj"));
+    CHECK(!Exists(backup::PreferredDir(tmp.path())));
+}
+
+TEST("backup: migrating with nothing to move is a no-op that tidies an empty one") {
+    TempDir tmp;
+    const backup::MigrateResult none = backup::Migrate(tmp.path(), false);
+    CHECK(!none.needed);
+    CHECK(none.complete);
+    CHECK(!Exists(backup::PreferredDir(tmp.path())));   // nothing is CREATED
+
+    std::error_code ec;
+    fs::create_directories(backup::LegacyDir(tmp.path()), ec);
+    CHECK(backup::Migrate(tmp.path(), false).complete);
+    CHECK(!Exists(backup::LegacyDir(tmp.path())));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

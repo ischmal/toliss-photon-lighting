@@ -41,6 +41,10 @@ Usage:
     python build/make_release.py [--out DIR] [--plugin-dir DIR] [--bundle]
     python build/make_release.py --payload-only [--out DIR]
 
+⚠ Prefer `src/native/run-installer.ps1` over calling this by hand for a test
+install: it builds the plugin first, restages when the payload has gone stale, and
+points the binary at the tree it just wrote. THE SCRIPT IS THE DOCUMENTATION.
+
 Output (default --out release/, gitignored like dist/) — the STAGING layout, which
 is what the binary reads when run from a checkout, not a download:
     release/photon-installer[.exe]                    the compiled installer
@@ -73,18 +77,37 @@ is written into the `.zip` external attrs too, so a macOS extraction is runnable
 without a manual `chmod`.
 
 `--payload-only` stages just `payload/` (no installer copy, no README, no archive,
-and no plugin unless one is built) into `--out`, defaulting to the REPO ROOT so it
-lands beside the repo root. That is the dev path: point the freshly built
+and no plugin unless one is built). That is the dev path: point the freshly built
 `photon-installer` at it with `--payload-dir`, or copy the binary next to it. The
 Python installer used to build OBJs on the fly from the DSL when run out of a
 checkout, which made the toolchain an install-time dependency in the one place it
 had to not be; staging is what replaced that.
+
+⚠ THERE IS EXACTLY ONE PAYLOAD LOCATION, `release/payload/`, AND `--payload-only`
+USES IT TOO (2026-08-14). It used to default `--out` to the REPO ROOT, staging to
+`<repo>/payload/` — while `run-installer.ps1` ran the binary with
+`--payload-dir release/payload`. So `-Payload` diligently rebuilt one tree and
+every test install read the OTHER, which was whatever an earlier full run had left
+there. The symptom is the worst kind: the installer works, reports success, and
+installs a stale `.xpl` and stale OBJs, which in-sim is indistinguishable from a
+half-finished install. Two staging roots is the bug; one is the fix. (`release/`
+is also gitignored, which the repo root is not — the old default left a ~57 MiB
+untracked tree sitting in `git status`.)
+
+⚠ AND NOTHING HERE BUILDS THE PLUGIN — `stage_plugin` COPIES one. That is right
+for CI (the matrix builds the `.xpl` in the same job, then calls this) and was the
+other half of the same stale-install bug locally, where the only thing that ever
+refreshed `src/native/build/ToLissPhoton/` was `deploy.ps1`. `run-installer.ps1`
+now builds it before staging; `stage_plugin` additionally REFUSES an `.xpl` older
+than the plugin sources, so the mistake cannot be made silently from any caller.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
+import stat
 import sys
 import tarfile
 import time
@@ -110,8 +133,54 @@ from version import VERSION  # noqa: E402  (build/version.py)
 # Default location of the compiled native fat-plugin folder (CMake build output).
 DEFAULT_PLUGIN_DIR = REPO / "src" / "native" / "build" / PLUGIN_FOLDER
 
+# What the staged .xpl is compared against — the trees whose contents end up
+# INSIDE it. Anything newer than the binary means the binary predates the change.
+#
+# ⚠ Deliberately not "everything under src/". The DSL and the overlays are payload
+# inputs, not plugin inputs: they are restaged every run and their being newer says
+# nothing about whether the .xpl needs rebuilding. Listing them here would make the
+# check cry wolf on every .phdsl edit, and a check that always fires is one that
+# gets passed --allow-stale-plugin as a reflex.
+PLUGIN_SOURCE_PATHS = (
+    REPO / "src" / "native" / "src",
+    REPO / "src" / "native" / "CMakeLists.txt",
+)
+
 # platform.system() -> the pretty OS name used in the bundle filename + README.
 OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
+
+
+def _force_writable(func, path, _exc):
+    """`shutil.rmtree` onexc hook: clear the read-only bit and retry once.
+
+    ⚠ NOT DEFENSIVE PROGRAMMING — this repo lives under OneDrive, which leaves
+    behind directories that are reparse points with FILE_ATTRIBUTE_READONLY set,
+    and `os.rmdir` on one fails with WinError 5. rmtree gives up where it fails,
+    so a restage died PART WAY THROUGH: half the payload deleted, none of it
+    rebuilt, and the next run pointed at the wreckage."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        raise
+
+
+def _rmtree(path: Path):
+    shutil.rmtree(path, onexc=_force_writable)
+
+
+def _newest_mtime(paths) -> float:
+    """The newest mtime across `paths`, walking directories. Missing paths are
+    skipped — a check that cannot see its inputs must not accuse the output."""
+    newest = 0.0
+    for p in paths:
+        if p.is_file():
+            newest = max(newest, p.stat().st_mtime)
+        elif p.is_dir():
+            for f in p.rglob("*"):
+                if f.is_file():
+                    newest = max(newest, f.stat().st_mtime)
+    return newest
 
 
 def build_objs_payload(payload: Path):
@@ -201,7 +270,7 @@ def stage_plugin_data(payload: Path):
             f"it is symlinked from the plugin folder — see src/native/README.md.")
     dest_root = payload / PLUGIN_DATA_DIRNAME
     if dest_root.exists():
-        shutil.rmtree(dest_root)
+        _rmtree(dest_root)
     dest_root.mkdir(parents=True)
     # Read + write rather than copyfile: on a dev machine the repo copy is the
     # TARGET of the plugin folder's symlink, and staging must capture its contents
@@ -233,7 +302,7 @@ def stage_interior_textures(payload: Path):
             f"reproduced from any document. See reference/gus/README.md.")
     dest = payload / "textures" / "interior"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     dest.mkdir(parents=True)
     total = 0
     for f in sorted(src.glob("*.png")):
@@ -243,11 +312,52 @@ def stage_interior_textures(payload: Path):
           f"({len(list(dest.glob('*.png')))} files, {total / 1048576:.1f} MiB)")
 
 
-def stage_plugin(payload: Path, plugin_dir: Path):
-    """Copy the compiled native fat-plugin folder into the bundle. Each platform's
-    build produces one <arch>/ToLissPhoton.xpl; a full release carries all three
-    side by side (CI merges the per-OS build matrix). Locally only the arch you
-    built is present — fine for a single-platform test bundle."""
+def check_plugin_freshness(plugin_dir: Path, arches, allow_stale: bool):
+    """⚠ IS THIS `.xpl` OLDER THAN THE CODE IN IT? A stale one is the single most
+    expensive thing this script can stage, because every downstream signal says the
+    run worked: the installer reports success, the files land, X-Plane loads a
+    plugin — just last week's. In-sim that is indistinguishable from a
+    half-finished install, and the About tab reporting an old version is the only
+    hint (the same trap `tests/test_version.py` exists for).
+
+    Nothing here BUILDS it — CI builds the `.xpl` in the same job before calling
+    this, and `run-installer.ps1` builds it locally — so this is the backstop that
+    makes forgetting loud from whichever caller forgot.
+
+    ⚠ Compared against PLUGIN_SOURCE_PATHS only, and see there for why the DSL is
+    not in that list. `--allow-stale-plugin` exists for the one legitimate case:
+    `--plugin-dir` pointed at a merged multi-arch folder assembled from downloaded
+    CI artifacts, whose mtimes mean nothing about this checkout."""
+    newest_src = _newest_mtime(PLUGIN_SOURCE_PATHS)
+    if newest_src == 0.0:
+        return                      # cannot see the sources; do not accuse
+    stale = [(a, (plugin_dir / a / XPL_NAME).stat().st_mtime) for a in arches]
+    stale = [(a, m) for a, m in stale if m < newest_src]
+    if not stale:
+        return
+    lines = "\n".join(
+        f"    {a}/{XPL_NAME}  built {time.strftime('%Y-%m-%d %H:%M', time.localtime(m))}"
+        for a, m in stale)
+    newest = time.strftime('%Y-%m-%d %H:%M', time.localtime(newest_src))
+    message = (
+        f"the plugin in {plugin_dir} is OLDER than its sources "
+        f"(newest source change: {newest}):\n{lines}\n"
+        f"Staging it would install a plugin that predates the code — which looks "
+        f"exactly like a working install until you read the version.\n"
+        f"Build it first:\n"
+        f"  cmake --build src/native/build --config Release --target ToLissPhoton\n"
+        f"or use src/native/run-installer.ps1, which does that for you.\n"
+        f"Pass --allow-stale-plugin only when --plugin-dir holds binaries built "
+        f"elsewhere (e.g. merged CI artifacts).")
+    if not allow_stale:
+        raise SystemExit("error: " + message)
+    print(f"  ! {message.splitlines()[0]} (--allow-stale-plugin)")
+
+
+def plugin_arches(plugin_dir: Path) -> list:
+    """Which `<arch>/ToLissPhoton.xpl` this folder holds, refusing an empty or
+    absent one. Split out of stage_plugin so main() can ask BEFORE it wipes
+    anything — see preflight_plugin."""
     if not plugin_dir.is_dir():
         raise SystemExit(
             f"native plugin folder not found: {plugin_dir}\n"
@@ -260,9 +370,33 @@ def stage_plugin(payload: Path, plugin_dir: Path):
     if not arches:
         raise SystemExit(f"no {XPL_NAME} found under {plugin_dir}/*/ — "
                          f"build the native plugin first")
+    return arches
+
+
+def preflight_plugin(plugin_dir: Path, payload_only: bool, allow_stale: bool):
+    """⚠ EVERY REASON THIS RUN MIGHT REFUSE, ASKED BEFORE IT DELETES ANYTHING.
+
+    main() wipes the output tree before it stages, so a refusal raised down in
+    stage_plugin — the LAST thing staged — costs the caller the payload they
+    already had: no plugin, no OBJs, a minute of texture copying wasted, and
+    nothing to run the installer against. The checks are pure reads, so hoisting
+    them is free and turns a destructive failure into a no-op one."""
+    if payload_only and not plugin_dir.is_dir():
+        return                          # tolerated; stage_plugin is skipped
+    check_plugin_freshness(plugin_dir, plugin_arches(plugin_dir), allow_stale)
+
+
+def stage_plugin(payload: Path, plugin_dir: Path):
+    """Copy the compiled native fat-plugin folder into the bundle. Each platform's
+    build produces one <arch>/ToLissPhoton.xpl; a full release carries all three
+    side by side (CI merges the per-OS build matrix). Locally only the arch you
+    built is present — fine for a single-platform test bundle.
+
+    Validation lives in preflight_plugin, which main() runs before the wipe."""
+    arches = plugin_arches(plugin_dir)
     dest_root = payload / "plugin" / PLUGIN_FOLDER
     if dest_root.exists():
-        shutil.rmtree(dest_root)
+        _rmtree(dest_root)
     # PLUGIN_USER_DIRS (`overlays/`) is skipped, not copied. --plugin-dir may
     # legitimately point at a DEPLOYED plugin folder — that is how a merged
     # multi-arch bundle gets assembled — and such a folder on a dev machine holds
@@ -275,6 +409,14 @@ def stage_plugin(payload: Path, plugin_dir: Path):
     skipped = [d.name for d in sorted(plugin_dir.iterdir())
                if d.is_dir() and d.name in PLUGIN_USER_DIRS]
     print(f"  staged payload/plugin/{PLUGIN_FOLDER}/ (arches: {', '.join(arches)})")
+    # ⚠ The .xpl's IDENTITY, printed every run. copytree preserves mtime, so this
+    # is the build time of the binary a tester is about to install — the one fact
+    # that would have made a day-old plugin obvious instead of invisible.
+    for a in arches:
+        st = (plugin_dir / a / XPL_NAME).stat()
+        print("    %s/%s  %.2f MiB  built %s"
+              % (a, XPL_NAME, st.st_size / 1048576,
+                 time.strftime('%Y-%m-%d %H:%M', time.localtime(st.st_mtime))))
     for name in skipped:
         print(f"    skipped {name}/ — user/dev content, not a shipped artifact")
 
@@ -414,7 +556,7 @@ def build_bundle(out: Path, payload: Path, exe: Path | None,
             "or pass --installer-exe at the binary.")
     stage = out / base_name
     if stage.exists():
-        shutil.rmtree(stage)
+        _rmtree(stage)
     stage.mkdir(parents=True)
     binary = stage / exe.name
     shutil.copy2(exe, binary)
@@ -432,8 +574,8 @@ def build_bundle(out: Path, payload: Path, exe: Path | None,
 
 def main():
     ap = argparse.ArgumentParser(description="Build the ToLiss Photon installer release bundle")
-    ap.add_argument("--out", help="output dir (default: release/, or the repo "
-                                  "root with --payload-only)")
+    ap.add_argument("--out", help="output dir (default: release/, for every mode "
+                                  "including --payload-only)")
     ap.add_argument("--plugin-dir", default=str(DEFAULT_PLUGIN_DIR),
                     help="native fat-plugin folder holding <arch>/%s "
                          "(default: the CMake build output under src/native/build/)" % XPL_NAME)
@@ -445,34 +587,44 @@ def main():
     ap.add_argument("--name", help="override the bundle base name "
                                    "(default ToLissPhoton-Installer-v<VER>-<OS>)")
     ap.add_argument("--payload-only", action="store_true",
-                    help="stage only payload/ (the dev path: stage beside "
-                         "the repo root, then point --payload-dir at it). Tolerates "
-                         "an unbuilt plugin.")
+                    help="stage only release/payload/ (the dev path: stage, then "
+                         "point --payload-dir at it). Tolerates an unbuilt plugin.")
+    ap.add_argument("--allow-stale-plugin", action="store_true",
+                    help="stage a .xpl older than the plugin sources instead of "
+                         "refusing. For --plugin-dir folders built elsewhere "
+                         "(merged CI artifacts), never as a way past a rebuild.")
     ap.add_argument("--installer-exe",
                     help="the compiled photon-installer to stage (default: the "
                          "CMake output under src/native/build*/)")
     args = ap.parse_args()
 
-    out = Path(args.out) if args.out else (REPO if args.payload_only
-                                           else REPO / "release")
+    # ⚠ ONE PAYLOAD LOCATION FOR EVERY MODE. --payload-only used to default here
+    # to the REPO ROOT, so it staged <repo>/payload while run-installer.ps1 ran
+    # the binary against release/payload — restaging one tree and installing from
+    # the other. See the ⚠ in the module docstring.
+    out = Path(args.out) if args.out else REPO / "release"
     if not out.is_absolute():
         out = REPO / out
     payload = out / "payload"
 
-    # ⚠ --payload-only never wipes `out`: its default IS the repo root. Only the
-    # payload/ subtree it owns is replaced.
-    if args.payload_only:
-        if payload.exists():
-            shutil.rmtree(payload)
-        payload.mkdir(parents=True)
-    else:
-        if out.exists():
-            shutil.rmtree(out)
-        out.mkdir(parents=True)
-
     plugin_dir = Path(args.plugin_dir)
     if not plugin_dir.is_absolute():
         plugin_dir = REPO / plugin_dir
+
+    # ⚠ BEFORE THE WIPE BELOW. Everything this can refuse over is knowable from
+    # reads alone, and a refusal after the wipe leaves no payload at all.
+    preflight_plugin(plugin_dir, args.payload_only, args.allow_stale_plugin)
+
+    # ⚠ --payload-only never wipes `out` — a staged bundle and the installer
+    # binary beside it are not its to delete. Only the payload/ subtree it owns.
+    if args.payload_only:
+        if payload.exists():
+            _rmtree(payload)
+        payload.mkdir(parents=True)
+    else:
+        if out.exists():
+            _rmtree(out)
+        out.mkdir(parents=True)
 
     print(f"building {'payload' if args.payload_only else 'release'} "
           f"v{VERSION} -> {out}")

@@ -567,7 +567,14 @@ class ElectricalGateTests(unittest.TestCase):
         and not like a dangling handle.
 
         Null is the SAFE value here (PanelRects falls back to full-res), which is
-        why dropping it on the way out is free."""
+        why dropping it on the way out is free.
+
+        ⚠ THE DROP MOVED into DropAircraftBindings (2026-08-14), the one teardown
+        helper shared by the two exits that need it — leaving a ToLiss, and
+        finding that the install on the one we are on has been reverted. So the
+        two halves are checked in two places, and the call that joins them is
+        checked too: a drop that stopped being reached would otherwise pass this
+        by sitting in a helper nobody invokes."""
         # ⚠ The DEFINITION, not the forward declaration ten pages earlier —
         # `index` finds the decl first and returns a body full of dataref
         # accessors that of course mentions neither symbol.
@@ -577,7 +584,11 @@ class ElectricalGateTests(unittest.TestCase):
         self.assertIn("ResolveDisplayFallback();", body,
                       "the DU rect-set handle is not rebound on aircraft load")
         # ...and dropped on the way out, with the others.
-        self.assertIn("gDisplayFallbackRef = nullptr;", body,
+        self.assertIn("DropAircraftBindings();", body,
+                      "the aircraft-load path no longer releases its bindings")
+        start = PLUGIN_CPP.index("static void DropAircraftBindings() {")
+        teardown = PLUGIN_CPP[start:PLUGIN_CPP.index("\n}\n", start)]
+        self.assertIn("gDisplayFallbackRef = nullptr;", teardown,
                       "the DU rect-set handle is not dropped when a ToLiss goes "
                       "away - it then points into an unloaded plugin")
 

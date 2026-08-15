@@ -83,6 +83,58 @@ std::string SetProps(const std::string& text,
 constexpr double kTolerance = 1e-4;
 bool NumericEquals(const std::string& raw, double want);
 
+// ─── which sim a file is for ─────────────────────────────────────────────────
+//
+// Every `.acf` X-Plane writes stamps its own format version on the SECOND LINE:
+//
+//     I
+//     1200 Version          <- X-Plane 12.  `1100 Version` on an XP11 file
+//     ACF
+//
+// ⚠ THIS IS THE CONTENT TEST, AND `_XP11` IN THE FILENAME IS NOT IT. A ToLiss
+// folder ships four variants — `a320{,_StdDef,_XP11,_XP11_StdDef}.acf` — but the
+// naming is ToLiss's convention, not X-Plane's, and detection-by-content is
+// already the principle governing every other question this installer asks about
+// an aircraft folder. Verified against all four airframes here (2026-08-15): the
+// XP12 pair stamps 1200 and the XP11 pair 1100, every time.
+//
+// ⚠ NOT `DetectStyle`, WHICH ANSWERS A DIFFERENT QUESTION. That one votes on how
+// floats are RENDERED so a patch can be written back in the file's own style, and
+// it has no "cannot tell" — it must return one of two styles for any text. This
+// one is a stamp that is either there or not.
+constexpr int kXp12FormatVersion = 1200;
+
+// The stamp, or 0 when there is none to read.
+int FormatVersion(const std::string& text);
+
+// ⚠ AN UNSTAMPED FILE IS TREATED AS XP12, and that is deliberate: the failure it
+// avoids is a SILENT SKIP. Everything gated on this has already passed a content
+// needle, so "no stamp" means an `.acf` unlike any X-Plane writes — and excluding
+// it would make an install quietly do nothing to a file it was meant to patch,
+// which is the exact shape of the format trap at the top of this header.
+bool IsForXp12(const std::string& text);
+
+// Which of an aircraft's `.acf` variants an operation acts on.
+//
+// ⚠ PHOTON WRITES TO THE XP12 PAIR ONLY (2026-08-15). Nothing it builds is for
+// X-Plane 11 — the exterior OBJ is literally `lights_out3xx_XP12.obj` — so
+// patching the XP11 pair was work with no reader, and READING it was worse: the
+// wing-mod check took the four variants' verdicts as a consensus, and RealWings'
+// own instructions are a Plane Maker session on ONE file, so an XP11 variant left
+// stock made a correct RealWings install report that its `.acf` files "do not
+// agree".
+//
+// ⚠ A REVERSAL STILL REACHES EVERY VARIANT, and that is not an inconsistency.
+// Photon ≤ 0.8.4 patched all four, so those edits exist in the wild: an uninstall
+// scoped to XP12 would leave an XP11 file naming `lights_screens.obj` — a file the
+// same uninstall deletes — and a cockpit spot block still disabled, with nothing
+// on screen saying so. Same rule as the backup folder: write to the new place,
+// clean up both.
+enum class Variants {
+    Xp12,    // the pair X-Plane 12 loads. Everything Photon WRITES.
+    Every,   // ...and the XP11 pair, which older versions patched.
+};
+
 // The `.acf` files in an aircraft folder whose text contains `needle`.
 //
 // ⚠ By CONTENT, not by an assumed `a320{,_StdDef,_XP11,_XP11_StdDef}.acf` naming
@@ -92,7 +144,8 @@ bool NumericEquals(const std::string& raw, double want);
 // ⚠ `.bak` files are EXCLUDED. Patching a backup would corrupt some other mod's
 // uninstall — Durantula keeps an `a320.acf.durantula.bak` of this very file.
 std::vector<std::string> AcfFilesContaining(const std::string& aircraftDirUtf8,
-                                            const std::string& needle);
+                                            const std::string& needle,
+                                            Variants which);
 
 }  // namespace acf
 }  // namespace photon

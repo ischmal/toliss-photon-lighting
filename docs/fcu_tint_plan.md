@@ -197,8 +197,9 @@ the table:
 | **EFB AviTab** | 2120.0 .. 3142.1 | 8.7 .. 645.0 | 1022×636 | **both** tablets, 12.1 × 17.2 cm |
 | **MCDU capt** | 3265.5 .. 3541.3 | 2824.0 .. 3079.1 | 276×255 | x −0.194 z −4.442, 9.4 × 11.4 cm |
 | **MCDU FO** | 3541.8 .. 3817.6 | 2824.0 .. 3079.3 | 276×255 | x +0.194 z −4.442, 9.4 × 11.4 cm |
+| **MCDU 3** ⚠ A330 only | 3821.1 .. 4091.0 | 2830.6 .. 3070.6 | 270×240 | x +0.010 z −28.317, aft pedestal |
 
-Six things about that table are load-bearing:
+Seven things about that table are load-bearing:
 
 - ⚠ **The names are inferred from geometry, not told to us.** ToLiss labels none
   of these faces. ISIS (a 6.4 cm square left of the E/WD at DU height) and the
@@ -241,14 +242,87 @@ Six things about that table are load-bearing:
   the top of an overlay image lands at the far edge of the screen, away from the
   pilot. §6b is the write-up of how these were missed on the first pass; it is
   worth reading before trusting any survey row on a non-vertical face.
+- ⚠ **`MCDU 3` is the one row here that does NOT exist on an A3xx** (2026-08-13).
+  The A330 has a third MCDU on the aft pedestal; the A3xx atlas carries no readout
+  face at those coordinates at all (`--all` on the A320: two MCDU islands, nothing
+  in 3821..4091 × 2830..3071). So the row is listed in `kPanelRectFamilies` and
+  gated off everywhere but the A330 — see §2c. It is also the one row carrying the
+  **A330's own numbers**: `MCDU capt`/`MCDU FO` keep their A3xx values, from which
+  the A330's own faces are 6–10 px inset, and this face has no A3xx value to be
+  consistent with.
+
+  Identified by its **manipulators**, which is this table's naming rule and here
+  is unusually strong evidence. ToLiss gives the A330 a full `AirbusFBW/MCDU3*`
+  command set that the A3xx does not have; summing the enclosing `ANIM_trans`,
+  that keyboard's 72 faces center at x 0.009 y 0.299 z −28.219 against this
+  island's x 0.010 y 0.294 z −28.317 — 1 mm across and 10 cm in front of the
+  keys, which is where a screen sits relative to them. The same method puts
+  `UndockMCDU1` and `UndockMCDU2` exactly on the other two islands, which is what
+  says the method is sound rather than merely suggestive. ⚠ Source-level only;
+  not yet confirmed with Probe ▸ `?`.
+
+### 2c. When a rect is not on every aircraft (2026-08-13)
+
+`MCDU 3` is the first row that needed this, and the mechanism is deliberately the
+smallest one that answers it.
+
+- **`kPanelRectFamilies`** — a side table keyed by rect NAME, like `kPanelSources`
+  and `kPanelBuses`. Absence means "every aircraft", so 36 of the 37 rows say
+  nothing and the default is what the table was before it existed. The resolved
+  answer is one `PanelMask` (`gRectsHere`), rebuilt with the per-rect drivers, so
+  it costs a shift and a test in the hot path. ⚠ The mask is built by CLEARING
+  bits from "all of them"; built the other way round, a rect nobody listed would
+  draw nowhere.
+- ⚠ **It is NOT group membership.** `MCDU 3` is a member of `MCDU`, `Glass
+  displays` and `Whole panel` on *every* aircraft. Membership is authored
+  structure: it is what the editor tree, the containment nesting and — through
+  `PanelTargetBreadth` — the broadest-first composite order are derived from, and
+  a group that quietly changed size with the aeroplane would change its own
+  breadth. Existence is a runtime fact and is answered per frame instead, in
+  `FxRectGated`, beside power and the bus.
+- ⚠ **The test sits ABOVE the master switch** in `FxRectGated`. "Follow display
+  brightness" outranks every ELECTRICAL gate, because those all answer *how
+  strongly to paint*; this one is the per-rect twin of a stack's `family` scope,
+  which nothing overrides. Below that early-out, turning the hatch off — a thing
+  done while picking a color — would paint the A330's third MCDU onto a patch of
+  A3xx artwork, in the editor, which is where it would be believed.
+- **`kScreenFxExtraRects` lists it anyway.** Which Displays switch owns a face is
+  independent of which aircraft the face is on: left off, the third MCDU would
+  follow "other readouts" while the two beside it followed "screens", so turning
+  the screen effects off would leave one of three MCDUs tinted.
+- **The probe is deliberately NOT gated.** Flooding a rect magenta is how a face
+  is confirmed, and an instrument that refused to paint where it is pointed would
+  be lying about where the rect is. On an A3xx the source table's factor column
+  says `x0.00 not on this aircraft` in the same pane, which is the counter-evidence
+  in the place it is needed.
+
+`RectExistenceTests` in `tests/test_panel_rects.py`.
 
 ### 2b. Not A320 only, as it turns out
 
 Every airframe has its own atlas layout in principle, so the original table
 carried an "A320 only, re-derive before using elsewhere" warning. Re-derived on
 **A319 (1.0.12) and A321 (1.7.1) on 2026-07-31: every rect above and every DU is
-byte-identical across all three.** The table is A3xx-wide. The A339 is still
-unknown and still has to be derived on its own.
+byte-identical across all three.** The table is A3xx-wide.
+
+**And it very nearly reaches the A330-900 too** (derived 2026-08-11 from
+`A330-900_cockpit_INN.obj`, source-level only — not confirmed in the sim). ToLiss
+reuses one atlas layout across the fleet rather than laying out each aircraft
+afresh:
+
+| A339 vs the table | Rects |
+|---|---|
+| within 3.3 px | the six DUs, both DCDUs (0.2 px), ISIS, `ped strips` |
+| within ~6 px | FCU strip, FO baro, clock ×3, RMP1/2 |
+| same slot, A339 face 6–10 px inset | capt baro, MCDU ×2, XPDR code, rudder trim, RMP3, BAT1 |
+| same slot, 24 px narrower | the two DME windows |
+| **no A330 face there at all** | BAT2 (47 px), `ovhd aft L1`/`L2`, `FMS Load` (95 px), the three EFB rects (570+ px) |
+| **no A3xx face there at all** — the traffic runs both ways | `MCDU 3`, the A330's third MCDU (§2a, §2c) |
+
+⚠ **A matching rect is not a matching look.** The FCU row lands within ~6 px and
+still reads as wrong on an A330, because its layers are tuned to the A3xx's
+artwork. That is what the per-target `family` scope in §4 is for, and it is why
+the answer to "does the table port" is *per target*, not per airframe.
 
 ### ⚠ The DU rects are runtime-gated; the FCU strip is not
 
@@ -372,11 +446,94 @@ last one is now history.
   named in `kScreenFxExtraRects` — the two MCDUs, the two DCDUs and the ISIS,
   which have no such index but are backlit screens all the same. `CLAUDE.md` ▸ The
   Displays axis is the contract.
-- **Airframe coverage never became an installer question.** The rect table is
-  A3xx-wide and the A339 has its own atlas, so on an A339 the named targets simply
-  do not resolve and the stacks are dropped with a log line — the same path as any
-  unknown target name. That is a *degradation*, not a decision, and it is the one
-  part of this that has not been looked at in-sim.
+- ⚠ **Airframe coverage is a PER-TARGET `family` scope** (2026-08-11). This entry
+  used to read: *"the rect table is A3xx-wide and the A339 has its own atlas, so on
+  an A339 the named targets simply do not resolve and the stacks are dropped with a
+  log line."* **That was never true of the code.** `PanelTargetByName` resolves
+  against `kPanelRectsHi`/`kPanelGroups`, both `static const`, so a target name
+  resolves identically whatever aircraft is loaded — and nothing in `DrawPanelFx`
+  ever asked. Every stack painted on every cockpit, including non-ToLiss ones.
+
+  Two things were wrong with the belief and they pull in opposite directions:
+
+  - **The A339 does NOT have its own atlas.** ToLiss reuses one 4096 panel layout
+    across the fleet. Re-derived from `A330-900_cockpit_INN.obj`: all six DUs match
+    the A3xx rects within 1.5–3.3 px, both DCDUs within 0.2 px, the ISIS, FCU
+    strip, `ped strips`, clock and RMP1/2 within ~6 px. 19 of the 36 rects land on
+    a real A330 face at the same coordinates.
+  - **Landing the rect is not the same as the look being right.** The FCU row's
+    layers are tuned to A3xx *artwork* and read as wrong on an A330 even though the
+    rect very nearly matches — reported from the sim, and the reason this exists.
+    Separately, `BAT2`, `ovhd aft L1`/`L2` and `FMS Load` have no A330 counterpart
+    at those coordinates at all (47–95 px away), and the three EFB rects none
+    within 570 px.
+
+  So the scope is authored per target — `family a3xx [a330 …]` under the `target`
+  line, absent = every aircraft — and resolved from the ICAO type code at aircraft
+  load and on the 1 Hz loop. ⚠ **The ToLiss A320 reports `A20N`, not `A320`**;
+  a family list built from the obvious three misses the aircraft this is mostly
+  used on. Shipped today: the screen stacks (`Main displays`, `ISIS`, `DCDU`,
+  `MCDU`) are unscoped and confirmed good on both; `FCU row`, `DME`, `Radios`,
+  `XPDR code`, `Overhead readouts` and `rudder trim` are `a3xx`.
+  `AircraftFamilyTests` in `tests/test_panel_fx.py`.
+
+### 4a. One family mask, three places that carry it (2026-08-13)
+
+The per-target scope above is a blunt instrument: it can say *"this look is not for
+that cockpit"* and nothing finer. Two things it could not say came up as soon as
+the A330 was looked at properly, and both are now expressible.
+
+**A LAYER carries a scope of its own — wire key `lfamily`, own line under the
+layer.** Two families often want the *same* target with *one* layer different: the
+same rects, the same composite order, one correction that is only right on one of
+them. That cannot be said with two stacks, because **a stack IS its target** — two
+stacks named `FCU row` are two entries the tree and the file both key on the same
+name. So the mask moved one level in as well.
+
+- It **narrows** the target's scope and cannot widen it: `DrawPanelFx` skips the
+  stack before reaching its layers, so a layer naming a family its target excludes
+  draws nowhere at all. The layer pane says so in orange, and
+  `test_no_shipped_layer_is_scoped_outside_its_target` says so about the file.
+- The gate is in the layer loop **above the `enabled` test**, so a scoped-out layer
+  costs no texture bind, no blend equation and no quad — all of which are per layer
+  and all spent before the first vertex (§8j.2).
+- ⚠ `lfamily`, not `family`. Parsing dispatches on the key alone, so a layer scope
+  spelled like its target's would be read as the TARGET's by any file whose lines
+  are ever reordered — silently widening the target to whatever the last layer
+  named. Same reason `lfollow` and `lcurve` carry the `l`.
+
+**A ROW OF THE BUILT-IN DRIVER TABLE carries one too** (`PanelSource::families`),
+which is the other half of the same report: on an A330 the FCU's integral lighting
+is `AirbusFBW/SupplLightLevels[1]`, an ordinary 0..1 knob, and not the A3xx's raw
+`1..270` animation value. A table with one answer per face can only be right about
+one family; the rect is the same rect, the dataref behind it is not.
+
+- **Rows are applied IN ORDER and a scoped row is an OVERRIDE**, not a separate
+  table: the unscoped row says what a face reads by default, and a row naming
+  `kFxFamilyA330` says what it reads there instead. ⚠ Moving a scoped row *above*
+  the row it overrides is not a compile error and not a log line — it is one face
+  reading another aeroplane's knob, which resolves, reads a plausible number and
+  dims on the wrong input. `BrightnessSourceTests` holds the order
+  (`test_a_family_scoped_row_comes_after_the_row_it_overrides`).
+- **An empty field in a scoped row INHERITS, it does not clear.** `bright` and
+  `power` are written independently and only when non-empty, so an override that
+  names a brightness source keeps the unscoped row's power gate. The cost is that
+  "this family has no power gate on this face" cannot be said here; it needs a
+  stack override in `panelfx.txt`.
+- ⚠ **The table therefore belongs to a family, so "has it been built" is the wrong
+  question.** `EnsureRectDrivers()` replaced the old `if (!gRectDriversBuilt)` at
+  every call site and rebuilds when `gRectDriversFamily != gFxFamily`. A table
+  built for an A320 and read on an A330 is stale in the invisible way: every driver
+  resolves, every value reads, and one face follows another aeroplane's knob.
+  Making that a call site's job would be six places to remember it.
+
+**The rule itself is stated ONCE**, in `FxFamilyAllows(unsigned)`; the stack, the
+layer and the driver row are one-line readers of it. Three copies of
+`== kFxFamilyNone || & gFxFamily` is how one of the three would eventually fail
+OPEN on an aircraft nobody tests on, and `test_the_rule_is_stated_once` counts
+them. The wire has the same shape: one `FxReadFamilyList` and one
+`FxWriteFamilyLine` serve both keys, because the way two readers would drift is a
+layer scope that fails open where the target scope fails closed.
 
 ---
 
@@ -928,8 +1085,10 @@ ToLiss's plugin binary (`AirbusFBW_A320_XP11.xpl`, string scan):
 | the six DUs | `AirbusFBW/DUBrightness[kScreenDU]` | — | `DCBusVoltages[0] > 24` |
 | ISIS | `AirbusFBW/ISIBrightness` | `AirbusFBW/ISIAvailable` | — |
 | MCDU capt / FO | `AirbusFBW/MCDUScreenBrightnessArray[0,1]` | — | — |
+| MCDU 3 (A330 only) | `AirbusFBW/MCDUScreenBrightnessArray[2]` — ⚠ the INDEX is an assumption; an index past the end reads UNREADABLE, i.e. undimmed, and says so in red | — | — |
 | DCDU capt / FO | `ToLissPhoton/screens/dcdu_brightness[0,1]` — Photon's own, counted from the CPDLC buttons | `AirbusFBW/HasCPDLC` | `DCBusVoltages[0] > 24` |
 | FCU strip, both baro | `ckpt/fcu/lights/right/anim` **(1..270)** | `AirbusFBW/FCUAvail` | — |
+| …the same three on an A330 | `AirbusFBW/SupplLightLevels[1]` **(0..1)** — user, 2026-08-13; a family-scoped override row, §4a | inherited | — |
 | RMP1 / 2 (pedestal) | `AirbusFBW/PanelBrightnessLevel` | `AirbusFBW/RMP<n>Available` | — |
 | RMP3 (overhead) | `AirbusFBW/OHPBrightnessLevel` | `AirbusFBW/RMP3Available` | — |
 | XPDR code | `AirbusFBW/PanelBrightnessLevel` | — (see below) | `DCBusVoltages[0] > 24` |
@@ -1115,7 +1274,7 @@ quantity the aircraft reads is why the two cannot disagree about dusk.
   value sits well above zero under any moon and tops out long before the sun is
   overhead, so almost none of its travel is in the range that matters. `lo` above
   `hi` inverts, exactly as on an `FxDriver`.
-- ⚠ **Smoothed, with `gFxAmbientTau` (2.5 s), and that is not cosmetic.** The raw
+- ⚠ **Smoothed, with `gFxAmbientTau` (0.5 s), and that is not cosmetic.** The raw
   value jumps the instant a cloud crosses the sun or the aircraft banks, and every
   screen in the cockpit would shift color with it. The step is taken against the
   **wall clock** (`XPLMGetElapsedTime`), so the fade runs at one speed at 20 fps and
@@ -1129,6 +1288,22 @@ quantity the aircraft reads is why the two cannot disagree about dusk.
   the optional `ambientref` override is, because it can name anything.
 - **Unreadable holds the last value**, never collapses to 0 — the same house rule
   the drivers follow. A missing dataref must not repaint the whole cockpit.
+- ⚠ **The sun-elevation gate** (2026-08-11): `cockpit_light_level_*` is
+  **analytic** — computed from the light sources, not metered off the rendered
+  frame — so a red-heavy dome lamp slams one channel to ~1.0 and the MAX calls it
+  daylight: the screens swapped to their day look at midnight because a cabin
+  lamp was on. The blend **target** is therefore multiplied by a smoothstep of
+  `sim/graphics/scenery/sun_pitch_degrees` across `gFxAmbientSunLo`/`Hi`
+  (−5°/+5° by default; editable beside the calibration pair, wire
+  `ambientsun <lo> <hi>`, always written). Deliberate properties: it scales the
+  TARGET, inside the sampler, so dawn arrives through the same smoothing and the
+  first-sample snap; daytime behavior is untouched (clouds, shadow and a hangar
+  still read through the light level — the gate only forbids "day" while the sun
+  is down); equal ends make a hard step, **both at −90 hold it open (the "off"
+  position)**; an unresolved ref holds it **open** (same house rule as above);
+  sim-owned, so lazily resolved once, no `AutoLoop` retry line, not dropped by
+  `FxForgetDrivers`. The manual Pin outranks it — it is read in `FxAmbientNow`,
+  which the pin bypasses — so the daylight half is still authorable at 02:00.
 
 **Only the color and the opacity vary.** The blend mode and the image do not, and
 that is a deliberate limit: there is no defined halfway point between `GL_MIN` and
@@ -1154,7 +1329,9 @@ is why the design is per layer rather than a second layer list per target.
   `panelfx.txt` predates the blend, and lerping toward the struct's default day
   values would fade the whole look toward white by mid-morning, in a release.
 - Wire format: **`day <r> <g> <b> <opacity>` on its own line under the layer**, plus
-  a global `ambient <lo> <hi> <tau>` and an optional `ambientref <dataref> <index>`.
+  a global `ambient <lo> <hi> <tau>`, a global `ambientsun <lo> <hi>` (degrees of
+  sun pitch, read into locals and adopted whole — the ramp rule) and an optional
+  `ambientref <dataref> <index>`.
   ⚠ **A line of its own, not extra columns** — the layer line ends with an image
   *name* read by `getline` precisely because names contain spaces, so nothing can
   ever follow it there. Same shape as `tfollow`.
@@ -1305,8 +1482,8 @@ sequence and would additionally have to be kept in step with `panelfx.txt` by
 hand — the dev/release divergence this file has been bitten by three times
 (`ShippingBuildTests` exists for it). **The structure was not the cost.**
 
-The shipped look is **21 layers over 61 quads**. What that was actually spending,
-and what each is now:
+The shipped look was **21 layers over 61 quads** at the time (24 over 70 now —
+see §8j.2). What that was actually spending, and what each became:
 
 | Was | Per pass | Now |
 |---|---|---|
@@ -1356,12 +1533,129 @@ moved to `LoadPanelFx`, i.e. off the render thread entirely.
 **Measure before extending this.** The perf tool's `kLeverDisplayFx` already
 switches the compositor off as one lever, and the shipping quick run is FX-on vs
 FX-off. If the compositor ever does show up at a size that surprises, the next
-suspect is not call count but the **21 blend-equation switches** (`GL_MAX`/`GL_MIN`
+suspect is not call count but the **blend-equation switches** (`GL_MAX`/`GL_MIN`
 /`GL_FUNC_ADD`) cycling through X-Plane's Vulkan→GL bridge, which no restructuring
 removes: they are semantically per-layer, and the broadest-first rule means they
-cannot be sorted by mode.
+cannot be sorted by mode. (Half of them turned out to be *redundant* rather than
+unremovable — §8j.3 — but the remainder stand exactly as described here.)
 
 Pinned by `CompositorHotPathTests` in `tests/test_panel_fx.py`.
+
+#### 8j.2 The second pass: not doing it at all (2026-08-10)
+
+The first pass made each thing the compositor does cheaper. This one asks whether
+it has to happen. The shipped look is now **24 layers over 70 quads**.
+
+| Was | Per pass | Now |
+|---|---|---|
+| `PanelTargetMask` re-derived from member NAMES | ~2 400–3 800 strcmps in `FxDrawOrder`'s sort alone | resolved once, read as an array |
+| The whole pass with the effects switched off | the sort, the graphics state, and a texture bind + blend equation + winding query + begin/end per layer — to emit nothing | one flag test and `return` |
+| A target every rect of which is gated shut | the same per-layer GL, per layer, emitting nothing | one `FxTargetGateMask` walk of that target's rects |
+| `glGetIntegerv(GL_FRONT_FACE)` | once per layer, ~24 | once per pass, under `PanelQuadWindingHold` |
+
+⚠ **`PanelTargetMask` was the expensive one, and not mainly because of the
+compositor.** It walked a group's member names — `RectIndexByName` per member, a
+strcmp sweep of the rect table each — on **every call**, and it is both the
+comparator of the per-pass sort and the whole basis of the editor's target tree.
+`Whole panel` alone costs **666 strcmps** to re-derive. `BuildFxTargetPane` asks
+`PanelTargetParent` of all 51 targets, and each of those asks 15 groups × 2 masks:
+**~211 000 strcmps for the root scan alone, per ImGui frame**, repeated for every
+open node's children. The tables are `static const` and `GroupMembers()` had
+already resolved the names, so the masks are now built **from it** — which also
+makes "the rects a target contains" and "the rects `PaintPanelTarget` paints" one
+answer instead of two that agree.
+
+⚠ **The skips are stated ONCE, in `FxRectGated`.** The Displays switch and the
+three electrical gates are the part of `FxRectFactor` that **does not depend on
+the layer**, so they were split out and both callers share them: the per-quad
+factor, and `FxTargetGateMask`, which asks them of a whole target before the first
+texture bind. A second copy beside the skip would drift, and it drifts in the
+worse direction — **a skip stricter than the paint is a target that silently stops
+drawing.** `test_the_gates_are_stated_once` pins it.
+
+⚠ **The skip must not fold in anything per-layer.** A layer with `follow` off
+draws at full strength through a knob at zero (§8f), so testing the brightness
+*factor* there would skip exactly the layers that setting exists for. Gates only.
+⚠ And `gFxDrawStack` has to be set before it is asked — a stack may override
+`power`.
+
+⚠ **`FxSampleAmbient` and `FxExpireDriveOverride` stay ABOVE the early-out.** Both
+are per-frame bookkeeping that goes wrong by *not* running: a watchdog behind an
+early-out is not a watchdog (§8l), and an ambient blend that stops sampling
+resumes with a fade — the artifact "the first sample snaps" exists to remove
+(§8e), arriving whenever a user switches the effects back on at noon. Three
+dataref reads and an `exp()` between them.
+
+⚠ **The winding hold is opt-in and scoped.** A stale `GL_FRONT_FACE` is
+**silently culled** and looks exactly like the compositor not running, so
+`PanelQuadBatch` still queries by default and only skips it inside a
+`PanelQuadWindingHold` — a scope in which nothing but this file draws. The
+probe's own batch is outside it and is unchanged.
+
+**What was deliberately NOT done, again:** hoisting `follows`, the layer's shape
+and `hasRamp` out of `FxRectFactor` into per-layer globals. They are a handful of
+branches per quad, and the Dev panes call `FxRectFactor` outside a pass — globals
+they could read stale is the shape of bug this file already pays a value cache to
+avoid (§8j).
+
+#### 8j.3 The third pass: asking each question once (2026-08-10)
+
+§8j made each thing cheaper and §8j.2 stopped doing the things that were not
+needed. What was left is **repetition**: four quantities that cannot change inside
+one pass, re-derived per layer or per quad. The shipped look is still 24 layers
+over 70 quads.
+
+| Was | Per pass | Now |
+|---|---|---|
+| `FxRectGated` per rect **per layer** | 80 evaluations, each up to 3 driver lookups | 29 — one per rect per stack, held in `gFxDrawGateMask` |
+| `SetFxBlend` setting the state already set | 48 bridge calls | 29 (14 equation + 15 func) |
+| `PanelRects()` per `PaintPanelTarget` call | 24 reads of a ToLiss dataref | 1, pinned in `gFxPassRects` |
+| `PanelTargetBreadth` popcounts in the sort | ~60 popcounts of a 36-bit mask | a resolved table |
+
+⚠ **The gate memo is not a second statement of the rules.** The mask is built by
+calling `FxRectGated` itself, with the memo off, so the skip and the paint are
+literally the same bits — the invariant §8j.2 wanted, tightened. What makes it
+sound inside a pass is that everything the gates read is *already* frozen: the
+Displays switches are user state, and every electrical read comes out of the
+value cache (§8j). ⚠ It is armed around **one stack's layers**, because a stack
+may override `power`, and dropped with `gFxDrawStack`.
+
+⚠ **`FxTargetCanDraw` became `FxTargetGateMask`** — it returns the SET rather than
+"any?", which is the whole trick: the walk the skip was already doing is what
+fills the memo, so nothing pays for the gates twice. Zero still means skip.
+
+⚠ **The blend memo records what WE set, so it cannot outlive one pass.** It is
+dropped at both ends (`FxForgetBlendState`, after `PushBlendFunc` and after
+`PopBlendFunc`) because X-Plane owns that state in between: `XPLMSetGraphicsState`
+sets a func of its own when it enables blending, and in a dev build the probe's
+multiply runs after us in the same frame. A memo that survived a pass would skip
+a call the GL state no longer matches — the whole cockpit blended with someone
+else's operator, i.e. the failure `PopBlendFunc` exists to prevent, arriving from
+the other end. ⚠ The equation and the func are tracked **separately** (five of the
+eight modes are plain `GL_FUNC_ADD`; Add, Burn and Subtract all want
+`GL_ONE, GL_ONE`), and ⚠ the refusal path — an equation-based mode on a driver
+with no `glBlendEquation` — records **nothing**, because it set nothing.
+
+⚠ **Pinning the rect set buys a correctness property as well as 23 reads.** With
+the resolution flipping mid-pass, the six DUs would be painted from the full-res
+table by the layers drawn before the flip and from the low-res one by those after
+it — a half-composited look on exactly the six rects whose faults are hardest to
+attribute (§6, `gDisplayFallbackRef`). ⚠ Null means "not in a pass", **not**
+"full-res": the Dev panes and the probe's log line read `PanelRects()` outside the
+pass and must keep resolving live.
+
+**What was deliberately NOT done:** dropping the per-vertex `glTexCoord2f` on
+solid layers (48 of the 70 quads, ~190 immediate-mode calls) by setting the
+texture coordinate once per batch. It works — a 1×1 white texture samples the same
+texel at any coordinate — but it re-creates the `tile 0` failure exactly (§8c): a
+textured layer that lost its per-vertex coordinates draws **one texel stretched
+over the rect**, which reads as a flat color rather than as a bug. Immediate-mode
+vertex calls are the cheapest thing in this pass and the mis-set flag would be the
+most expensive kind of mistake here. Client-side vertex arrays instead of
+immediate mode would remove the same calls more thoroughly, and were rejected for
+the same reason plus a second: `GL_VERTEX_ARRAY`/`GL_COLOR_ARRAY` client state is
+not tracked by `XPLMSetGraphicsState`, so leaking it corrupts the sim's own
+drawing, and every failure mode here is invisible rather than loud.
 
 ### 8k. A layer's color ramp (2026-08-07)
 

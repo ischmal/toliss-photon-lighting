@@ -26,6 +26,16 @@ paths, so a renamed file fails at compile time rather than at runtime.
 | `Roboto-Bold.ttf` | 700 | the progress percentage, attribute values |
 | `Roboto-Black.ttf` | 900 | the status badges |
 | `RobotoMono-Light.ttf` | 300 | the aircraft version chip |
+| `RobotoMono-Medium.ttf` | 500 | the installer log |
+
+⚠ **NEITHER FAMILY CONTAINS U+2713 `✓`, NOR U+2192 `→`** — checked against both
+files' own `cmap` tables, not assumed. Any such character in a UI string is being
+drawn by a **system fallback font**, which is the exact failure these embedded
+files exist to prevent: it looks fine here and is a missing-glyph box on a machine
+whose fallback does not cover it. The installer log used to prefix `✓` and now
+draws `assets/glyph-success.svg` instead. ⚠ **The `→` in the version transitions
+(`EntryFor`, `BuildReview`) is still a character and still falls back** — it is
+benign on Windows and worth knowing about.
 
 **Static instances, not the variable font.** Google now ships Roboto as a variable
 font, but weight selection from a variable family depends on the renderer setting
@@ -43,7 +53,7 @@ Mono v31). To refresh:
 
 ```bash
 curl -H "User-Agent: Mozilla/4.0" \
-  "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700;900&family=Roboto+Mono:wght@300"
+  "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700;900&family=Roboto+Mono:wght@300;500"
 ```
 
 and download the `.ttf` URLs it returns. ⚠ Do **not** pull these from

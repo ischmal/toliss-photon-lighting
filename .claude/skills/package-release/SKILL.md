@@ -78,5 +78,16 @@ non-Windows bundles here.
 - Keep the pristine-tree snapshot **outside** any folder an installer command
   might touch — on the first run the comparison baseline itself got patched.
 - For iterating on the binary without restaging ~58 MiB of textures each build:
-  stage once (`make_release.py --payload-only`), then run with
-  `--payload-dir` pointed at it (`docs/installer_cpp_plan.md` §10a).
+  stage once (`make_release.py --payload-only`, which writes `release/payload/`),
+  then run with `--payload-dir` pointed at it (`docs/installer_cpp_plan.md` §10a).
+  `src/native/run-installer.ps1` does this for you and restages only when the
+  payload has gone stale.
+- ⚠ **CHECK THE STAGED `.xpl`'s BUILD TIME.** `make_release.py` COPIES the plugin
+  out of `src/native/build/ToLissPhoton` — it never builds one — so a bundle can
+  carry a plugin older than the code it was cut from, and nothing downstream says
+  so: the installer succeeds, the files land, X-Plane loads it. `stage_plugin`
+  prints each arch's build time and refuses an `.xpl` older than
+  `src/native/src/`; `--allow-stale-plugin` is only for `--plugin-dir` folders
+  merged from CI artifacts. Before packing a tester bundle, build the plugin
+  first (`cmake --build src/native/build --config Release --target ToLissPhoton`)
+  and read that line back.

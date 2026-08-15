@@ -5,6 +5,7 @@
 #include <ctime>
 #include <sstream>
 
+#include "core/backup.h"
 #include "core/constants.h"
 #include "core/fsutil.h"
 #include "core/marker.h"
@@ -15,6 +16,7 @@
 #include "core/payload.h"
 #include "core/progress.h"
 #include "core/version.h"
+#include "core/wingmod.h"
 
 namespace photon {
 namespace actions {
@@ -192,6 +194,18 @@ std::vector<fs::path> InteriorLiveryOverrides(const fs::path& aircraftDir) {
     return hits;
 }
 
+// How the backup folder is NAMED in the step list: its path relative to the
+// aircraft folder, so a current install reads `Photon Backup Files` and one still
+// waiting to be migrated reads `objects/Photon Backup Files`. ⚠ Derived, never a
+// literal — a step line that names a folder the files are not in is worse than one
+// that names none, because the user goes looking.
+std::string BackupLabel(const fs::path& aircraftDir, const fs::path& backupDir) {
+    std::error_code ec;
+    const fs::path rel = fs::relative(backupDir, aircraftDir, ec);
+    if (ec || rel.empty()) return fsutil::PathToUtf8(backupDir.filename());
+    return rel.generic_string();
+}
+
 // The backup name a livery override is stored under: its aircraft-relative POSIX
 // path with `/` flattened to `__`.
 std::string LiveryBackupName(const std::string& relPosix) {
@@ -235,6 +249,8 @@ namespace {
 // still looks plausible. `ProgressStepNames()` below is what the test walks.
 constexpr char kStepPlugin[] = "Plugin";
 constexpr char kStepPluginData[] = "Plugin data";
+constexpr char kStepBackupDir[] = "Backup folder";
+constexpr char kStepWingCheck[] = "Wing mod check";
 constexpr char kStepExteriorObj[] = "Exterior lights";
 constexpr char kStepGlow[] = "Skin glow";
 constexpr char kStepRealWings[] = "RealWings wingtips";
@@ -252,6 +268,32 @@ constexpr char kStepRemove[] = "Removing added files";
 // magnitude is measured (1.5-9.4 ms for the livery scan) and deliberately small.
 constexpr double kMsLiveryScan = 8.0;
 constexpr double kMsManifest = 2.0;
+
+// Moving a legacy backup folder out of `objects/`. ⚠ PRICED SMALL ON PURPOSE,
+// even though the folder can hold 1.6 GB of A339 mesh backups: both paths are
+// inside the aircraft folder, so it is a same-volume rename — a metadata operation
+// whose cost does not depend on the bytes. Only the copy fallback (something holds
+// a file open) is slow, and that is the anomaly rather than the shape to plan for.
+constexpr double kMsBackupMove = 3.0;
+
+// Reading the two wing OBJs the attachment table names. ⚠ FLAT ON PURPOSE, unlike
+// every other size-derived estimate here: the plan is built before anything is
+// read, and WHICH OBJs those are is only known after parsing the `.acf` — so a
+// size-derived figure would need the very read it is trying to price. It is a
+// rounding error either way: 2 x ~2 MB at the scan rate is ~14 ms against the
+// ~65 ms the four `.acf` themselves cost in the same step.
+constexpr double kMsWingObjs = 15.0;
+
+// A wing token in a SENTENCE. ⚠ Not `WingLabel`, which renders `stock` as
+// "Default" — right on a form where it is one option among three, wrong in
+// "this aircraft is running Default wings". Not `--wing`'s token either, which is
+// the mistake `WingLabel` was added to fix on the Complete screen.
+std::string WingProse(const std::string& wing) {
+    if (wing == "durantula") return "Durantula";
+    if (wing == "realwings") return "RealWings";
+    if (wing == "stock") return "stock";
+    return wing;
+}
 
 // The bar's driver: the plan, plus the callback that publishes it.
 //
@@ -335,6 +377,30 @@ progress::Plan BuildInstallPlan(const Options& opts, const fs::path& aircraftDir
     } catch (const payload::PayloadError&) {
     }
     plan.Add(kStepPluginData, CopyMs(2 * dataBytes, dry));
+
+    // ⚠ THE SAME CONDITION AS THE RUN'S, evaluated at the same moment: the plan is
+    // built before any work, and nothing between here and the move can create or
+    // remove a legacy folder. A dry run still enters the step — it reports what it
+    // WOULD move — so this is not gated on `dry` either.
+    if (backup::LegacyDirInUse(aircraftDir)) {
+        plan.Add(kStepBackupDir, kMsBackupMove);
+    }
+
+    // ⚠ PRICED WITH THE SCAN RATE, NOT THE `.acf` PARSE RATE, and the difference is
+    // an order of magnitude. `MsForAcfAttach` (37.6 ms/MiB) measures a full
+    // `acf::ReadProps` map build plus a `SetProps` rewrite; this step reads each
+    // file once and picks the `_obja` lines out of it, which is what
+    // `MsForObjScan` (3.5 ms/MiB) measures. Pricing a read as a parse would put a
+    // ~65 ms step in the plan as a ~350 ms one and give the bar a long dead spot
+    // exactly where nothing takes any time.
+    //
+    // ⚠ THE SAME CONDITION AS THE RUN'S: `Install` enters this whenever the
+    // airframe HAS wing mods, so the plan prices it on the same test. See
+    // core/wingmod.h — the A330-900 reads nothing and answers instantly.
+    if (WingsFor(opts.airframeKey).size() > 1) {
+        plan.Add(kStepWingCheck,
+                 progress::MsForObjScan(AcfBytes(aircraftDir)) + kMsWingObjs);
+    }
 
     // The exterior OBJ: back up what is there, write ours over it.
     const Airframe* af = AirframeByKey(opts.airframeKey);
@@ -575,8 +641,7 @@ std::vector<std::string> InstallInterior(const Options& opts,
     if (BackupOnce(target, backupDir, m, &m.interior.added, log, dryRun) ==
         Backup::kRecorded) {
         steps.push_back(std::string("Backed up original ") + kInteriorObj + " → " +
-                        fsutil::PathToUtf8(objects.filename()) + "/" +
-                        kBackupDirName);
+                        BackupLabel(aircraftDir, backupDir));
     }
     const std::string text =
         marker::Inject(payload::InteriorObjText(), kPhotonVersion, "interior");
@@ -797,11 +862,13 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
 
     const fs::path aircraftDir = fsutil::PathFromUtf8(opts.aircraftPath);
     const fs::path objects = aircraftDir / "objects";
-    const fs::path backupDir = objects / kBackupDirName;
     const std::string objectsUtf8 = fsutil::PathToUtf8(objects);
     const bool dryRun = opts.dryRun;
     std::vector<std::string> steps;
 
+    // ⚠ THE BACKUP FOLDER IS RESOLVED BELOW, AFTER THE MIGRATION STEP, and never
+    // built by hand — see core/backup.h. Reading the manifest here is location-
+    // agnostic for the same reason: `manifest::Read` asks the same resolver.
     manifest::Manifest m = manifest::Read(objectsUtf8);
     m.present = true;
 
@@ -858,13 +925,86 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     }
     rep.Finish(kStepPluginData);
 
+    // ── the backup folder ────────────────────────────────────────────────────
+    // ⚠ BEFORE ANYTHING TOUCHES A BACKUP, AND AFTER THE PLUGIN. Before, because
+    // every path below resolves the folder once and holds it; after, because the
+    // `.xpl` write is the step that fails on a running sim and it must stay the
+    // first thing that can abort a run.
+    //
+    // Retroactive by design: a user upgrading from an earlier build has their whole
+    // backup folder in `objects/`, and it is moved out here rather than left behind — a
+    // second folder at the new location would split the bookkeeping from the files
+    // it accounts for.
+    if (backup::LegacyDirInUse(aircraftDir)) {
+        rep.Begin(kStepBackupDir);
+        const backup::MigrateResult mig = backup::Migrate(aircraftDir, dryRun);
+        LogLines(log, "backup", mig.log);
+        if (dryRun) {
+            steps.push_back("Would move Photon's backup folder out of objects/ → " +
+                            fsutil::PathToUtf8(
+                                backup::PreferredDir(aircraftDir).filename()) +
+                            " (" + std::to_string(mig.files) + " file(s))");
+        } else if (mig.complete) {
+            steps.push_back("Moved Photon's backup folder out of objects/ → " +
+                            fsutil::PathToUtf8(
+                                backup::PreferredDir(aircraftDir).filename()) +
+                            " (" + std::to_string(mig.files) + " file(s))");
+        } else {
+            steps.push_back("! Could not move Photon's backup folder out of "
+                            "objects/ — it is still there and still works; the "
+                            "next install will try again");
+        }
+        rep.Finish(kStepBackupDir);
+    }
+    const fs::path backupDir = backup::Dir(aircraftDir);
+    const std::string backupLabel = BackupLabel(aircraftDir, backupDir);
+
+    // ── which wing mod is this aircraft ACTUALLY running? ────────────────────
+    //
+    // ⚠ IMMEDIATELY BEFORE THE OBJ THE ANSWER GOVERNS, so the log reads as one
+    // thought: "this aircraft is running Durantula" then "installed the stock wing
+    // variant". Put anywhere earlier it is a paragraph the user has scrolled past
+    // by the time the line it contradicts appears.
+    //
+    // ⚠ READ-ONLY, NON-THROWING, AND IT NEVER CHANGES WHAT IS INSTALLED. The user's
+    // choice is the user's; a detector that silently substituted a different wing
+    // variant would be unexplainable from the screen they clicked through, and it
+    // would be wrong exactly when detection is wrong. It reports, and that is all.
+    if (WingsFor(opts.airframeKey).size() > 1) {
+        rep.Begin(kStepWingCheck);
+        const wingmod::Result wm =
+            wingmod::Detect(opts.aircraftPath, opts.airframeKey);
+        log.Write(wm.summary);
+        for (const wingmod::Finding& f : wm.findings) {
+            const bool bad = f.severity == wingmod::Severity::Problem;
+            log.Write(f.text, bad ? "WARN" : "INFO");
+            steps.push_back((bad ? "! " : "") + f.text);
+        }
+        // ⚠ THE MISMATCH IS THE POINT OF THE WHOLE CHECK. Photon's `wing_left` /
+        // `wing_right` mounts are copies of the aircraft's own flex chain, so a
+        // build for the wrong variant binds the wingtip lights to a driver the
+        // wing no longer uses: they hold still while the wing flexes. It costs
+        // nothing on the ground and needs a loaded aircraft in the air to see.
+        if (wm.determined && wm.wing != opts.wing) {
+            const std::string line =
+                "This aircraft is running " + WingProse(wm.wing) +
+                " wings, but you chose the " + WingProse(opts.wing) +
+                " build — Photon's wingtip lights will not follow the wing. "
+                "Re-run and pick " + WingProse(wm.wing) + ".";
+            log.Write(line, "WARN");
+            steps.push_back("! " + line);
+        } else if (wm.determined && wm.Healthy()) {
+            log.Write("wing variant matches this aircraft (" + opts.wing + ")");
+        }
+        rep.Finish(kStepWingCheck);
+    }
+
     rep.Begin(kStepExteriorObj);
     const fs::path target = objects / af->objName;
     switch (BackupOnce(target, backupDir, m, &m.added, log, dryRun)) {
         case Backup::kRecorded:
             steps.push_back(std::string("Backed up original ") + af->objName +
-                            " → " + fsutil::PathToUtf8(objects.filename()) + "/" +
-                            kBackupDirName);
+                            " → " + backupLabel);
             break;
         case Backup::kAlreadyHave:
             steps.push_back(std::string("Original ") + af->objName +
@@ -907,8 +1047,7 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
                 Backup::kRecorded) {
                 steps.push_back("Backed up original " +
                                 fsutil::PathToUtf8(p.filename()) + " → " +
-                                fsutil::PathToUtf8(objects.filename()) + "/" +
-                                kBackupDirName);
+                                backupLabel);
             }
         }
         const auto res = patch_glow::Run(objectsUtf8, opts.airframeKey, false,
@@ -1023,6 +1162,13 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     m.wing = opts.wing;
     m.installedAt = NowIso8601Seconds();
     if (!dryRun) {
+        // The note goes in FIRST, so a manifest write that fails does not leave a
+        // folder of the user's stock files with nothing in it saying what they are.
+        // ⚠ Best-effort: a README that cannot be written is not a reason to fail an
+        // install that otherwise worked, so this one write is not `WriteOrThrow`.
+        std::error_code ec;
+        fsutil::AtomicWriteBytes(backupDir / backup::kReadmeName,
+                                 backup::ReadmeText(), ec);
         std::string err;
         if (!manifest::Write(objectsUtf8, m, err)) throw ActionError(err);
     }
@@ -1034,7 +1180,12 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
 std::vector<std::string> Uninstall(const Options& opts, Log& log) {
     const fs::path aircraftDir = fsutil::PathFromUtf8(opts.aircraftPath);
     const fs::path objects = aircraftDir / "objects";
-    const fs::path backupDir = objects / kBackupDirName;
+    // ⚠ RESOLVED, AND DELIBERATELY NOT MIGRATED FIRST. An uninstall is about to
+    // empty this folder and remove it, so moving it out of `objects/` on the way
+    // would be a rename to buy nothing — and it would put the one code path a user
+    // runs when something is already wrong through an extra step that can fail.
+    // Either location restores identically; both are cleaned up at the end.
+    const fs::path backupDir = backup::Dir(aircraftDir);
     const std::string objectsUtf8 = fsutil::PathToUtf8(objects);
     const bool dryRun = opts.dryRun;
 
@@ -1129,8 +1280,12 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
                                                     true, dryRun,
                                                     rep.Sub(kStepScreens));
             LogLines(log, "acf screens", res.log);
+            // ⚠ `changed`, NOT `touched`. A detach visits every variant — including
+            // the XP11 pair, which only an older Photon ever attached — so counting
+            // files PROCESSED would report "detached from 4" against the install's
+            // own "attached in 2", which reads as one of them being wrong.
             steps.push_back("Detached the display-glow OBJ from " +
-                            std::to_string(res.touched.size()) + " .acf file(s)");
+                            std::to_string(res.changed.size()) + " .acf file(s)");
         }
         for (const std::string& name : m.screens.added) {
             const fs::path f = objects / fsutil::PathFromUtf8(name);
@@ -1192,8 +1347,9 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
             const auto res = patch_acf::Run(fsutil::PathToUtf8(aircraftDir), true,
                                             dryRun, rep.Sub(kStepInteriorAcf));
             LogLines(log, "acf", res.log);
+            // ⚠ `changed`, NOT `touched` — same reason as the detach above.
             steps.push_back("Restored stock cockpit spot lights in " +
-                            std::to_string(res.touched.size()) + " .acf file(s)");
+                            std::to_string(res.changed.size()) + " .acf file(s)");
         }
 
         if (!dryRun) fsutil::RemoveDirIfEmpty(backupDir / "liveries");
@@ -1209,7 +1365,14 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         }
         std::error_code ec;
         fs::remove(backupDir / kManifestName, ec);
+        fs::remove(backupDir / backup::kReadmeName, ec);
         fsutil::RemoveDirIfEmpty(backupDir);   // only succeeds if now empty
+        // ⚠ BOTH LOCATIONS, and the second is not redundant. An install that could
+        // not finish its migration leaves an empty folder behind in `objects/`, and
+        // an uninstall that tidies only the folder it restored FROM would leave the
+        // very folder this move exists to get rid of sitting there empty forever.
+        // Only-if-empty, so a legacy folder still holding files is never touched.
+        fsutil::RemoveDirIfEmpty(backup::LegacyDir(aircraftDir));
     }
     steps.push_back(std::string("Removed ") + kBackupDirName + " and manifest");
     rep.Finish(kStepManifest);

@@ -56,10 +56,20 @@ std::vector<std::string> VerifyGeometry(const std::string& text);
 std::string PatchText(const std::string& text, int& changed);
 std::string UnpatchText(const std::string& text, int& changed);
 
-std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8);
+// The spot-carrying `.acf` files in an aircraft folder. ⚠ `which` IS NOT A
+// DEFAULT-ABLE ARGUMENT: patching acts on `Xp12` and reverting on `Every` — see
+// `acf::Variants`, which carries the reason both are right.
+std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8,
+                                  acf::Variants which);
 
 struct RunResult {
     std::vector<std::string> touched;   // .acf paths (UTF-8) actually processed
+    // ⚠ THE SUBSET THAT ACTUALLY DIFFERED, and the two stopped being the same
+    // number on 2026-08-15. A revert visits `Variants::Every` while a patch writes
+    // `Variants::Xp12`, so uninstalling an install this binary performed processes
+    // four files and changes two — and a step line counting `touched` would report
+    // "restored 4" right after "patched 2", which reads as a bug in one of them.
+    std::vector<std::string> changed;
     std::vector<std::string> log;       // human-readable per-file lines
 };
 

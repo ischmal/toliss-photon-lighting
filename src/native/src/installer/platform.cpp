@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 
@@ -206,6 +207,68 @@ bool OpenInEditor(const std::string& pathUtf8) {
     return Spawn("open", pathUtf8);
 #else
     return Spawn("xdg-open", pathUtf8);
+#endif
+}
+
+bool OpenFolder(const std::string& pathUtf8) {
+#ifdef _WIN32
+    // ⚠ THE DEFAULT VERB, NOT L"explore". Both open the folder; `explore` also
+    // forces the navigation pane open, which overrides whatever the user has
+    // chosen for every other Explorer window they open.
+    const std::wstring w = fsutil::PathFromUtf8(pathUtf8).wstring();
+    const HINSTANCE r =
+        ::ShellExecuteW(nullptr, nullptr, w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<std::intptr_t>(r) > 32;
+#elif defined(__APPLE__)
+    return Spawn("open", pathUtf8);
+#else
+    return Spawn("xdg-open", pathUtf8);
+#endif
+}
+
+bool SetClipboardText(const std::string& textUtf8) {
+#ifdef _WIN32
+    // ⚠ CF_UNICODETEXT, NOT CF_TEXT. An installer log holds aircraft folder names
+    // and X-Plane paths, which are routinely non-ASCII; CF_TEXT would hand them to
+    // the clipboard in the system codepage and mangle exactly the lines someone is
+    // copying in order to report a problem.
+    const std::wstring wide = fsutil::PathFromUtf8(textUtf8).wstring();
+    if (::OpenClipboard(nullptr) == 0) return false;
+    bool ok = false;
+    if (::EmptyClipboard() != 0) {
+        const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+        // ⚠ GMEM_MOVEABLE, AND OWNERSHIP PASSES TO THE CLIPBOARD. A successful
+        // SetClipboardData means the block must NOT be freed here; freeing it is a
+        // use-after-free the next time anything pastes.
+        HGLOBAL block = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (block != nullptr) {
+            void* dest = ::GlobalLock(block);
+            if (dest != nullptr) {
+                std::memcpy(dest, wide.c_str(), bytes);
+                ::GlobalUnlock(block);
+                ok = ::SetClipboardData(CF_UNICODETEXT, block) != nullptr;
+            }
+            if (!ok) ::GlobalFree(block);
+        }
+    }
+    ::CloseClipboard();
+    return ok;
+#else
+    // ⚠ popen, NOT the `Spawn` helper above — this one has to WRITE to the child,
+    // and Spawn deliberately closes its streams. Still no shell metacharacter
+    // hazard: the command is a literal and the payload goes down the pipe.
+    const char* cmd =
+#    ifdef __APPLE__
+        "pbcopy";
+#    else
+        "xclip -selection clipboard";
+#    endif
+    FILE* pipe = ::popen(cmd, "w");
+    if (pipe == nullptr) return false;
+    const std::size_t written =
+        std::fwrite(textUtf8.data(), 1, textUtf8.size(), pipe);
+    const int status = ::pclose(pipe);
+    return written == textUtf8.size() && status == 0;
 #endif
 }
 

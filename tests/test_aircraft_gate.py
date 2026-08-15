@@ -1,4 +1,4 @@
-"""Nothing Photon does may run on an aircraft that is not a ToLiss.
+"""Nothing Photon does may run on an aircraft it has no business touching.
 
 ⚠ THE BUG THIS CLOSES (2026-08-11, from a user report): the panel-FX compositor
 never asked. `PanelPassDraw` is registered for as long as the plugin is enabled
@@ -9,11 +9,19 @@ same week did not save the other six either: `gFxFamily` was resolved on the
 ToLiss branch of `UpdateMenuVisibility` only, so switching from an A320 to
 anything else left it reading "a3xx" and the scoped stacks kept painting too.
 
-The invariant is now one flag, `gIsToLiss`, with one writer, read by every
-per-frame entry point. Every test here fails silently in the sim in one of two
-opposite ways: a gate that fails open paints (or writes) on somebody else's
-aircraft, and one that fails closed makes the whole add-on look uninstalled on a
-ToLiss. When a new per-frame path is added, it gets a line in
+⚠ IT IS NOW TWO CONDITIONS, AND THAT IS WHY THE GATE IS A FUNCTION (2026-08-14).
+`gIsToLiss` answers "is this one of ToLiss's aeroplanes"; `gInstallStale` answers
+"is Photon still installed on it" — false the moment a ToLiss update or a
+reinstall puts the stock exterior OBJ back. Both must hold, and a site that
+checked only the first would keep reshaping the strobes and tinting the PFDs of
+an aircraft the user may have reinstalled precisely to be rid of modifications.
+Spelling two flags out at four call sites is exactly the shape of the original
+bug, so there is one expression — `PhotonRuns()` — and the sites call it.
+
+Every test here fails silently in the sim in one of two opposite ways: a gate
+that fails open paints (or writes) on somebody else's aircraft, and one that
+fails closed makes the whole add-on look uninstalled on a ToLiss. When a new
+per-frame path is added, it gets a line in
 `test_every_per_frame_entry_point_is_gated` — that list is the contract.
 """
 import pathlib
@@ -24,8 +32,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN_CPP = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
     encoding="utf-8", errors="replace")
 
-# The flag's one gate expression, spelled the same way at every site.
-GATE = "!gIsToLiss"
+# The one gate expression, spelled the same way at every site.
+GATE = "!PhotonRuns()"
 
 
 def _fn(name):
@@ -109,6 +117,63 @@ class FlagOwnershipTests(unittest.TestCase):
         self.assertFalse(_dev_guarded("static bool gIsToLiss = false;"))
 
 
+class GateExpressionTests(unittest.TestCase):
+    """⚠ THE GATE IS ONE EXPRESSION OVER TWO FLAGS. Both halves are load-bearing
+    and each fails in its own direction: without `gIsToLiss` Photon paints on
+    other people's aircraft, without `gInstallStale` it goes on driving one whose
+    install has just been reverted. A per-frame site that spells the test out
+    itself gets one of them wrong eventually — that is how the compositor came to
+    ask neither — so the sites call `PhotonRuns()` and this pins what it means."""
+
+    def test_the_gate_reads_both_flags(self):
+        # A one-liner, so _fn's "signature then newline" shape does not apply.
+        m = re.search(r"static bool PhotonRuns\(\)\s*\{([^}]*)\}", PLUGIN_CPP)
+        self.assertIsNotNone(m, "PhotonRuns moved or was renamed")
+        body = m.group(1)
+        self.assertIn("gIsToLiss", body, "the gate stopped asking about ToLiss")
+        self.assertIn("gInstallStale", body,
+                      "the gate stopped asking whether we are still installed")
+
+    def test_the_stale_flag_exists_and_starts_false(self):
+        """False until an aircraft has been looked at, and false is the value
+        that changes nothing: a plugin that came up believing every install was
+        reverted would tell every user to reinstall."""
+        self.assertRegex(PLUGIN_CPP, r"static bool gInstallStale = false;")
+
+    def test_the_stale_flag_ships(self):
+        """Behind `#if PHOTON_DEV` the whole feature would exist only on the dev
+        machine, where nobody reinstalls their aircraft in frustration."""
+        self.assertFalse(_dev_guarded("static bool gInstallStale = false;"))
+
+    def test_only_the_detector_writes_the_stale_flag(self):
+        """One writer, like gIsToLiss — with the two resets that clear it, which
+        are the aircraft-load path putting it back to its starting value rather
+        than a second opinion about the install."""
+        allowed = ("DetectInstall", "UpdateMenuVisibility")
+        owners = []
+        for m in re.finditer(r"gInstallStale\s*=(?!=)", PLUGIN_CPP):
+            head = PLUGIN_CPP[:m.start()]
+            if head.rstrip().endswith("static bool"):
+                continue        # the declaration
+            fn = re.findall(r"\nstatic [\w:]+ (\w+)\([^)]*\)\s*\{", head)
+            owners.append(fn[-1] if fn else "?")
+        self.assertTrue(owners, "nothing assigns gInstallStale")
+        for fn in owners:
+            self.assertIn(fn, allowed,
+                          "gInstallStale is written in %s()" % fn)
+
+    def test_no_per_frame_site_asks_only_half_the_question(self):
+        """The regression this whole class exists for: a gate rewritten back to
+        the single flag compiles, runs, and is wrong only on the one aircraft
+        nobody tests on."""
+        for name in ("EngineLoop", "AutoLoop", "PanelPassDraw", "DrawPanelFx"):
+            body = _fn(name)
+            code = "\n".join(l.split("//")[0] for l in body.splitlines())
+            self.assertNotIn("!gIsToLiss", code,
+                             "%s gates on the aircraft alone - a reverted "
+                             "install still runs through it" % name)
+
+
 class PerFrameGateTests(unittest.TestCase):
     """Every path X-Plane calls on its own, whatever aircraft is loaded."""
 
@@ -178,6 +243,62 @@ class FamilyResetTests(unittest.TestCase):
         _, _, other = vis.partition("\n    } else {")
         self.assertIn("PerfShutdown();", other,
                       "a benchmark run survives the aircraft change")
+
+
+class StaleTeardownTests(unittest.TestCase):
+    """⚠ A REVERTED INSTALL IS A TEARDOWN, not just a gate. Every gate above
+    stops work from RUNNING; none of them releases what the aircraft-load path
+    has already bound, and two of those bindings are handles into ToLiss's own
+    plugin. So the stale branch does the same teardown the not-a-ToLiss branch
+    does — one helper, called from both, so a handle added to the load path
+    cannot be dropped in one place and kept in the other."""
+
+    def _branches(self):
+        vis = _fn("UpdateMenuVisibility")
+        head, sep, other = vis.partition("\n    } else {")
+        self.assertTrue(sep, "UpdateMenuVisibility's else branch moved")
+        stale = re.search(r"if \(gInstallStale\) \{(.*?)\n        \}", head, re.S)
+        self.assertIsNotNone(stale, "the stale branch moved or was renamed")
+        return stale.group(1), other
+
+    def test_both_exits_release_the_aircraft_bindings(self):
+        stale, other = self._branches()
+        for name, body in (("the stale branch", stale),
+                           ("the not-a-ToLiss branch", other)):
+            self.assertIn("DropAircraftBindings();", body,
+                          "%s keeps handles into the loaded aircraft" % name)
+
+    def test_the_teardown_drops_the_toliss_plugin_handles(self):
+        """The two that are a crash rather than a stale read: a panel-FX driver
+        and a CPDLC command both point INTO ToLiss's plugin. On a stale install
+        that plugin is still loaded — but the same helper serves the aircraft
+        change, where it is not, so neither may be left out of it."""
+        body = _fn("DropAircraftBindings")
+        for call in ("FxForgetDrivers();", "UnbindDcduCommands();"):
+            self.assertIn(call, body)
+
+    def test_the_stale_branch_stops_a_benchmark(self):
+        """Same argument as the aircraft change: a run measures effects that are
+        now switched off, and its window went with the menu it was opened from."""
+        stale, _ = self._branches()
+        self.assertIn("PerfShutdown();", stale)
+
+    def test_the_stale_branch_comes_after_the_menu(self):
+        """⚠ The menu is the ONE thing a stale install still needs — the
+        "Reinstall required..." row is the only place the reason is written
+        down. Returning before CreatePhotonMenu would switch the add-on off with
+        nothing at all to say so."""
+        vis = _fn("UpdateMenuVisibility")
+        self.assertLess(vis.index("if (!gMenuCreated) CreatePhotonMenu();"),
+                        vis.index("if (gInstallStale) {"),
+                        "the stale branch returns before the menu is built")
+
+    def test_the_stale_flag_is_cleared_on_the_way_out_of_a_toliss(self):
+        """It is per aircraft. Carried onto the next one it would keep the
+        add-on dark on a perfectly good install until something re-ran
+        detection — and detection runs on aircraft load, which has just been."""
+        _, other = self._branches()
+        self.assertIn("gInstallStale = false;", other)
 
 
 if __name__ == "__main__":

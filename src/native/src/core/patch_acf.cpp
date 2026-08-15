@@ -104,14 +104,20 @@ std::string UnpatchText(const std::string& text, int& changed) {
     return acf::SetProps(text, values, changed);
 }
 
-std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8) {
-    return acf::AcfFilesContaining(aircraftDirUtf8, kSpotBlockNeedle);
+std::vector<std::string> AcfFiles(const std::string& aircraftDirUtf8,
+                                  acf::Variants which) {
+    return acf::AcfFilesContaining(aircraftDirUtf8, kSpotBlockNeedle, which);
 }
 
 RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
               const progress::StepProgress& onProgress) {
     RunResult result;
-    const std::vector<std::string> files = AcfFiles(aircraftDirUtf8);
+    // ⚠ THE SCOPE FOLLOWS THE DIRECTION. Patching writes to the pair X-Plane 12
+    // loads; reverting has to reach whatever an older Photon wrote to, which was
+    // all four. `acf::Variants` carries the whole argument.
+    const std::vector<std::string> files =
+        AcfFiles(aircraftDirUtf8, reverse ? acf::Variants::Every
+                                          : acf::Variants::Xp12);
     if (files.empty()) {
         result.log.push_back("  ! no .acf with a cockpit spot block under " +
                              aircraftDirUtf8);
@@ -160,6 +166,9 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
             }
         }
         result.touched.push_back(pathUtf8);
+        // ⚠ FROM `changed`, NOT FROM `out != text`, so a dry run reports what it
+        // WOULD change rather than nothing at all.
+        if (changed > 0) result.changed.push_back(pathUtf8);
     }
     if (onProgress) onProgress(1.0);
     return result;

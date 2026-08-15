@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <set>
 
+#include "core/backup.h"
 #include "core/constants.h"
 #include "core/fsutil.h"
 #include "third_party/nlohmann/json.hpp"
@@ -50,9 +51,15 @@ void PutStrings(json& j, const char* key, const std::vector<std::string>& v) {
 
 }  // namespace
 
+// ⚠ THE FOLDER IS RESOLVED, NEVER SPELLED OUT. It sits beside `objects/` on a
+// current install and inside it on one an earlier installer wrote, and
+// `backup::Dir` is the single statement of which — see core/backup.h. A manifest
+// read from the wrong folder
+// comes back ABSENT, and an install that believes nothing is installed backs up
+// the file it wrote last time as though it were ToLiss's.
 std::string PathFor(const std::string& objectsDirUtf8) {
-    const fs::path p = fsutil::PathFromUtf8(objectsDirUtf8) / kBackupDirName /
-                       kManifestName;
+    const fs::path p =
+        backup::DirForObjects(fsutil::PathFromUtf8(objectsDirUtf8)) / kManifestName;
     return fsutil::PathToUtf8(p);
 }
 
