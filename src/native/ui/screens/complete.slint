@@ -1,0 +1,294 @@
+// Screen 7 — "Complete".
+//
+// Redesigned twice. 2026-08-13 turned a stack of four identical buttons into two
+// groups separated by flexible space. 2026-08-14 (`212:1676`) added the outcome
+// GLYPH beside the summary, made "Modify another aircraft" the full-width primary
+// action, and moved "View log" off this screen entirely — it is now the bottom
+// bar's second button, where Back used to be.
+//
+// ⚠ COMPLETE NO LONGER HAS A BACK BUTTON, and losing it costs nothing — because
+// "View log" IS that button, relabelled. Back existed here for exactly one reason:
+// the installer log vanished the moment a run finished, and stepping back to Run was
+// the only way to read it again. The new button goes to the same screen by the same
+// plain `step` assignment; what changed is that the label now says what the movement
+// is FOR, on a screen where "Back" begged the question of back to what.
+//
+// ⚠ IT DOES NOT OPEN THE LOG FILE. That was the shape it shipped in for a few hours
+// and it was the wrong one: the Run screen is already showing the log with its
+// markers and its red lines, and handing the user a text editor full of timestamps
+// instead is a worse view of the same thing. The file is still written — it is the
+// record for afterwards, not the thing to show on request.
+//
+// ⚠ THE GLYPH IS THE ONLY THING ON THIS SCREEN THAT SAYS WHICH WAY IT WENT WITHOUT
+// BEING READ. The headline and the summary are both rendered by C++ and both say so
+// in words; a picture that disagreed with them would be worse than none, which is
+// why `failed` comes from the same `ok` the sentences do.
+
+import { Tokens } from "../tokens.slint";
+import {
+    Header1, Header2, PhotonButton, PhotonContextMenu, WellRecess
+} from "../widgets.slint";
+
+export component CompleteScreen inherits Rectangle {
+    // Rendered by C++ — "ToLiss Photon v0.9 (Durantula + Cockpit lighting)
+    // installed in ToLiss A320." is a sentence about the manifest, and the UI has
+    // no business assembling it.
+    in property <string> headline: "Operation complete";
+    in property <string> summary;
+    in property <bool> failed: false;
+    // ⚠ The screen opens with this focused, so Enter starts the next job. See
+    // `apply-focus` in app.slint for why it is done HERE and not there.
+    in property <bool> autofocus: false;
+    // Whether every supported ToLiss aircraft found under this X-Plane root now
+    // has the current version on it — re-detected on the way to this screen, so it
+    // accounts for the run that just happened.
+    //
+    // ⚠ IT MOVES THE BLUE, IT DOES NOT ADD A SECOND ONE. When there is nothing left
+    // to modify, the likely next move is to leave, so the bar's Exit takes Primary
+    // and this button goes Normal; when something is still out of date, they swap.
+    // Two primaries on one screen is not a recommendation, it is decoration — and
+    // the focus ring follows the same flag, so the blue button and the one Enter
+    // operates are always the same button.
+    in property <bool> all-up-to-date: false;
+
+    callback modify-another();
+    // The summary sentence onto the clipboard — see the menu at the bottom.
+    callback copy-result();
+    callback open-org();
+    callback open-github();
+
+    background: Tokens.screen-bg;
+
+    // ⚠ THIS SCREEN IS POSITIONED, NOT LAID OUT, AND FOR TWO SEPARATE REASONS —
+    // both of which were re-learned the hard way, so do not "tidy" it into a
+    // VerticalLayout.
+    //
+    // 1. A CHILD WIDTH THAT READS `root.width` INSIDE A LAYOUT IS A BINDING LOOP.
+    //    A layout computes its own size FROM its children, so a child sizing
+    //    itself from the parent closes the circle and Slint rejects it at compile
+    //    time ("layoutinfo-h is part of a binding loop"). The summary needs an
+    //    explicit width to measure its wrap against, and the two link buttons need
+    //    one to split the well evenly. The same trap is written up on `OptionRow`,
+    //    which escapes it with padding; here the widths are real and positioning
+    //    is the escape.
+    //
+    // 2. EVERY VERTICAL NUMBER MUST BE A WHOLE PIXEL. The design's two spacers are
+    //    `flex: 1 0 0`, i.e. an even split of whatever is left over — and what is
+    //    left over depends on the summary, whose height is a FONT METRIC (~16.41 px
+    //    a line for Roboto at 14). Halving an odd remainder puts every row below it
+    //    on a fractional y, and a rectangle on a fractional y is resampled across
+    //    two pixel rows: the soft edges this screen was already fixed for once.
+    //    `spacer-h` floors the half ONCE and both gaps take that whole number.
+    //
+    // The design's own numbers, which this reproduces at 640x480: spacer 44, then
+    // the heading at y=78, the outcome block at 120, the primary button at 206,
+    // the second spacer, the subhead at 302 and the links well at 336.
+    property <length> gap: Tokens.content-gap;
+    property <length> content-w: root.width - 2 * Tokens.content-pad-x;
+
+    // The outcome row: a 83 px glyph column and the summary beside it. ⚠ 76 px is
+    // the design's height and a FLOOR here, not a fixed size — a failure summary is
+    // an exception message and has no length limit, and a block that overflowed
+    // would run straight through the button under it.
+    property <length> outcome-h:
+        max(76px, ceil(summaryBox.preferred-height / 1px) * 1px);
+    property <length> glyph-col-w: 83px;
+
+    property <length> well-h: 56px;
+    // 32 heading + outcome + 10 + 32 button + 24 subhead + 56 well.
+    property <length> fixed-h: 32px + root.outcome-h + root.gap + Tokens.button-h
+        + 24px + root.well-h;
+    property <length> spacer-h: max(0px, floor((root.height
+        - 2 * Tokens.content-pad-y - root.fixed-h - 5 * root.gap) / 2 / 1px) * 1px);
+
+    property <length> y-head: Tokens.content-pad-y + root.spacer-h + root.gap;
+    property <length> y-outcome: root.y-head + 32px + root.gap;
+    property <length> y-btn: root.y-outcome + root.outcome-h + root.gap;
+    property <length> y-sub: root.y-btn + Tokens.button-h + root.gap
+        + root.spacer-h + root.gap;
+    property <length> y-well: root.y-sub + 24px + root.gap;
+
+    // The two link buttons split the well evenly. Floored for the same reason as
+    // the spacers — an odd remainder would put the right-hand one on a half pixel.
+    // 442 - 26 padding - 12 gap = 404, so 202 each at the design size, which is
+    // Figma's own instance width.
+    //
+    // ⚠ 13 px OF PADDING, NOT THE `px-[12px]` THE REFERENCE CSS REPORTS. That 12
+    // is measured inside the well's 1 px border, and a Slint Rectangle positions
+    // its children from the OUTER edge — so the border has to be added back.
+    // Figma's own instance x values are 13 and 227, which is what this reproduces.
+    //
+    // ⚠ AND THE BUTTONS ARE CENTRED, NOT TOP-PADDED. The CSS says `py-[8px]`,
+    // which would sit them at y = 9 and leave 15 px underneath; the real instances
+    // are at y = 12, because the row is a 1fr grid track and the button centres
+    // inside it. Reading the padding literally is what left them riding high.
+    property <length> link-pad: 13px;
+    property <length> link-gap: 12px;
+    property <length> link-w: floor(
+        (root.content-w - 2 * root.link-pad - root.link-gap) / 2 / 1px) * 1px;
+    property <length> link-y: floor(
+        (root.well-h - Tokens.button-h) / 2 / 1px) * 1px;
+
+    // ⚠ 32 px, NOT THE 40 EVERY OTHER SCREEN'S Header 1 GETS. This one sits over a
+    // block it belongs to rather than over the whole pane, and the design tightens
+    // it accordingly.
+    Header1 {
+        x: Tokens.content-pad-x;
+        y: root.y-head;
+        width: root.content-w;
+        height: 32px;
+        text: root.headline;
+    }
+
+    // ⚠ THE GLYPH IS CENTRED IN ITS OWN 83 px COLUMN AND PINNED TO THE FIRST LINE
+    // of the summary, not to the block — a two-line summary and a four-line one
+    // must not put the tick at two different heights relative to the words it
+    // belongs to.
+    Image {
+        source: root.failed
+            ? @image-url("../assets/glyph-failure.svg")
+            : @image-url("../assets/glyph-success.svg");
+        x: Tokens.content-pad-x
+            + (root.glyph-col-w - self.width) / 2;
+        y: root.y-outcome + (76px - self.height) / 2;
+        width: root.failed ? 32px : 41px;
+        height: 32px;
+        // ⚠ `contain`, NOT `fill` — the two are 41x32 and 32x32, and one box for
+        // both would squash the checkmark by a fifth.
+        image-fit: contain;
+    }
+
+    // ⚠ `summaryBox` is a LAYOUT around the Text rather than the Text itself: a
+    // Text's `preferred-height` is its UNWRAPPED height (`default_size_binding:
+    // implicit_size`), so it reports one line however many it draws. A layout's
+    // preferred height accounts for the wrap.
+    summaryBox := VerticalLayout {
+        x: Tokens.content-pad-x + root.glyph-col-w;
+        y: root.y-outcome;
+        width: root.content-w - root.glyph-col-w;
+        height: root.outcome-h;
+        alignment: center;
+
+        Header2 {
+            text: root.summary;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+
+    // ⚠ THE WHOLE OUTCOME ROW IS THE RIGHT-CLICK TARGET, not the Header 2 alone.
+    // The sentence is one 26 px line in a 442 px pane and the glyph beside it is
+    // part of the same statement, so the hit area is the block rather than the run
+    // of text — the same reason the installer log's menu covers its well and not its
+    // lines. A right-click anywhere on "✓ ToLiss Photon v0.8.4 installed in ..."
+    // offers to copy it.
+    //
+    // ⚠ WHAT IT COPIES IS THE SUMMARY ONLY, not the headline above it. The summary
+    // is already a whole sentence naming the version, the components and the
+    // aircraft, in both outcomes ("Failed: ..." on the other branch); the headline is
+    // a two-word label for it, and pasting "Install complete" ahead of a line that
+    // says the same thing is noise in a bug report.
+    resultTouch := TouchArea {
+        x: Tokens.content-pad-x;
+        y: root.y-outcome;
+        width: root.content-w;
+        height: root.outcome-h;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right
+                    && event.kind == PointerEventKind.down) {
+                // ⚠ THE MENU'S COORDINATES ARE ITS PARENT'S, and `mouse-x/y` are
+                // this area's own — so the area's origin has to be added back.
+                // Both are positioned children of the same Rectangle, which is
+                // what makes that a plain sum here rather than the window-space
+                // conversion the aircraft list needs.
+                resultMenu.show-at(self.x + self.mouse-x, self.y + self.mouse-y);
+            }
+        }
+    }
+
+    // ⚠ DECLARED IN THE ROOT RECTANGLE, NOT IN A LAYOUT — a layout would overwrite
+    // the x/y/width/height PhotonContextMenu pins to its parent's origin. This
+    // screen is positioned throughout, so there is nothing to escape from.
+    resultMenu := PhotonContextMenu {
+        entries: ["Copy result"];
+        activated(index) => {
+            if (index == 0) { root.copy-result(); }
+        }
+    }
+
+    // ⚠ FULL WIDTH AND PRIMARY. It is the only thing on this screen that starts
+    // more work, and the design gives it the whole pane to say so. `PhotonButton`
+    // binds `width: Tokens.button-w`, so anything that does not state otherwise is
+    // 96 px with its sentence overrunning the fill.
+    modifyBtn := PhotonButton {
+        x: Tokens.content-pad-x;
+        y: root.y-btn;
+        width: root.content-w;
+        label: "Modify another aircraft";
+        // ⚠ FULL WIDTH EITHER WAY. Only the FILL follows `all-up-to-date` — the
+        // button keeps the pane, because the design's layout is not a statement
+        // about which action is likelier and resizing it would move every row
+        // under it between two runs.
+        primary: !root.all-up-to-date;
+        clicked => { root.modify-another(); }
+    }
+
+    Header2 {
+        x: Tokens.content-pad-x;
+        y: root.y-sub;
+        width: root.content-w;
+        height: 24px;
+        text: "Find more information online";
+    }
+
+    // The links well — the same recessed panel as the aircraft list and the
+    // installer log, down to the design's `inset 0 1px 7px rgba(0,0,0,.25)`, which
+    // `WellRecess` approximates. Grouping the two outward links inside it is what
+    // stops them reading as two more things to do next.
+    Rectangle {
+        x: Tokens.content-pad-x;
+        y: root.y-well;
+        width: root.content-w;
+        height: root.well-h;
+        background: Tokens.panel-bg;
+        border-color: Tokens.panel-border;
+        border-width: 1px;
+        border-radius: Tokens.radius-panel;
+        // ⚠ Required by WellRecess — its bands are square.
+        clip: true;
+
+        PhotonButton {
+            x: root.link-pad;
+            y: root.link-y;
+            width: root.link-w;
+            label: "Open X-Plane.org Page...";
+            primary: false;
+            clicked => { root.open-org(); }
+        }
+
+        PhotonButton {
+            x: root.link-pad + root.link-w + root.link-gap;
+            y: root.link-y;
+            width: root.link-w;
+            label: "Open GitHub Project...";
+            primary: false;
+            clicked => { root.open-github(); }
+        }
+
+        // ⚠ LAST, so it darkens the edges of what the well holds — the two buttons
+        // included, which is where Figma has it too.
+        WellRecess {
+            width: 100%;
+            height: 100%;
+        }
+    }
+
+    // ⚠ THE SCREEN FOCUSES ITSELF, and it has to. Every screen lives inside an
+    // `if`, and Slint will not let an element inside a conditional be reached from
+    // outside it — so app.slint cannot call `.focus()` on this button the way it
+    // can on the bottom bar's. `init` runs when the `if` instantiates the screen,
+    // which is once per arrival here.
+    init => {
+        if (root.autofocus) { modifyBtn.focus(); }
+    }
+}

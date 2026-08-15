@@ -1,0 +1,45 @@
+// Screen 1 — the splash.
+//
+// The one screen with NO step rail: it sits ahead of the six steps, so showing a
+// rail with nothing marked would claim it is step zero of six.
+//
+// The design lays this out as logo | vertical rule | welcome text, together
+// centered in the 640 px width. Reproduced as a centered row rather than the
+// mockup's three `calc(50% ± n)` offsets, which describe the same arrangement.
+
+import { Tokens } from "../tokens.slint";
+import { Logo, Header1 } from "../widgets.slint";
+
+export component SplashScreen inherits Rectangle {
+    background: Tokens.screen-bg;
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 28px;
+
+        VerticalLayout {
+            alignment: center;
+            Logo {
+                width: 235px;
+                height: 124px;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 1px;
+                height: 123px;
+                background: Tokens.muted;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Header1 {
+                width: 252px;
+                text: "Welcome to the ToLiss Photon Installer for X-Plane 12.";
+            }
+        }
+    }
+}

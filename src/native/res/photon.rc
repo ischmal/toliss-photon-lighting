@@ -1,0 +1,78 @@
+// The Windows executable icon for photon-installer.
+//
+// ⚠ photon.ico IS GENERATED -- `python build/make_icon.py`, from src/icons/*.png.
+// Do not hand-edit it and do not re-export it from a paint program: the sizes,
+// the BMP/PNG split and the AND masks are all decided by that script, and
+// tests/test_icon.py fails the build if the committed .ico stops matching the
+// PNGs beside it.
+//
+// ⚠ THIS RESOURCE IS NOT THE WHOLE STORY ON WINDOWS. It is what Explorer, the
+// taskbar and the browser download use, but the GUI build's TITLE BAR is drawn
+// from the icon the WINDOW owns, and winit sets that from Slint's `Window.icon`
+// -- one single bitmap, which Windows then squashes to 16 px with a crude
+// stretch. `gui.cpp` overrides it after show() by LoadImage()-ing THIS group at
+// the exact size the shell asked for, which is how the authored 16 px entry
+// reaches the title bar. Delete that call and the icon is still "there" and
+// still visibly wrong. See ApplyWindowIcon().
+
+#include "resource.h"
+
+PHOTON_ICON_ID ICON "photon.ico"
+
+// --- executable metadata ----------------------------------------------------
+//
+// What Explorer's Properties ▸ Details tab reads, and what a user checks when a
+// downloaded mod binary trips their AV. It does NOT remove SmartScreen's
+// "unknown publisher" warning — only a code-signing certificate does that — but
+// a blank Details tab is its own bad look, and it is free to fill in.
+//
+// ⚠ THE VERSION COMES FROM CMake, WHICH READS core/version.h. Never type one
+// here: that header is the single definition and this file would be a second
+// copy of exactly the kind that already drifted through a whole feature.
+// photon_version_rc.h is generated into the build tree; see version_rc.h.in.
+//
+// ⚠ THE BLOCK NAME AND THE Translation VALUE ARE THE SAME PAIR TWICE, and they
+// must agree: "040904B0" is 0x0409 (US English) and 0x04B0 (1200, Unicode)
+// concatenated as hex. When they disagree, Windows looks up the language block
+// by that name, finds nothing, and shows an EMPTY Details tab — indistinguishable
+// from having no VERSIONINFO at all, which is what makes this worth an hour.
+//
+// ⚠ OriginalFilename IS COMPARED AGAINST THE REAL NAME by some tools, and shown
+// beside it in Explorer. `make_release.py` stages the binary under exactly this
+// name (INSTALLER_EXE_NAMES) and never renames it; if a bundle ever does, this
+// string has to follow or the file reads as renamed-after-the-fact.
+#include <winresrc.h>
+#include "photon_version_rc.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    PHOTON_RC_FILEVERSION
+ PRODUCTVERSION PHOTON_RC_FILEVERSION
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Alex Smith (schmal.me)"
+            VALUE "FileDescription",  "ToLiss Photon Lighting installer"
+            VALUE "FileVersion",      PHOTON_RC_VERSION_STRING
+            VALUE "InternalName",     "photon-installer"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Alex Smith. GPLv3."
+            VALUE "OriginalFilename", "photon-installer.exe"
+            VALUE "ProductName",      "ToLiss Photon Lighting"
+            VALUE "ProductVersion",   PHOTON_RC_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

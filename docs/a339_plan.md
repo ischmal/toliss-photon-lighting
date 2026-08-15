@@ -109,6 +109,12 @@ strobe/beacon glow indices from `EngineLoop`, after the ratio writes. The mesh O
   `REALWINGS_DIR[airframe]` — **KeyError for a339** unless skipped.
 - `build/make_release.py` builds `WINGS × OBJ_PATH` (9 OBJs today) — must become
   "supported combos only" (9 + a339 stock = 10).
+⚠ **FILE NAMES BELOW ARE PRE-PORT (this section is a 2026-07 record).** The Python
+installer was deleted on 2026-08-09; `installer/constants.py` → `core/constants.cpp` (plus
+the small `build/constants.py` mirror), `installer/detect.py` → `core/detect.cpp`,
+`installer/actions.py` → `core/actions.cpp`, `install.py`'s screens →
+`src/native/src/installer/screens.cpp`. The ANALYSIS is unaffected — only the paths moved.
+
 - `installer/constants.py`: `AIRFRAMES` row + `REALWINGS` (no a339 entry) + the global
   `WINGS` list that `install.py screen_actions` (line ~237) offers for **every**
   aircraft — needs a per-airframe wings lookup.
@@ -311,15 +317,16 @@ own**:
    strobe ch0→[12], ch1→[13], ch2→[14]; beacon→[15],[16]). `EngineLoop` sets `gGlow[idx]` to
    the SAME value the billboard got — and to **0 when the light is off** (we own the array,
    nothing else drives it down). Confirmed in-sim indices, not the §1.4 hypothesis guesses.
-2. **Installer redirects the OBJs.** `build/patch_glow.py` swaps the dataref token per region:
+2. **Installer redirects the OBJs.** `core/patch_glow.cpp` swaps the dataref token per region:
    `AirbusFBW/ExternalLightBrightnesses[N]` → `ToLissPhoton/exterior/glow[N]` (same N, trailing
    nits untouched — ToLiss already uses the `[index]` subscript form so the line parses
    identically). Only the 5 driven indices; every other glow region still reads ToLiss's
    array. Backed up before patching (existing `backed_up` list), reversed on uninstall; gated
    on `constants.GLOW_AIRFRAMES`. Idempotent; `--reverse` restores byte-for-byte. Dev CLI:
-   `python build/patch_glow.py --airframe a339 --root <objects dir>`.
+   run as part of `photon-installer install --aircraft <dir>` (the standalone
+   `build/patch_glow.py` command was deleted with the Python installer, 2026-08-09).
 3. **Coupling to remember:** the three index lists (`plugin.cpp GlowMapForIcao`,
-   `patch_glow.REDIRECT`, `constants.GLOW_AIRFRAMES`) MUST agree; a redirected index the
+   `GlowRedirect()` in `core/constants.cpp` — now ONE table all of them read) MUST agree; a redirected index the
    plugin never drives goes dark, and the mesh patch requires the new plugin deployed first.
 4. **A3xx follow-up:** if A320's `[19]`/`[20]` (fuselage) turn out to be beacon glows, add
    them to all three lists; same latent mismatch, just fainter.
@@ -333,7 +340,7 @@ writes; `XPLMSetDatavf` each mapped element. Dropped once the array proved read-
 ## 5. Do-NOT list
 
 - Don't edit the GEOMETRY/textures of `WingL/WingR/Fuselage_*/ExteriorGlass.obj` — they're
-  huge livery-bound files. The ONE allowed automated edit is `patch_glow.py`'s dataref-token
+  huge livery-bound files. The ONE allowed automated edit is `patch_glow`'s dataref-token
   redirect (a backed-up, reversible per-region string swap that adds no content) — see §4.
 - Don't commit ToLiss originals; `.scratch/` only. Mount excerpts are the exception.
 - Don't `extends a320` for a339; don't add fence/sharklet or realwings conditions to

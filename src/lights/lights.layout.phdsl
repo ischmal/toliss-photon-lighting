@@ -34,18 +34,22 @@ mounts a320 {
     stock: src/lights/mounts/a320/wing_right.stock.obj;
     durantula: src/lights/mounts/a320/wing_right.durantula.obj;
   }
+  // The four movable main panel flood lamps: a ckpt/lights/<n>/{x,y,z}/dir
+  // ANIM_trans stack each. Stock-only — wing mods do not touch the cockpit.
+  panelflood1 { stock: src/lights/mounts/a320/panelflood1.stock.obj; }
+  panelflood2 { stock: src/lights/mounts/a320/panelflood2.stock.obj; }
+  panelflood3 { stock: src/lights/mounts/a320/panelflood3.stock.obj; }
+  panelflood4 { stock: src/lights/mounts/a320/panelflood4.stock.obj; }
 }
 mounts a321 {
   beacon_fus { stock: src/lights/mounts/a321/beacon_fus.stock.obj; }
   tail_fus { stock: src/lights/mounts/a321/tail_fus.stock.obj; }
 }
 
-// A330-900 mounts: no wing mods exist for this airframe, so every mount is
-// stock-only. Wingtip nav/strobe sit inside the full 10-level WingFlex[0..9]
-// rotate/counter-rotate chain (wingtip_left/right); landing lights only need
-// the first WingFlex[0]/[1] level (wingroot_left/right). Left/right chains are
-// NOT mirror images of each other in ToLiss's own data (see docs/a339_plan.md
-// §1.3), so each is transcribed verbatim rather than derived.
+// A330-900: no wing mods exist, so every mount is stock-only. Wingtip
+// nav/strobe need the full 10-level WingFlex[0..9] chain; landing lights only
+// WingFlex[0]/[1]. ⚠ Left and right are NOT mirrors in ToLiss's own data, so
+// each is transcribed verbatim (docs/a339_plan.md §1.3).
 mounts a339 {
   wingroot_left { stock: src/lights/mounts/a339/wingroot_left.stock.obj; }
   wingroot_right { stock: src/lights/mounts/a339/wingroot_right.stock.obj; }
@@ -156,20 +160,15 @@ airframe a320 {
     mirror: true;
     omit: realwings;
     mount: wing_left;  @starboard { mount: wing_right; }
-    // RealWings bakes its own wingtip strobes (hence omit: realwings). This
-    // offset corrects THEIR misplacement in the mod's OBJ — read by
-    // patch_realwings.py and added to the baked position (X mirrored per side).
-    // Not emitted into lights_out; stock/durantula are unaffected. RealWings
-    // ships CEO and NEO as separate OBJs with different placement: @fence is the
-    // CEO wing (reported too high and off on X — TODO: measure in-sim), the
-    // @realwings base is NEO/sharklet, which is correct as baked (leave 0).
+    // ⚠ These offsets are NOT emitted — patch_realwings.py reads them and adds
+    // them to the mod's own baked wingtip lights (X mirrored per side), which is
+    // why the fixture is `omit: realwings`. @fence = RealWings' CEO OBJ,
+    // @realwings base = its NEO/sharklet OBJ. Stock/durantula are unaffected.
     offset: 0 0 0;                          // stock/durantula: no shift
     @realwings {
       offset: 0 0 0;                        // NEO / sharklet OBJ: correct as baked
-      // CEO OBJ: RealWings bakes nav & strobe in each other's spots. This offset
-      // moves the strobe onto the (old) nav spot; wing_nav's @fence does the
-      // reverse — together they swap the two. = (nav_baked - strobe_baked) + the
-      // fine-tune that had been on wing_nav.  X: Y: Up (+) / Down (-) Z:
+      // CEO OBJ bakes nav & strobe in each other's spots; this moves strobe onto
+      // the nav spot and wing_nav's @fence does the reverse, swapping the pair.
       @fence { offset: -0.078 -0.041 0.138; }
     }
     group fence {
@@ -194,16 +193,11 @@ airframe a320 {
     mirror: true;
     omit: realwings;
     mount: wing_left;  @starboard { mount: wing_right; }
-    // Corrects RealWings' baked wingtip nav placement — see wing_strobe above.
-    // @fence = CEO (TODO measure); @realwings base = NEO/sharklet (correct, 0).
-    // Read by patch_realwings.py, not emitted here.
+    // ⚠ Not emitted — read by patch_realwings.py. See wing_strobe above.
     offset: 0 0 0;                          // stock/durantula: no shift
     @realwings {
       offset: 0 0 0;                        // NEO / sharklet OBJ: correct as baked
-      // CEO OBJ: RealWings bakes nav & strobe in each other's spots. This offset
-      // moves the nav onto the (old) strobe spot; wing_strobe's @fence does the
-      // reverse — together they swap the two. = (strobe_baked - nav_baked) + the
-      // fine-tune that had been on wing_strobe.  X: Y: Up (+) / Down (-) Z:
+      // The other half of the CEO nav/strobe swap.
       @fence { offset: 0.028 -0.024 -0.038; }
     }
     group fence {
@@ -250,6 +244,228 @@ airframe a320 {
       pos: 0 -2.403 7.948;
       beacon_pm { index: 1;  intensity: 4000;  @led { intensity: 6000; } }
     }
+  }
+
+  // ==========================================================================
+  // INTERIOR (cockpit) — target: interior -> objects/lights_inn.obj
+  // ==========================================================================
+  // Gus's mod, folded into one runtime-switchable OBJ. Full light table:
+  // docs/interior_plan.md §1.2.
+  //
+  // ⚠ In the a320 block ON PURPOSE: a319/a321 `extends a320` and inherit these
+  // byte-identically (correct — lights_inn.obj is the same file on all three),
+  // while a339 does not extend a320 and so is kept out of the interior for free.
+  //
+  // No `mirror: true` anywhere — a mirrored fixture emits two category-gated
+  // blocks where one will do, so the pairs are written out explicitly.
+
+  fixture int_dome_lights "Dome Lights" {
+    target: interior;
+    category: dome;
+    int_dome#left  { pos: -0.472 1.09 -3.35; }
+    int_dome#right { pos:  0.472 1.09 -3.35; }
+  }
+
+  // Flood and both table lamps share panel[3], the PEDESTAL knob.
+  fixture int_pedestal "Pedestal & Tables" {
+    target: interior;
+    category: pedestal;
+    int_flood         { pos:  0     0.8    -4.1; }
+    // Gus's "table" lamps: aimed down and aft from y 0.333, so what they wash is
+    // each pilot's footwell and seat. Both keep his cone (type default 0.701).
+    int_table#ca      { pos: -0.5577 0.3333 -4.5; }
+    int_table#fo      { pos:  0.5577 0.3333 -4.5; }
+  }
+
+  // The two overhead reading lamps (Gus's "tablet" pair), one per pilot.
+  //
+  // ⚠ THE ONE PLACE `map` IS NOT A SINGLE BRIGHTNESS SOURCE: these run off
+  // panel[3] (the PEDESTAL knob) while int_spot3 runs off `ckpt/lights/map`.
+  // Grouped by FIXTURE ROLE deliberately — by rheostat the Map row held only
+  // that spot and looked dead with the knob down. Accepted cost: the pedestal
+  // knob dims a light the Map row recolors. Not license to merge in `mainpnl`.
+  fixture int_map_lamps "Map Lights" {
+    target: interior;
+    category: map;
+    // dir normalized 2026-07-29 (deviation #5), same aim.
+    int_tablet#ca     { pos: -0.8    0.7    -4.0;  dir: -0.381 -0.816 -0.435; }
+    int_tablet#fo     { pos:  0.8    0.7    -4.0;  dir:  0.381 -0.816 -0.435; }
+  }
+
+  fixture int_console "Console Lights" {
+    target: interior;
+    category: console;
+    int_console#l1 { pos: -1.1471  0.0333 -4.2;   index: 22; }
+    int_console#l2 { pos: -1.3463  0.0032 -3.65;  index: 22; }
+    int_console#l3 { pos: -1.4369 -0.0101 -3.3;   index: 22; }
+    int_console#r1 { pos:  1.1471  0.0333 -4.2;   index: 23; }
+    int_console#r2 { pos:  1.3463  0.0032 -3.65;  index: 23; }
+    int_console#r3 { pos:  1.4369 -0.0101 -3.3;   index: 23; }
+  }
+
+  // The four panel flood lamps — the FLOOD LT MAIN PNL knob, category
+  // `mainpnl`. One fixture per lamp because the mount is a per-fixture property.
+  // ⚠ The rheostat index is per-LIGHT and NOT uniform per lamp: lamp 3 straddles
+  // panel[1] and panel[2] (§1.3e). ⚠ These are NOT the map lights — identify a
+  // light by its rheostat and position, never by its name (§1.3c, §2.2b).
+  //
+  // ⚠ OPEN — the geometry does not corroborate `mainpnl`: all four mounts bake
+  // the SAME rest position at footwell height and differ only in direction, so
+  // the assignment rests on one in-sim observation. docs/interior_plan.md §2.2b.
+  //
+  // Cones are Gus's measured values (rounded to 3 dp by the emitter); dirs were
+  // normalized 2026-07-29 (deviation #5), aim unchanged, old values per line.
+  //
+  // Each fixture is a STACK — two or three coincident spill lights differing
+  // only in cone, Gus's soft-edge trick, ten lights for four lamps. The
+  // `optimize:` lines declare the reduced alternative gated on
+  // ToLissPhoton/interior/optimized: `drop` the narrow ones, `boost 1.5` the
+  // widest survivor (widest = SMALLEST cone). The 1.5 is a judgement tuned
+  // in-sim, not a measurement — retune here, per lamp if they need to differ.
+  // Semantics: docs/dsl.md §`optimize:`.
+  fixture int_panelflood1 "Panel Flood Lamp 1" {
+    target: interior;
+    category: mainpnl;
+    mount: panelflood1;
+    pos: 0 0 0;   // real placement comes from the mount's ckpt/lights/1 animation
+    int_panelflood#a { index: 1;  dir: 0 -0.832 -0.555;  cone: 0.819152;  optimize: boost 1.5; }   // was 0 -0.15 -0.1 (|d| 0.180)
+    int_panelflood#b { index: 1;  dir: 0 -0.814 -0.581;  cone: 0.906307;  optimize: drop; }        // was 0 -0.21 -0.15 (|d| 0.258)
+  }
+  fixture int_panelflood2 "Panel Flood Lamp 2" {
+    target: interior;
+    category: mainpnl;
+    mount: panelflood2;
+    pos: 0 0 0;
+    int_panelflood#a { index: 1;  dir: 0 -0.966 0.258;  cone: 0.906307;  optimize: drop; }
+    int_panelflood#b { index: 1;  dir: 0 -0.966 0.258;  cone: 0.866025;  optimize: drop; }
+    int_panelflood#c { index: 1;  dir: 0 -0.966 0.258;  cone: 0.642787;  optimize: boost 1.5; }
+  }
+  fixture int_panelflood3 "Panel Flood Lamp 3" {
+    target: interior;
+    category: mainpnl;
+    mount: panelflood3;
+    pos: 0 0 0;
+    // index 2, NOT Gus's 1 — see the §1.3e note above the fixture block.
+    int_panelflood#a { index: 2;  dir: 0 -0.966 0.258;  cone: 0.906307;  optimize: drop; }
+    int_panelflood#b { index: 2;  dir: 0 -0.966 0.258;  cone: 0.866025;  optimize: drop; }
+    int_panelflood#c { index: 2;  dir: 0 -0.966 0.258;  cone: 0.642787;  optimize: boost 1.5; }
+  }
+  fixture int_panelflood4 "Panel Flood Lamp 4" {
+    target: interior;
+    category: mainpnl;
+    mount: panelflood4;
+    pos: 0 0 0;
+    int_panelflood#a { index: 2;  dir: 0 -0.832 -0.555;  cone: 0.819152;  optimize: boost 1.5; }   // was 0 -0.15 -0.1 (|d| 0.180)
+    int_panelflood#b { index: 2;  dir: 0 -0.814 -0.581;  cone: 0.9063077;  optimize: drop; }       // was 0 -0.21 -0.15 (|d| 0.258)
+  }
+
+  // -- The three re-added .acf cockpit spots (docs/interior_plan.md §3.4) ----
+  //
+  // The installer disables ToLiss's three sim 3D spots (_spot_name_3d/* = none)
+  // and they reappear here as OBJ lights, so their color follows the runtime
+  // switch instead of being frozen at install time.
+  //
+  // POSITIONS ARE DERIVED, NOT GUESSED. The .acf states spot positions in FEET;
+  // the interior OBJ attaches at _obja/11/_v10_att_{x,y,z}_acf_prt_ref =
+  // (0, 0.4, 26.00 / 20.75 / 6.78 ft) for a319 / a320 / a321, so:
+  //
+  //     obj_meters = (acf_feet - attach_feet) * 0.3048
+  //
+  // That difference is the same on all three (3 mm spread from .acf rounding),
+  // which is what keeps one shared lights_inn.obj correct for all of them.
+  // Cross-check: spot 1 lands at y 1.097 z -3.432 against Gus's dome lamps at
+  // y 1.09 z -3.35 — two independent axes agreeing to 8 cm.
+  //
+  // ⚠ DIRECTION, CONE and SIZE ARE SEEDS — the main tuning target. Gus's
+  // _spot_psi/0 = 180 reads as AFT, but the panels these wash are FORWARD, so
+  // either Plane Maker measures heading from the tail or his 180 means forward.
+  //   >>> If the cockpit looks lit from behind in-sim, flip dz: 0.5 -> -0.5.
+  // Spots 2 and 3 are near enough straight down that the ambiguity barely bites.
+  fixture int_spot_dome "Cockpit Spot 1 (dome)" {
+    target: interior;
+    category: dome;
+    int_spot1 { pos: 0 1.097 -3.432;  dir: 0 -0.866 0.5; }
+  }
+  fixture int_spot_pedestal "Cockpit Spot 2 (pedestal)" {
+    target: interior;
+    category: pedestal;
+    // stock _spot_the/1 = -66, _spot_psi/1 = 0 -> down, very slightly forward
+    int_spot2 { pos: 0 1.036 -3.52;  dir: 0 -0.914 -0.407; }
+  }
+  // The ckpt/lights/map spot — category `map`, with the reading lamps above.
+  // ⚠ The only light on the MAP rheostat, so with that knob down the plugin
+  // drives its alpha to 0 and it alone disappears. Turn the map light UP before
+  // judging any change to this light.
+  fixture int_spot_map "Cockpit Spot 3 (map light)" {
+    target: interior;
+    category: map;
+    // stock _spot_the/2 = -53, _spot_psi/2 = 14 -> down, forward, slightly right
+    int_spot3 { pos: 0.244 1.097 -3.463;  dir: 0.146 -0.799 -0.584; }
+  }
+
+  // ==========================================================================
+  // SCREENS (display glow) — target: screens -> objects/lights_screens.obj
+  // ==========================================================================
+  // EXPERIMENTAL (docs/screens_plan.md). Six spill lights, one per main display
+  // unit, throwing each screen's own wash back into the cockpit.
+  //
+  // In the a320 block so a319/a321 inherit them, and in the SAME COORDINATE
+  // FRAME as lights_inn.obj — patch_acf_screens copies the attachment point from
+  // the aircraft's own lights_inn.obj row. ⚠ The a339 has its OWN six (bottom of
+  // this file) because its flight deck is a different model AND its OBJ frame is
+  // a different datum; it does not inherit these.
+  //
+  // Positions were seeded from the panel geometry (ToLiss draws the DUs from its
+  // plugin, so there is no screen geometry to measure) and tuned in-sim
+  // 2026-07-29; the seed basis is in docs/screens_plan.md. Re-tune with
+  // `build --target screens --debug --write`, and judge by the position MARKERS
+  // rather than the pool of light — the glow's center is not its origin.
+  //
+  // ⚠ TWO NUMBERS PER FIXTURE MUST AGREE WITH THE PLUGIN, and they differ:
+  //   `spill_dref: .../spill/<n>` — the light's own slot, n = fixture order.
+  //   `index: <du>`               — the AirbusFBW/DUBrightness element driving
+  //                                 it, NOT the same as n. Must equal kScreenDU[n]
+  //                                 in plugin.cpp; a test compares them. The DU
+  //                                 order is Airbus numbering, not left-to-right:
+  //     DUBrightness[0] CA PFD  [1] CA ND  [2] FO PFD  [3] FO ND  [4] E/WD  [5] SD
+  //
+  // `profile: screen;` not `category:` — one look, no gate. See lights.style.phdsl.
+
+  fixture screen_capt_pfd "Captain PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.59 0.12 -4.67;  index: 0;  spill_dref: ToLissPhoton/screens/spill/0; }
+  }
+  fixture screen_capt_nd "Captain ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.37 0.12 -4.67;  index: 1;  spill_dref: ToLissPhoton/screens/spill/1; }
+  }
+  // The ECAM pair stack on the centerline, upper (E/WD) above lower (SD). x is
+  // 0.012 rather than 0 because that is where they tuned to.
+  fixture screen_ecam_upper "Upper ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.012 0.12 -4.67;  index: 4;  spill_dref: ToLissPhoton/screens/spill/2; }
+  }
+  // ⚠ The odd one out: every other light tuned onto the y 0.12 / z -4.67 plane
+  // and this one sits 19 cm below and 5 cm aft of them. Reported from the tool's
+  // readout (2026-07-29) and confirmed as intended. If the lower ECAM ever
+  // lights from the wrong place, this is the line.
+  fixture screen_ecam_lower "Lower ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.012 -0.07 -4.62;  index: 5;  spill_dref: ToLissPhoton/screens/spill/3; }
+  }
+  fixture screen_fo_nd "First Officer ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.37 0.12 -4.67;  index: 3;  spill_dref: ToLissPhoton/screens/spill/4; }
+  }
+  fixture screen_fo_pfd "First Officer PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.59 0.12 -4.67;  index: 2;  spill_dref: ToLissPhoton/screens/spill/5; }
   }
 }
 
@@ -320,16 +536,13 @@ airframe a321 extends a320 {
 }
 
 // -- A330-900: standalone, NOT extends a320 --
-// Structurally different from the A3xx: WingFlex[0..9] rotate chains (not
-// fence/sharklet), no wing mods (no @realwings/omit), wing-mounted landing
-// lights (no LandingLightLocation gate), logo lights on the PitchTrim chain,
-// dual NAV1/NAV2 bulb positions at the wingtips too. Left/right wingtip
-// nav/strobe positions are transcribed verbatim from ToLiss's own data rather
-// than mirrored (they're not exact mirrors — see docs/a339_plan.md §1.3), so
-// those four fixtures are deliberately separate, non-mirrored pairs; the
-// nav/strobe color (red/green) and side-conditioned intensity that a
-// mirrored fixture would resolve automatically are instead given as explicit
-// unconditioned overrides on the starboard fixture's light references.
+// Structurally different from the A3xx: WingFlex[0..9] chains (not
+// fence/sharklet), no wing mods, wing-mounted landing lights, logo lights on
+// the PitchTrim chain. ⚠ The four wingtip nav/strobe fixtures are deliberately
+// separate and non-mirrored because ToLiss's own left/right positions are not
+// exact mirrors (docs/a339_plan.md §1.3) — so `side` is never set and the
+// red/green and per-side intensities that @starboard would resolve are given as
+// explicit unconditioned overrides on the starboard fixtures instead.
 airframe a339 {
   fixture landing_left "Landing Light Left" {
     category: landing;
@@ -356,9 +569,8 @@ airframe a339 {
       hide: 1.5 2.5 AirbusFBW/OHPLightSwitches[2];
       pos: -1.451 0.252 0.336;
       nav_marker { dir: -0.819 0 -0.573; }
-      // Bright wingtip billboard — the A320 wingtip fence has this; ToLiss's
-      // stock A339 wingtip did not, hence the dim nav. Seeded from A320's
-      // `light nav_beam` (intensity 5000 / LED 6000, cone 0.2). Tune to taste.
+      // Bright wingtip billboard the A320 has and stock A339 lacked, seeded from
+      // the A320's `light nav_beam`. Tune to taste.
       nav_beam { dir: -0.819 0 -0.573; }
       nav_spill { dir: -0.819 0 -0.573; }
     }
@@ -373,17 +585,12 @@ airframe a339 {
   fixture wingtip_nav_right "Wingtip Nav Right" {
     category: nav;
     mount: wingtip_right;
-    // nav_marker/nav_spill extend nav_base, which resolves red/green (and
-    // nav_spill's LED intensity) via @starboard — meaningless on a
-    // non-mirrored fixture (side is never set), so the starboard-equivalent
-    // values are given here explicitly instead.
+    // ⚠ Every green/intensity below is explicit because @starboard does not
+    // resolve here — see the airframe comment above.
     group g1 "Nav 1" {
       hide: 1.5 2.5 AirbusFBW/OHPLightSwitches[2];
       pos: 1.457 0.253 0.322;
       nav_marker { color: green;  dir: 0.819 0 -0.573; }
-      // Explicit green + starboard intensity: @starboard doesn't resolve on a
-      // non-mirrored fixture, so the A320's per-side nav_beam values (starboard
-      // 4000 / LED 5000) are given here directly. Tune to taste.
       nav_beam { color: green;  intensity: 4000;  @led { intensity: 5000; }  dir: 0.819 0 -0.573; }
       nav_spill { color: green;  intensity: 1000;  @led { intensity: 3000; }  dir: 0.819 0 -0.573; }
     }
@@ -400,9 +607,8 @@ airframe a339 {
     mount: wingtip_left;
     pos: -1.564 0.26 0.515;
     strobe_marker { index: 0;  dir: -0.707 0 -0.707; }
-    // Bright wingtip strobe billboard the A320 has and stock A339 lacked.
-    // Seeded from A320's `light strobe_beam` (intensity 30000, cone 0.01 — a
-    // tight, punchy flash). Widen cone here if it reads too pinpoint. Tune to taste.
+    // Bright wingtip strobe billboard the A320 has and stock A339 lacked, seeded
+    // from A320's `light strobe_beam`. Widen if it reads too pinpoint.
     strobe_beam { index: 0;  dir: -0.707 0 -0.707; }
     strobe_spill { index: 0;  dir: -0.707 0 -0.707; }
   }
@@ -479,9 +685,8 @@ airframe a339 {
     category: logo;
     mount: stab_logo_left;
     pos: 0.02 -0.04 0.01;
-    // Local dirs computed (build helper) so the mount's static -80° rotation
-    // reproduces the A320 logo world aim: bb straight up (0 1 0), pm up-inboard
-    // (0.589 0.805 -0.074). Verify in-sim and tweak.
+    // Mount-local dirs, computed so the mount's static -80° rotation reproduces
+    // the A320 logo world aim (bb up, pm up-inboard). Verify in-sim.
     logo_bb { index: 7;  dir: -0.408 0.651 -0.640; }
     logo_pm { index: 7;  dir: -0.076 0.236 -0.969; }
   }
@@ -489,8 +694,7 @@ airframe a339 {
     category: logo;
     mount: stab_logo_right;
     pos: -0.02 -0.04 0.01;
-    // Mirror of logo_left: dirs computed so the mount reproduces the A320 aim
-    // (bb up, pm up-inboard -0.588 0.805 -0.081). Verify in-sim and tweak.
+    // Mirror of logo_left.
     logo_bb { index: 8;  dir: 0.408 0.651 -0.640; }
     logo_pm { index: 8;  dir: 0.082 0.232 -0.969; }
   }
@@ -525,5 +729,78 @@ airframe a339 {
     wing_scan_pm#lower { pos: 0 -0.01 0.01;  index: 2; }
     wing_scan_bb#upper { pos: 0 0.05 0.01;  index: 2; }
     wing_scan_pm#upper { pos: 0 0.05 0.01;  index: 2; }
+  }
+
+  // ==========================================================================
+  // SCREENS (display glow) — target: screens -> objects/lights_screens.obj
+  // ==========================================================================
+  // The a339's own six. ⚠ POSITION IS THE ONLY THING THAT DIFFERS FROM THE A3xx
+  // — color, alpha, size, aim and spread all come from the `screen_glow` light
+  // type in lights.style.phdsl and are deliberately shared, so a retune of the
+  // look moves both airframes together and this block never has to be revisited
+  // for anything but geometry.
+  //
+  // ⚠ A DIFFERENT DATUM, not just different seats. These are in the frame of
+  // `CockpitLighting_XP12.obj` — which is what patch_acf_screens copies the
+  // attachment row from on this airframe, there being no `lights_inn.obj` here
+  // (that file is the A3xx's, and its absence is why the patcher needs a
+  // per-airframe template list). The a339 flight deck sits at z ≈ −29 in that
+  // frame where the A3xx sits at z ≈ −4.7, so these numbers look nothing like
+  // the block above and correctly so. `A330-900_cockpit_INN.obj` shares this
+  // frame, which is what makes the derivation below legitimate.
+  //
+  // HOW THESE WERE DERIVED (2026-08-11), and how to redo it if ToLiss moves the
+  // panel: `build/derive_panel_rects.py <cockpit_INN.obj> --all` reports each
+  // display face's bounding-box CENTER. The six A3xx lights sit a fixed standoff
+  // off their own faces — about 3.7 cm behind the glass and 1 cm below center,
+  // the SD 4.5 cm and 2.2 cm — so each light below is the a339's own face center
+  // plus the A3xx standoff for that same DU. That transfers the tuned geometry
+  // rather than re-guessing it, and it is why these are seeds worth trusting.
+  //
+  // ⚠ SEEDS ALL THE SAME — derived, not seen. Nothing here has been looked at in
+  // the sim. Re-tune with `build --target screens --debug --write` and judge by
+  // the position MARKERS, not the pool of light; a spill light's origin is not
+  // the bright part of its pool.
+  //
+  // The two numbers per fixture mean what they mean in the a320 block above:
+  // `spill_dref` is the light's own slot (n = fixture order), `index:` is the
+  // AirbusFBW/DUBrightness element driving it, and they are NOT the same number.
+  // The a339 carries the same six DUs in the same Airbus numbering, so `index:`
+  // is identical to the a320's per screen — a test pins both against kScreenDU.
+  fixture screen_capt_pfd "Captain PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.554 0.634 -29.137;  index: 0;  spill_dref: ToLissPhoton/screens/spill/0; }
+  }
+  fixture screen_capt_nd "Captain ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: -0.348 0.634 -29.138;  index: 1;  spill_dref: ToLissPhoton/screens/spill/1; }
+  }
+  // The ECAM pair stack on the centerline, upper (E/WD) above lower (SD). x is
+  // 0.015 rather than 0 because that is where ToLiss's own faces sit — the a320
+  // has the same 1 cm offset, for whatever reason it has it.
+  fixture screen_ecam_upper "Upper ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.015 0.626 -29.136;  index: 4;  spill_dref: ToLissPhoton/screens/spill/2; }
+  }
+  // ⚠ The odd one out here too, and for the same reason as on the a320: the SD
+  // sits ~17 cm below the E/WD and slightly proud of it. That is ToLiss's
+  // geometry, not a transcription slip.
+  fixture screen_ecam_lower "Lower ECAM Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.015 0.449 -29.086;  index: 5;  spill_dref: ToLissPhoton/screens/spill/3; }
+  }
+  fixture screen_fo_nd "First Officer ND Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.359 0.635 -29.137;  index: 3;  spill_dref: ToLissPhoton/screens/spill/4; }
+  }
+  fixture screen_fo_pfd "First Officer PFD Glow" {
+    target: screens;
+    profile: screen;
+    screen_glow { pos: 0.564 0.634 -29.138;  index: 2;  spill_dref: ToLissPhoton/screens/spill/5; }
   }
 }

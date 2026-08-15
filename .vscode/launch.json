@@ -1,0 +1,330 @@
+{
+  // Run and Debug entries for the commands in CLAUDE.md § Commands.
+  //
+  // Pick one from the dropdown at the top of the Run and Debug panel (Ctrl+Shift+D),
+  // then F5. For the Python ones, Ctrl+F5 runs the same thing WITHOUT the debugger
+  // attached, which is what you usually want unless you are stepping through the DSL
+  // parser.
+  //
+  // Two deliberate choices, both about not depending on an extension being present
+  // and configured the way this repo needs:
+  //
+  //   * The deploy entries are `node-terminal`, not the PowerShell extension's
+  //     `PowerShell` type. node-terminal ships inside VS Code (the bundled JS
+  //     debugger) and just runs the command line in an integrated terminal, so these
+  //     work in a clean checkout with no extensions installed. More importantly it
+  //     lets us name `pwsh` explicitly: deploy.ps1 needs PowerShell 7 to create the
+  //     panelfx.txt symlink, and Windows PowerShell 5.1 falls back to a COPY, after
+  //     which in-sim FX edits silently stop reaching the repo. The PowerShell
+  //     extension would run these in whatever session version it happens to have
+  //     picked, which is exactly the wrong thing to leave to chance.
+  //   * The Python entries use `debugpy` (the Python extension). If you do not have
+  //     it installed they will not start -- the deploy entries do not care.
+  //
+  // The C++ entries need the C/C++ extension (ms-vscode.cpptools).
+  "version": "0.2.0",
+  "configurations": [
+    // ── Deploy: THE command. Close X-Plane first (deploy refuses in a millisecond
+    //    if it is running), start it afterwards. ──────────────────────────────────
+    {
+      "name": "Deploy (release plugin + OBJs)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\"",
+      "presentation": { "group": "1_deploy", "order": 1 }
+    },
+    {
+      "name": "Deploy -Dev (Dev menu + window + panel probe)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\" -Dev",
+      "presentation": { "group": "1_deploy", "order": 2 }
+    },
+    {
+      // -DebugObjs is only needed to CHANGE a light. To LOOK at one, a plain -Dev
+      // deploy already shows every interior/screens light read-only on the Lights
+      // tab, and leaves the tuning file alone.
+      "name": "Deploy -Dev -DebugObjs (live light tuning)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\" -Dev -DebugObjs",
+      "presentation": { "group": "1_deploy", "order": 3 }
+    },
+    {
+      "name": "Deploy -Test -Dev (unit suite first, ~10 s)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\" -Test -Dev",
+      "presentation": { "group": "1_deploy", "order": 4 }
+    },
+    {
+      "name": "Deploy -Dev -NoObjs (plugin only)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\" -Dev -NoObjs",
+      "presentation": { "group": "1_deploy", "order": 5 }
+    },
+    {
+      // The whole matrix in one entry, for the combinations not worth their own row
+      // (-Wing realwings on a modded install, -Target interior, -NoBuild, ...).
+      "name": "Deploy... (pick flags, wing, target)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/src/native/deploy.ps1\" ${input:deployFlags} -Wing ${input:wing} -Target ${input:deployTarget}",
+      "presentation": { "group": "1_deploy", "order": 6 }
+    },
+
+    // ── OBJ builds, standalone. deploy.ps1 already does `build --target all --write`,
+    //    so reach for these when you want dist/ without touching the sim, or one
+    //    target on its own. ─────────────────────────────────────────────────────────
+    {
+      "name": "OBJs: build (dist/, exterior + interior)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/build_objs.py",
+      "args": ["build"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "2_objs", "order": 1 }
+    },
+    {
+      "name": "OBJs: build --target all --write (into the sim)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/build_objs.py",
+      "args": ["build", "--target", "all", "--write"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "2_objs", "order": 2 }
+    },
+    {
+      // `check` compares generated output against the FROZEN hand-authored goldens in
+      // reference/photon/. --target interior and --airframe a339 error by design:
+      // neither has a golden yet.
+      "name": "OBJs: check (vs. frozen goldens)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/build_objs.py",
+      "args": ["check"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "2_objs", "order": 3 }
+    },
+    {
+      "name": "OBJs: build... (pick airframe, wing, target)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/build_objs.py",
+      "args": [
+        "build",
+        "--airframe", "${input:airframe}",
+        "--wing", "${input:wing}",
+        "--target", "${input:objTarget}",
+        "--write"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "2_objs", "order": 4 }
+    },
+    {
+      // Rebuild + in-sim quick reload on every .phdsl save. Runs until you stop it.
+      "name": "OBJs: watch --write (rebuild + reload on save)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/watch.py",
+      "args": ["--write"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "2_objs", "order": 5 }
+    },
+
+    // ── Tests ────────────────────────────────────────────────────────────────────
+    {
+      // stdlib unittest -- there is no pytest in this environment.
+      "name": "Tests: python unittest (tests/)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "unittest",
+      "args": ["discover", "-s", "tests", "-v"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "3_tests", "order": 1 }
+    },
+    {
+      "name": "Tests: python unittest (current file)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "unittest",
+      "args": ["-v", "${relativeFileDirname}.${fileBasenameNoExtension}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "3_tests", "order": 2 }
+    },
+    {
+      // The C++ side: core_tests + install_tests, i.e. the ONLY coverage of
+      // core/detect.cpp, core/actions.cpp and core/payload.cpp now that the Python
+      // installer and its parity harness are gone. Build it first (any deploy does).
+      "name": "Tests: photoncore_tests.exe (C++)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/native/build/Release/photoncore_tests.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "3_tests", "order": 3 }
+    },
+
+    // ── Release / installer ──────────────────────────────────────────────────────
+    {
+      // Invoke the `package-release` skill before trusting a bundle -- it carries the
+      // pipeline order and the smoke-test tripwires.
+      "name": "Release: make_release.py --bundle",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/make_release.py",
+      "args": ["--bundle"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "4_release", "order": 1 }
+    },
+    {
+      "name": "Release: make_release.py (stage payload only)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/make_release.py",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "4_release", "order": 2 }
+    },
+    {
+      // THE installer, compiled. Defaults to --help; `screens --aircraft <dir>` is the
+      // one that re-attaches lights_screens.obj after a ToLiss update reverts the .acf.
+      //
+      // node-terminal rather than cppvsdbg because the prompt is a whole command tail:
+      // an ${input} substituted into "args" arrives as ONE argv element, so
+      // `screens --aircraft D:\foo` would reach main() as a single unparseable string.
+      // A shell splits it. Debugging the installer itself is a cppvsdbg entry away, but
+      // it wants fixed args anyway.
+      //
+      // Routed through `pwsh -Command` rather than run bare, for the same reason the
+      // deploy entries name pwsh: node-terminal uses your DEFAULT terminal profile, and
+      // a quoted path at command position runs in cmd and bash but is just a string
+      // literal in PowerShell. Naming the shell makes the entry independent of it.
+      "name": "Installer: photon-installer (pick args)",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "pwsh -NoProfile -Command \"& '${workspaceFolder}/src/native/build/Release/photon-installer.exe' ${input:installerArgs}\"",
+      "presentation": { "group": "4_release", "order": 3 }
+    },
+
+    // ── Other tools ──────────────────────────────────────────────────────────────
+    {
+      "name": "Tools: make_overlays.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/make_overlays.py",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "5_tools", "order": 1 }
+    },
+    {
+      "name": "Tools: derive_panel_rects.py (pick cockpit OBJ)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/derive_panel_rects.py",
+      "args": ["${input:cockpitObj}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "presentation": { "group": "5_tools", "order": 2 }
+    },
+
+    // ── Debugging the loaded plugin ──────────────────────────────────────────────
+    {
+      // Start X-Plane, let the aircraft load, then attach and pick X-Plane.exe.
+      // Breakpoints in plugin.cpp bind against whichever .xpl the last deploy copied
+      // in, so deploy the flavor you want to debug first -- build/ and build-dev/ are
+      // separate trees and only one of them is in the sim.
+      "name": "Attach to X-Plane (debug the .xpl)",
+      "type": "cppvsdbg",
+      "request": "attach",
+      "processId": "${command:pickProcess}",
+      "presentation": { "group": "6_attach", "order": 1 }
+    }
+  ],
+  "inputs": [
+    {
+      // Literal flag text, so one entry covers combinations without needing a
+      // conditional. "(none)" is not selectable as a value -- the empty string is the
+      // first option and shows as a blank row.
+      "id": "deployFlags",
+      "type": "pickString",
+      "description": "deploy.ps1 flags",
+      "default": "-Dev",
+      "options": [
+        { "label": "(no flags -- release build)", "value": "" },
+        { "label": "-Dev", "value": "-Dev" },
+        { "label": "-Dev -DebugObjs", "value": "-Dev -DebugObjs" },
+        { "label": "-Test", "value": "-Test" },
+        { "label": "-Test -Dev", "value": "-Test -Dev" },
+        { "label": "-Dev -NoObjs (plugin only)", "value": "-Dev -NoObjs" },
+        { "label": "-Dev -NoBuild (copy existing .xpl)", "value": "-Dev -NoBuild" },
+        { "label": "-Dev -DebugObjs -Test", "value": "-Dev -DebugObjs -Test" }
+      ]
+    },
+    {
+      // Must match what is actually installed: a stock build over a RealWings install
+      // leaves the wingtips unpatched. a339 must never build under a mod mount.
+      "id": "wing",
+      "type": "pickString",
+      "description": "wing mod actually installed",
+      "default": "stock",
+      "options": ["stock", "durantula", "realwings"]
+    },
+    {
+      // `both` is exterior + interior only -- it silently omits the screens OBJ, which
+      // is what makes an edited screens fixture look like it did not rebuild.
+      "id": "deployTarget",
+      "type": "pickString",
+      "description": "OBJ target",
+      "default": "all",
+      "options": ["all", "both", "exterior", "interior", "screens"]
+    },
+    {
+      "id": "objTarget",
+      "type": "pickString",
+      "description": "OBJ target",
+      "default": "all",
+      "options": ["all", "both", "exterior", "interior", "screens"]
+    },
+    {
+      "id": "airframe",
+      "type": "pickString",
+      "description": "airframe",
+      "default": "a320",
+      "options": ["a319", "a320", "a321", "a339"]
+    },
+    {
+      // Quote a path containing spaces with SINGLE quotes -- this string lands inside a
+      // double-quoted `pwsh -Command`, so double quotes here would close it early.
+      "id": "installerArgs",
+      "type": "promptString",
+      "description": "photon-installer arguments (quote paths with 'single quotes')",
+      "default": "--help"
+    },
+    {
+      "id": "cockpitObj",
+      "type": "promptString",
+      "description": "path to the ToLiss cockpit_INN.obj",
+      "default": "C:/Program Files (x86)/Steam/steamapps/common/X-Plane 12/Aircraft/ToLissA321/cockpit_INN.obj"
+    }
+  ]
+}

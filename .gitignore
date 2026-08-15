@@ -31,5 +31,13 @@ __pycache__/
 # commit; CMake build tree is generated. See src/native/README.md.
 src/native/SDK/
 src/native/build/
-docs/phase_ii.md
-docs/design.md
+src/native/build-dev/
+# The SDK-free tree: `cmake -DPHOTON_CORE_ONLY=ON` builds photoncore,
+# photoncore_tests and photon-installer with no X-Plane SDK present, which is what
+# CI uses for the installer and what a contributor without the SDK can still run.
+src/native/build-core/
+# The GUI tree: `cmake -DPHOTON_GUI=ON` builds photon-installer with the Slint
+# front-end. Its own tree because that configure downloads and compiles Slint from
+# source (Rust), which is minutes of work nobody wants to redo by toggling a flag
+# in a shared tree. See docs/installer_gui_plan.md.
+src/native/build-gui/

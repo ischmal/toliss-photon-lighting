@@ -128,6 +128,8 @@ def build(args) -> bool:
         cmd += ["--airframe", args.airframe]
     if args.out:
         cmd += ["--out", args.out]
+    if args.target != "both":
+        cmd += ["--target", args.target]
     if args.write:
         cmd += ["--write"]
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
@@ -148,6 +150,12 @@ def main():
     ap.add_argument("--wing", choices=["stock", "durantula", "realwings"], default="stock")
     ap.add_argument("--airframe", choices=["a319", "a320", "a321"])
     ap.add_argument("--out", help="build to this dir instead of dist/")
+    ap.add_argument("--target",
+                    choices=["exterior", "interior", "screens", "both", "all"],
+                    default="both",
+                    help="passed straight to build_objs. Default 'both' is "
+                         "exterior + interior; use 'all' (or 'screens') to keep "
+                         "the EXPERIMENTAL display-glow OBJ rebuilding too")
     ap.add_argument("--write", action="store_true",
                     help="also install each rebuild into the live X-Plane aircraft "
                          "folders and trigger the in-sim quick reload "

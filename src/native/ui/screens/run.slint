@@ -1,0 +1,302 @@
+// Screen 6 — "Run": the install actually happening.
+//
+// ⚠ THE STEP IS CALLED "Run", NOT "Install". That is the rail's label in the
+// design, and it is the better word: the same screen runs an uninstall.
+//
+// The log is the screen's main content — 288 px of it against a 26 px progress bar —
+// which is a deliberate inversion of the usual installer. An install that fails
+// halfway has to say WHERE without sending the user to find a log file.
+
+import { Tokens } from "../tokens.slint";
+import {
+    Header1, WellRecess, PhotonScrollView, PhotonContextMenu
+} from "../widgets.slint";
+
+// One line of the installer log.
+//
+// ⚠ `text` CARRIES NO MARKER. C++ used to prefix " ✓  " / " !  " into the string;
+// the marker is now drawn from `bad`, because it is a picture and a color rather
+// than two characters — see `LogRow`. Anything that puts a glyph back into the
+// string gets it in the WRONG COLOR and doubled.
+export struct LogLine {
+    text: string,
+    // ⚠ ERROR *OR* WARN. It is the same flag the auto-advance reads
+    // (`RunLog::Clean`), so a line that stops the wizard on this screen and a line
+    // painted red are by construction the same set.
+    bad: bool,
+}
+
+// A log line: a fixed marker gutter, then the message.
+//
+// ⚠ THE MARKER IS AN IMAGE AND THAT IS NOT DECORATION. The design writes `✓` as a
+// character, and NEITHER embedded font has U+2713 — what shipped before was a
+// system fallback for that one glyph, i.e. exactly what embedding the fonts exists
+// to prevent. The two SVGs are the Complete screen's own success/failure glyphs, so
+// the same two shapes mean the same two things throughout the installer.
+//
+// ⚠ THE GUTTER IS A COLUMN, WHICH IS WHAT MAKES A WRAPPED LINE READ. A long path
+// wraps, and in a HorizontalLayout its second line starts under the MESSAGE rather
+// than under the marker — which is the whole reason this is a layout and not one
+// Text with a prefix.
+component LogRow inherits HorizontalLayout {
+    in property <LogLine> line;
+
+    spacing: 0px;
+
+    Rectangle {
+        width: Tokens.log-gutter;
+        // ⚠ Sized from the TEXT, not from the row: the row grows when the message
+        // wraps, and a marker centered in it would drift down the further it wraps.
+        // This pins it to the first line.
+        height: Tokens.log-glyph * 2;
+
+        Image {
+            source: root.line.bad
+                ? @image-url("../assets/glyph-failure.svg")
+                : @image-url("../assets/glyph-success.svg");
+            width: Tokens.log-glyph;
+            height: Tokens.log-glyph;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            // ⚠ `contain`, NOT `fill`. The two glyphs are 41x32 and 32x32 — a
+            // shared square box would squash the checkmark by a fifth.
+            image-fit: contain;
+        }
+    }
+
+    Text {
+        text: root.line.text;
+        // ⚠ THE WHOLE LINE, not just the marker. A red glyph is not findable
+        // while scrolling a 288 px well; a red line is.
+        color: root.line.bad ? Tokens.log-ink-bad : Tokens.log-ink;
+        font-family: Tokens.font-mono;
+        font-size: Tokens.label-size;
+        font-weight: Tokens.weight-medium;
+        wrap: word-wrap;
+        vertical-alignment: top;
+    }
+}
+
+// The design's Progress Bar component (`302:609`): a bordered track, a 2 px-inset
+// fill, and the percentage centered ON TOP of both — not beside them.
+//
+// ⚠ TWO STATES, AND THE FAILED ONE IS NOT A DECORATION. `failed` paints the fill
+// the palette's red, so the bar says what the headline above it says. It is the
+// only thing on this screen visible without reading, which matters most on the run
+// where reading is what you have to do.
+//
+// ⚠ THE OTHER STATE IS THE ACCENT AND ITS INK IS WHITE. Both were briefly green and
+// dark (2026-08-14, withdrawn the same day) — green is a verdict, and a bar that is
+// at 3% for most of its life should not be making one. See the tokens.
+component ProgressBar inherits Rectangle {
+    in property <float> progress: 0.0;
+    in property <bool> failed: false;
+
+    height: Tokens.progress-h;
+    border-radius: Tokens.radius;
+    background: Tokens.panel-bg;
+    border-width: 1px;
+    border-color: Tokens.card-border;
+    clip: true;
+
+    Rectangle {
+        x: Tokens.progress-inset;
+        y: Tokens.progress-inset;
+        width: max(0px, (parent.width - 2 * Tokens.progress-inset) * root.progress);
+        height: parent.height - 2 * Tokens.progress-inset;
+        border-radius: Tokens.radius - 1px;
+        background: root.failed
+            ? Tokens.progress-fill-failed : Tokens.progress-fill;
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        // String interpolation, not `+` — Slint's `+` does not join a number to a
+        // string, and `round()` returns a number.
+        text: "\{round(root.progress * 100)}%";
+        // ⚠ ONE INK FOR BOTH STATES. A percentage that changed color with the fill
+        // would be the fill's news said twice, and it is the one thing on this bar
+        // that has to stay legible while the fill slides out from under it.
+        color: Tokens.progress-ink;
+        font-family: Tokens.font;
+        font-size: Tokens.h2-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// The rule above the problem summary. ⚠ ITS PADDING IS THE POINT, not its color:
+// the summary repeats lines that are already a few rows up, so what has to read at
+// a glance is that a SECTION has started. A hairline sitting in the log's own 2 px
+// line gap would read as one more row.
+component LogDivider inherits Rectangle {
+    height: 1px + 2 * Tokens.log-section-pad;
+
+    Rectangle {
+        y: Tokens.log-section-pad;
+        width: 100%;
+        height: 1px;
+        background: Tokens.muted;
+    }
+}
+
+export component RunScreen inherits Rectangle {
+    in property <float> progress: 0.0;
+    in property <[LogLine]> log-lines;
+    // ⚠ THE SAME LINES AGAIN, NOT A SECOND ACCOUNT OF THEM. C++ filters the one
+    // vector it already keeps on `bad`, so a line cannot appear in the summary
+    // worded differently from the way it appeared in the log — or appear in one and
+    // not the other.
+    in property <[LogLine]> problems;
+    // ⚠ SET BY C++, IN TWO STATES — "Installing..." / "Uninstalling..." (or the dry
+    // run's announcement) while it runs, "Finished." once it is over. The screen
+    // stays up after the run, so a heading in the present tense would sit there
+    // above a finished log.
+    in property <string> headline: "Installing...";
+    in property <bool> failed: false;
+    // Whether the work has stopped. ⚠ IT GATES THE PROBLEM SUMMARY, and only that:
+    // a WARN two seconds into a run is not yet a reason you are still on this
+    // screen, and a summary that appeared mid-run would be a section that grows
+    // while you read it.
+    in property <bool> finished: false;
+
+    callback copy-log();
+
+    // ⚠ THE SUMMARY'S CONDITION AND THE AUTO-ADVANCE'S ARE THE SAME ONE, by
+    // construction rather than by agreement. The wizard advances on `ok &&
+    // RunLog::Clean()`; `problems` is exactly the lines `Clean()` counts, and a
+    // failed run always writes an ERROR (the catch does it), so "finished with a
+    // non-empty summary" and "finished and did not advance itself" are the same
+    // state. That is what the section is FOR: it answers "why am I still here".
+    property <bool> show-problems: root.finished && root.problems.length > 0;
+
+    background: Tokens.screen-bg;
+
+    VerticalLayout {
+        spacing: Tokens.content-gap;
+        padding-left: Tokens.content-pad-x;
+        padding-right: Tokens.content-pad-x;
+        padding-top: Tokens.content-pad-y;
+        padding-bottom: Tokens.content-pad-y;
+
+        Header1 {
+            height: 40px;
+            text: root.headline;
+        }
+
+        // The log well — the same recessed panel as the aircraft list, down to
+        // the design's inset shadow, which `WellRecess` approximates.
+        Rectangle {
+            background: Tokens.panel-bg;
+            border-color: Tokens.panel-border;
+            border-width: 1px;
+            border-radius: Tokens.radius-panel;
+            // ⚠ Required by WellRecess — its bands are square.
+            clip: true;
+
+            // ⚠ FIRST, so it sits BEHIND the scrolling log and sees only what
+            // nothing else took. Declared after, it would be on top of the whole
+            // well and would eat clicks meant for it — the same trap
+            // `PathField`'s menu TouchArea documents.
+            //
+            // ⚠ IT COVERS THE WELL, NOT THE TEXT, on purpose. The log is usually
+            // shorter than the well, and a menu you can only raise over the lines
+            // themselves is one nobody finds on a two-line dry run.
+            logMenuTouch := TouchArea {
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.right
+                            && event.kind == PointerEventKind.down) {
+                        logMenu.show-at(self.mouse-x, self.mouse-y);
+                    }
+                }
+            }
+
+            // ⚠ THE VIEW FILLS THE WELL AND THE 9 px INSET IS THE CONTENT'S
+            // PADDING — same reason as the aircraft list: Slint pins the scrollbar
+            // to the VIEW's right edge, so insetting the view moves the bar in
+            // with it.
+            PhotonScrollView {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                // ⚠ THE LOG IS WRITTEN WHILE IT IS BEING WATCHED, so the useful end
+                // is the bottom one. It follows the content's HEIGHT rather than the
+                // model, which is what makes it land on the new row and not the one
+                // before it, and what stops it fighting a scroll once the run is
+                // over — see PhotonScrollView.
+                stick-to-bottom: true;
+
+                VerticalLayout {
+                    alignment: start;
+                    padding-left: 9px;
+                    padding-top: 9px;
+                    padding-bottom: 9px;
+                    padding-right: Tokens.scrollbar-gutter;
+                    spacing: Tokens.log-line-gap;
+
+                    // ⚠ A COLUMN OF ROWS, NOT ONE read-only TextInput, AND THAT IS
+                    // A TRADE THAT WAS MADE DELIBERATELY (2026-08-14). The single
+                    // TextInput was here so the log could be selected and dragged
+                    // across lines — but a Slint TextInput has ONE color, and a
+                    // normal line needs two (green marker, white message) while a
+                    // failed one needs a third. No amount of arranging gets both.
+                    //
+                    // What replaced the selection is `copy-log()` on the context
+                    // menu, which puts the WHOLE log on the clipboard in one
+                    // action — which is what someone reporting a failed install
+                    // was dragging across three hundred pixels to do anyway.
+                    for line in root.log-lines: LogRow {
+                        line: line;
+                    }
+
+                    // ⚠ AT THE BOTTOM, WHICH IS WHERE `stick-to-bottom` HAS JUST
+                    // PUT THE READER. The two arrived together and work as one
+                    // thing: the run stops, the view is already parked on the end
+                    // of the log, and what is under the rule is why it stopped.
+                    // Anywhere else — a banner above the log, a line in the
+                    // heading — and it would be somewhere the user is not looking.
+                    //
+                    // ⚠ ONE `if` AROUND A GROUP, NOT `visible` ON EACH ROW. An
+                    // invisible element still occupies its cell in a Slint layout,
+                    // so per-row visibility would leave the log ending in a column
+                    // of blank rows and a scrollbar with nothing under it.
+                    if root.show-problems: VerticalLayout {
+                        spacing: Tokens.log-line-gap;
+
+                        LogDivider { }
+
+                        for line in root.problems: LogRow {
+                            line: line;
+                        }
+                    }
+                }
+            }
+
+            // ⚠ LAST, so it darkens the edges of the log as an inset shadow
+            // should. Input-transparent — see WellRecess.
+            WellRecess {
+                width: 100%;
+                height: 100%;
+            }
+
+            // ⚠ ONE ROW, AND NO "Select all". Selection is what the column of rows
+            // cost; copying the whole log is what replaced it, and offering a
+            // "Select all" that selects nothing visible would be worse than not
+            // offering it. See the note on the rows above.
+            logMenu := PhotonContextMenu {
+                entries: ["Copy log"];
+                activated(index) => {
+                    if (index == 0) { root.copy-log(); }
+                }
+            }
+        }
+
+        ProgressBar {
+            progress: root.progress;
+            failed: root.failed;
+        }
+    }
+}

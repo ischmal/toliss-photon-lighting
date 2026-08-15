@@ -1,0 +1,12 @@
+# Main panel flood lamp 2 — ToLiss's movable z/x/y transform stack, lifted
+# VERBATIM from ToLiss's own lights_inn.obj (Gus's mod carries it unchanged).
+ANIM_begin
+	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/2/z/dir
+	ANIM_begin
+		ANIM_trans	   0.0000    0.0000    0.0000	   0.1000    0.0000    0.0000	0 1	ckpt/lights/2/x/dir
+		ANIM_begin
+			ANIM_trans	   0.0000    0.0000    0.0000	   0.0000    0.1000    0.0000	0 1	ckpt/lights/2/y/dir
+{{lights}}
+		ANIM_end
+	ANIM_end
+ANIM_end

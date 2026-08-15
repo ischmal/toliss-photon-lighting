@@ -1,0 +1,74 @@
+// Screen 2 — where is X-Plane installed?
+//
+// The design's `py-[127px]` on a 416 px content area is vertical centering by
+// another name (the four rows plus their gaps come to 158 px), so this centers.
+
+import { Tokens } from "../tokens.slint";
+import { Header1, Header2, MutedLabel, PathField, PhotonButton } from "../widgets.slint";
+
+export component DirectoryScreen inherits Rectangle {
+    in-out property <string> path;
+    // Rendered by the caller, because "found it for you" and "that is not an
+    // X-Plane folder" are the same line in the design and only photoncore can
+    // tell them apart.
+    in property <string> status;
+    in property <bool> status-ok: true;
+
+    callback browse();
+    callback path-edited(string);
+    // Enter in the field. Passed straight up — see app.slint.
+    callback accepted();
+
+    background: Tokens.screen-bg;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Tokens.content-gap;
+        padding-left: Tokens.content-pad-x;
+        padding-right: Tokens.content-pad-x;
+
+        Header1 {
+            height: 40px;
+            text: "Where is X-Plane installed?";
+        }
+
+        Header2 {
+            height: 24px;
+            text: "Confirm or browse to your X-Plane 12 directory:";
+        }
+
+        PathField {
+            text <=> root.path;
+            edited(t) => { root.path-edited(t); }
+            accepted => { root.accepted(); }
+        }
+
+        HorizontalLayout {
+            height: Tokens.button-h;
+            spacing: 8px;
+
+            MutedLabel {
+                text: root.status;
+                // ⚠ THE COLOR IS THE WHOLE STATE INDICATOR, WHICH IS WHY THE ✓
+                // CAME OUT OF THE STRINGS (2026-08-13). The design sets this line
+                // to the logo's own green — the same `status-ok` an installed
+                // aircraft's badge carries, so "this is fine" looks the same in
+                // both places — and gui.cpp no longer prefixes a glyph.
+                //
+                // ⚠ THE FAILING BRANCH IS THE MATCHING RED, NOT THE ACCENT. Green
+                // against blue is not a pair anyone reads as good against bad, and
+                // `status-broken` is the color this palette already gives to "this
+                // needs your attention". These two are declared together in
+                // tokens.slint for that reason.
+                color: root.status-ok ? Tokens.status-ok : Tokens.status-broken;
+                vertical-alignment: center;
+            }
+
+            PhotonButton {
+                label: "Browse...";
+                primary: false;
+                clicked => { root.browse(); }
+            }
+        }
+    }
+}

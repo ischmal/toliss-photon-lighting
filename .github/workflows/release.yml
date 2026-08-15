@@ -1,17 +1,67 @@
 name: Build installers
 
 # Builds every distributable form of the ToLiss Photon installer:
-#   * a per-platform bundle (installer binary + its own-arch plugin + README),
+#   * a per-platform bundle (photon-installer + its own-arch plugin + README),
 #     one each for Windows / macOS / Linux
-#   * a Python-Universal bundle (readable .py, runs on any OS, fat plugin)
-#   * an all-platforms zip bundling the four above into one download
+#   * an all-platforms zip bundling the three above into one download
 #
-# The C++ plugin and PyInstaller both cannot cross-compile, so each per-OS
-# `build` job compiles its own .xpl AND freezes its own installer on its own
-# runner. The only cross-job hand-off is the compiled .xpl (uploaded as a short-
-# lived xpl-<arch> artifact) which the `universal` job merges into a fat plugin.
+# ⚠ ONE INSTALLER SHIPS, AND EACH BUNDLE CARRIES EXACTLY ONE EXECUTABLE. The
+# frozen Python installer, the PyInstaller step that built it and the
+# Python-Universal job that shipped it are all gone (docs/installer_cpp_plan.md
+# §9/§10 decision 1), and so are `install.py`, `installer/` and the parity harness
+# (deleted 2026-08-09). The install/uninstall/detect coverage they carried lives in
+# `photoncore_tests` now — see src/native/tests/install_tests.cpp.
 #
-# Push a v* tag to also cut a GitHub Release with the four bundles attached; run
+# ⚠ THE ONE EXECUTABLE IS THE GUI, ON ALL THREE PLATFORMS (2026-08-15).
+# `matrix.gui` is the single statement of that, and the bundle rule is untouched:
+# each platform still ships exactly one binary.
+#
+# ⚠ IT SHIPPED WINDOWS-GUI/UNIX-TUI FOR EXACTLY ONE COMMIT, and the reasons are
+# worth keeping because they are what the fixes had to answer. The GUI was
+# developed on Windows against a Figma design (`run-installer.ps1` still says
+# "Windows/win_x64 only"), so turning it on for the whole matrix made CI the
+# first-ever Unix build of it, and both Unix jobs failed to LINK: Corrosion does
+# not propagate Slint's transitive system libraries, the same defect this file's
+# `opengl32`/`imm32` note describes for Windows. Both are now linked explicitly in
+# CMakeLists from the actual undefined-symbol dumps — fontconfig on Linux, ten
+# frameworks plus -lobjc on macOS. And linking was never the whole gap:
+# `platform::PickFolder` had no non-Windows implementation, so a Unix GUI would
+# have shipped a Browse button that did nothing. It is now osascript on macOS and
+# zenity/kdialog on Linux.
+#
+# ⚠ THE macOS LINK LIST IS THE LEAST-PROVEN THING HERE. On Windows exactly two
+# libraries were under-reported; on macOS NOTHING propagated, ~300 symbols across
+# every framework the backend touches, which points at the universal
+# (arm64;x86_64) lipo path dropping the link interface wholesale rather than at an
+# incomplete list. If it regresses, test single-arch first
+# (-DCMAKE_OSX_ARCHITECTURES=arm64) before adding frameworks.
+#
+# ⚠ THE FLAG'S DEFAULT IS OFF AND THAT IS NOT THE SAME AS "OFF HERE". A
+# contributor's checkout must build with no Rust, so `option(PHOTON_GUI ... OFF)`
+# stays; this workflow states the value it wants on every runner, both ways. An
+# omitted or typo'd -D does not fall back to the previous behavior — it silently
+# publishes the wrong front-end, on a green run, with a well-formed download to
+# show for it. That is exactly what happened between the GUI landing and
+# 2026-08-15, and the only symptom was that the thing users double-clicked opened
+# a console. Hence the BIDIRECTIONAL grep on the configure log below.
+#
+# Rust and the Linux -dev packages are the GUI's prerequisites, so they install
+# only where `matrix.gui` is ON — which is also why the macOS and Linux jobs are
+# back to their pre-GUI runtime instead of compiling Slint (twice, on macOS, for
+# the universal binary).
+#
+# The C++ toolchain cannot cross-compile, so each per-OS `build` job compiles its
+# own .xpl and packs its own bundle on its own runner, and there is no longer any
+# cross-job hand-off: the transient xpl-<arch> artifact existed only to let the
+# `universal` job merge three arches into one fat plugin, and no bundle is fat any
+# more. Every download carries the one arch its own runner built.
+#
+# The per-OS job is also where the TESTS run: photoncore_tests (C++), which now
+# carries the install/uninstall/detect coverage, and the Python suite, which carries
+# the DSL and the build tooling. Both are required steps — between them they are
+# the whole net.
+#
+# Push a v* tag to also cut a GitHub Release with the three bundles attached; run
 # manually (workflow_dispatch) to just produce the artifacts without releasing.
 
 on:
@@ -32,14 +82,113 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # ⚠ `gui` IS THE SHIP MODEL, not a build tweak — see the header. It decides
+      # which front-end that platform's single executable is, and it gates Rust,
+      # the Linux -dev packages and both caches, none of which a TUI build needs.
+      # It is ON everywhere as of 2026-08-15; it stays a per-row value so a
+      # platform can be dropped back to the TUI by editing ONE word, which is the
+      # state this matrix was in for exactly one commit.
+      #
+      # ⚠ macOS MUST LIST BOTH RUST TARGETS. CMakeLists asks for `arm64;x86_64`,
+      # but cargo builds ONE architecture at a time — Corrosion drives it per-arch
+      # and lipos the results, which it can only do if rustc has both std
+      # libraries. The runner is arm64, so `x86_64-apple-darwin` is the one nobody
+      # has locally and the one CI must add; CMakeLists FATAL_ERRORs on it rather
+      # than failing deep inside a Slint build log.
       matrix:
         include:
-          - { os: windows-latest, os_name: Windows, arch: win_x64 }
-          - { os: macos-latest, os_name: macOS, arch: mac_x64 }
-          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64 }
+          - { os: windows-latest, os_name: Windows, arch: win_x64, gui: "ON", rust_targets: x86_64-pc-windows-msvc }
+          - { os: macos-latest, os_name: macOS, arch: mac_x64, gui: "ON", rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64, gui: "ON", rust_targets: x86_64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # ── the GUI's two extra prerequisites ────────────────────────────────────
+      # ⚠ SLINT'S winit/FemtoVG BACKEND NEEDS THESE HEADERS AT BUILD TIME on Linux
+      # and the runner image does not carry them. Without them the failure is a
+      # pkg-config or cc error raised from inside a Rust build script, which names
+      # a crate nobody here has heard of rather than a missing apt package.
+      # fontconfig/freetype are the text stack; the xcb/xkbcommon/wayland set is
+      # winit's two display backends; the mesa pair is what glutin makes its GL
+      # context through.
+      - name: Install Slint's Linux system libraries
+        if: matrix.gui == 'ON' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      # ⚠ INSTALLED EXPLICITLY RATHER THAN TAKEN FROM THE IMAGE. The runners do
+      # ship a Rust toolchain, but its version is theirs to change: Slint v1.17.1
+      # declares `rust-version = "1.92"`, and an image that drifts below that
+      # breaks the release build with an MSRV error on a tag push — the one run
+      # nobody wants to debug. `stable` is deliberate: the *reproducibility* that
+      # matters is pinned at the Slint tag (see CMakeLists), and pinning rustc too
+      # would instead break the day a transitive crate needs something newer.
+      - name: Install Rust (Slint v1.17.1 needs >= 1.92)
+        if: matrix.gui == 'ON'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      # Saves the crates.io downloads, not the Slint compile itself — Corrosion
+      # builds that inside the CMake tree, which is not cached because a release
+      # build has to be able to start from nothing. Keyed on CMakeLists because
+      # that is where the Slint tag lives, so bumping the tag retires the cache.
+      - name: Cache cargo downloads
+        if: matrix.gui == 'ON'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('src/native/CMakeLists.txt') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # rustc's version belongs in the build cache's key: cargo fingerprints the
+      # compiler, so a toolchain bump invalidates every artifact anyway. Keying on
+      # it turns a guaranteed-useless restore into a clean miss.
+      - name: Record the Rust version (for the build cache key)
+        if: matrix.gui == 'ON' && github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: echo "RUSTC_V=$(rustc -V | tr -d ' ()' )" >> "$GITHUB_ENV"
+
+      # ── the Slint COMPILE, cached for iteration runs only ────────────────────
+      # ⚠ DELIBERATELY NOT ON TAG PUSHES. A published bundle is built from nothing;
+      # that is a property worth more than the ~20 minutes this saves, because the
+      # failure it prevents is unfalsifiable after the fact — a stale artifact
+      # restored into a release binary leaves no trace in the artifact itself.
+      # `workflow_dispatch` is the iteration loop, where the same commit gets built
+      # repeatedly in one sitting and a hit is near-certain; `v*` is the release,
+      # where a hit would be near-impossible anyway (GitHub evicts caches unused for
+      # 7 days and tags are weeks apart) and would only buy a ~1-3 min upload of
+      # something nothing reads.
+      #
+      # ⚠ THE PATH LOOKS WRONG AND IS NOT. Corrosion passes `--target-dir` outright,
+      # so CARGO_TARGET_DIR is ignored, and it builds
+      #   <build>/[<arch>/<config>/]cargo/.._<sha1-of-manifest-path>/
+      # — one `cargo` glob covers the multi-config (Windows) and single-config
+      # (Unix) layouts. The leaf starts with `..`, so it is invisible to `ls` and
+      # skipped by most globs; matching the `cargo` DIRECTORY and letting tar
+      # recurse is what actually captures it. ~1.4 GB on Windows, ~2x on macOS
+      # (two arches), against a 10 GB per-repo limit shared with everything above.
+      - name: Cache the Slint build (dispatch runs only)
+        if: matrix.gui == 'ON' && github.event_name == 'workflow_dispatch'
+        uses: actions/cache@v4
+        with:
+          # ⚠ BOTH TREES. The macOS second pass compiles Slint AGAIN in build-x86/
+          # (Corrosion cannot build two arches in one tree); a cache that covered
+          # only build/ would leave every dispatch iteration paying the x86_64
+          # Slint compile in full.
+          path: |
+            src/native/build/**/cargo
+            src/native/build-x86/**/cargo
+          key: slintbuild-${{ runner.os }}-${{ env.RUSTC_V }}-${{ hashFiles('src/native/CMakeLists.txt') }}
 
       # unzip (Unix) preserves the macOS XPLM.framework symlinks the linker needs;
       # Expand-Archive (Windows) avoids relying on unzip being on PATH in Git Bash.
@@ -65,31 +214,178 @@ jobs:
       # Windows uses the multi-config VS generator (-A x64 + --config Release);
       # macOS/Linux use single-config (CMAKE_BUILD_TYPE). CMakeLists emits to
       # build/ToLissPhoton/<arch>/ToLissPhoton.xpl for all three.
-      - name: Configure & build plugin (Release)
+      #
+      # ⚠ ONE TREE, UNLIKE A DEV MACHINE. run-installer.ps1 keeps build-gui/ and
+      # build-core/ on PHOTON_CORE_ONLY so installer work needs no X-Plane SDK, and
+      # the .xpl in its own build/ so plugin work needs no Rust. A runner has both
+      # and is thrown away afterwards, so splitting the trees here would only
+      # compile photoncore twice.
+      #
+      # ⚠ PHOTON_GUI IS STATED ON EVERY RUNNER, BOTH WAYS, never left to the cache
+      # — the same rule deploy.ps1 and run-installer.ps1 follow for PHOTON_DEV, and
+      # the reason is sharper here: the value differs per platform now, so reading
+      # it off `matrix.gui` is what keeps the ship model in ONE place.
+      - name: Configure & build plugin + installer (Release)
         shell: bash
         working-directory: src/native
         run: |
+          # ⚠ macOS NARROWS THE INSTALLER TO ONE ARCH. Slint's Corrosion cannot
+          # build Rust for two (see CMakeLists), so the universal binary is made by
+          # lipo in the next step instead. The `.xpl` in this same tree stays
+          # universal — it links no Rust, and Intel Macs still run X-Plane 12.
+          extra=""
+          if [ "$RUNNER_OS" = "macOS" ] && [ "${{ matrix.gui }}" = "ON" ]; then
+            extra="-DPHOTON_INSTALLER_OSX_ARCH=arm64"
+          fi
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cmake -S . -B build -A x64
+            cmake -S . -B build -A x64 -DPHOTON_GUI=${{ matrix.gui }} 2>&1 | tee configure.log
             cmake --build build --config Release
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPHOTON_GUI=${{ matrix.gui }} $extra 2>&1 | tee configure.log
             cmake --build build
           fi
           test -f "build/ToLissPhoton/${{ matrix.arch }}/ToLissPhoton.xpl"
 
+          # ⚠ THE TRIPWIRE, AND IT RUNS IN BOTH DIRECTIONS. `option()` is a no-op
+          # against a cached value and a typo'd -D is simply ignored, so "we passed
+          # the flag" is not evidence of anything. CMakeLists prints this line only
+          # from inside `if(PHOTON_GUI)`, which makes its presence the one reliable
+          # readout of what was actually configured.
+          #
+          # Both failures are silent and each is the other's mirror: a Windows
+          # bundle that quietly holds the TUI is a download that opens a console,
+          # and a Unix bundle that quietly picked up Slint is one that either fails
+          # to link or ships an untested GUI with a dead Browse button. Neither
+          # would fail any other step.
+          needle="GUI build - photon-installer links Slint"
+          if [ "${{ matrix.gui }}" = "ON" ]; then
+            grep -q "$needle" configure.log || {
+              echo "::error::PHOTON_GUI=ON did not take effect - this build would ship the TUI installer"
+              exit 1
+            }
+          else
+            ! grep -q "$needle" configure.log || {
+              echo "::error::PHOTON_GUI is OFF for ${{ matrix.os_name }} but Slint was configured in"
+              exit 1
+            }
+          fi
+
+      # ── the second macOS slice, and the universal binary ─────────────────────
+      # ⚠ TWO FULL BUILDS IS THE PRICE OF A UNIVERSAL GUI INSTALLER, and it is not
+      # avoidable from here: Slint's vendored Corrosion has no `CMAKE_OSX_ARCHITECTURES`
+      # or `lipo` handling at all, so it builds exactly one Rust target per tree.
+      # The first pass above made the arm64 slice; this one makes x86_64 in its own
+      # tree, and `lipo` welds them.
+      #
+      # ⚠ `PHOTON_CORE_ONLY=ON` so this pass needs no X-Plane SDK and does NOT
+      # rebuild the `.xpl` — the universal plugin from the first pass is the one
+      # that ships, and rebuilding it here single-arch is exactly the mistake this
+      # step must not make.
+      # ⚠ `Rust_CARGO_TARGET` must be stated too: Corrosion picks the HOST triple
+      # otherwise, and would hand an arm64 libslint_cpp.a to an x86_64 link.
+      - name: Build the x86_64 slice and lipo a universal installer (macOS)
+        if: matrix.gui == 'ON' && runner.os == 'macOS'
+        shell: bash
+        working-directory: src/native
+        run: |
+          cmake -S . -B build-x86 -DCMAKE_BUILD_TYPE=Release \
+                -DPHOTON_GUI=ON -DPHOTON_CORE_ONLY=ON \
+                -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                -DRust_CARGO_TARGET=x86_64-apple-darwin
+          cmake --build build-x86 --target photon-installer
+
+          # ⚠ ITS OWN DIRECTORY, KEEPING THE NAME `photon-installer`. The bundle
+          # stages the binary under `exe.name`, so a file called
+          # `photon-installer-universal` would ship under that name and the README's
+          # `./photon-installer` would be wrong on macOS alone.
+          mkdir -p build/universal
+          lipo -create build/photon-installer build-x86/photon-installer \
+               -output build/universal/photon-installer
+
+          # ⚠ ASSERT BOTH SLICES ARE REALLY THERE. `lipo -create` succeeds on a
+          # single input, so "the command worked" is not evidence of a fat binary —
+          # and a silently-thin installer is precisely the bug being fixed.
+          lipo -info build/universal/photon-installer
+          for arch in arm64 x86_64; do
+            lipo -info build/universal/photon-installer | grep -q "$arch" || {
+              echo "::error::the universal installer is missing the $arch slice"
+              exit 1
+            }
+          done
+
+      # One `cmake --build` already produced all four targets — the .xpl, the
+      # photoncore static lib, photoncore_tests and photon-installer. This step
+      # only locates the two executables (multi-config VS puts them under
+      # Release/, single-config does not) and REFUSES TO CONTINUE if either is
+      # missing.
+      #
+      # ⚠ THAT REFUSAL IS THE POINT. Everything downstream — the tests AND the
+      # bundle — needs these two binaries, and a job that quietly carried on would
+      # either skip the suite or publish a download with nothing to run in it.
+      - name: Locate the compiled installer + core tests
+        id: native
+        shell: bash
+        working-directory: src/native
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            exe="$PWD/build/Release/photon-installer.exe"
+            tests="$PWD/build/Release/photoncore_tests.exe"
+          else
+            exe="$PWD/build/photon-installer"
+            tests="$PWD/build/photoncore_tests"
+          fi
+          # ⚠ THE LIPO'd BINARY WINS WHERE IT EXISTS. Without this the bundle would
+          # stage the arm64-only first pass and every check downstream would still
+          # pass — the exact silent-thin failure the lipo step asserts against.
+          #
+          # ⚠ EXPORTED AS ITS OWN OUTPUT, and deliberately EMPTY off macOS. These
+          # paths come from bash's `$PWD`, which on Windows is an MSYS path
+          # (`/d/a/...`) that Python cannot open — so `--installer-exe` may only ever
+          # be handed a path from a runner where the two agree.
+          universal=""
+          if [ -f "$PWD/build/universal/photon-installer" ]; then
+            exe="$PWD/build/universal/photon-installer"
+            universal="$exe"
+          fi
+          echo "universal=$universal" >> "$GITHUB_OUTPUT"
+          test -x "$exe"   || { echo "::error::photon-installer was not built at $exe"; exit 1; }
+          test -x "$tests" || { echo "::error::photoncore_tests was not built at $tests"; exit 1; }
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
+      - name: Run photoncore tests (C++)
+        shell: bash
+        run: "${{ steps.native.outputs.tests }}"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pyinstaller
 
-      # Build the payload with THIS platform's arch only, then freeze the loose
-      # installer and pack the platform bundle (make_exe picks zip/tar.gz per OS).
-      - name: Build platform payload (own arch)
-        run: python build/make_release.py --plugin-dir src/native/build/ToLissPhoton
-      - name: Build platform bundle
-        run: python build/make_exe.py --skip-release
+      # The stdlib-unittest suite: the DSL, the OBJ emitter, the plugin's source
+      # contracts and the build tooling. The installer's own coverage is in
+      # photoncore_tests above, which is why THAT step is not optional either.
+      - name: Run the Python suite (DSL, emitter, build tooling)
+        shell: bash
+        run: python -m unittest discover -s tests
+
+      # Build the payload with THIS platform's arch only and pack the bundle, in
+      # one step: --bundle stages photon-installer + data/ + README.txt and picks
+      # zip/tar.gz per OS. Python is here for the BUILD TOOLING (the DSL emits the
+      # OBJs) — it is not a runtime or install-time dependency of what ships.
+      # ⚠ `--installer-exe` IS PASSED ON macOS ONLY, and only because the lipo'd
+      # binary is somewhere `find_installer_binary` does not look: it scans
+      # `build*/` for `photon-installer[.exe]` and would happily stage the arm64-only
+      # first pass. Everywhere else discovery is correct and the flag stays off —
+      # see the note on MSYS paths in the locate step.
+      - name: Build platform bundle (own arch)
+        shell: bash
+        run: |
+          extra=""
+          if [ -n "${{ steps.native.outputs.universal }}" ]; then
+            extra="--installer-exe ${{ steps.native.outputs.universal }}"
+          fi
+          python build/make_release.py \
+            --plugin-dir src/native/build/ToLissPhoton $extra --bundle
 
       - name: Upload platform bundle
         uses: actions/upload-artifact@v4
@@ -100,18 +396,8 @@ jobs:
             release/ToLissPhoton-Installer-v*-${{ matrix.os_name }}.tar.gz
           if-no-files-found: error
 
-      # Short-lived hand-off: the compiled .xpl, so the universal job can merge
-      # all three arches into one fat plugin. Not a deliverable — expires fast.
-      - name: Upload compiled plugin (transient)
-        uses: actions/upload-artifact@v4
-        with:
-          name: xpl-${{ matrix.arch }}
-          path: src/native/build/ToLissPhoton # -> <arch>/ToLissPhoton.xpl
-          retention-days: 1
-          if-no-files-found: error
-
-  # ── the Python-Universal bundle (fat plugin, all arches; build once) ──────────
-  universal:
+  # ── the all-platforms zip: the three bundles in one download ──────────────────
+  collect:
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -119,30 +405,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Download + merge compiled plugins (all arches)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: xpl-*
-          merge-multiple: true
-          path: plugin # -> plugin/<arch>/ToLissPhoton.xpl
-      - name: Build Python-Universal bundle
-        run: python build/make_release.py --plugin-dir plugin --zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bundle-Python-Universal
-          path: release/ToLissPhoton-Installer-v*-Python-Universal.zip
-          if-no-files-found: error
-
-  # ── the all-platforms zip: the four bundles in one download ───────────────────
-  collect:
-    needs: [build, universal]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Download the four platform bundles
+      - name: Download the three platform bundles
         uses: actions/download-artifact@v4
         with:
           pattern: bundle-*
@@ -156,13 +419,13 @@ jobs:
           path: release/ToLissPhoton-Installer-v*-All-Platforms.zip
           if-no-files-found: error
 
-  # ── attach the four bundles to a GitHub Release (tag pushes only) ─────────────
+  # ── attach the three bundles to a GitHub Release (tag pushes only) ────────────
   release:
     needs: collect
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Download the four platform bundles
+      - name: Download the three platform bundles
         uses: actions/download-artifact@v4
         with:
           pattern: bundle-*

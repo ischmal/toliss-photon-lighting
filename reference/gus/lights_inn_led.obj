@@ -1,0 +1,99 @@
+I
+800
+OBJ
+
+TEXTURE	
+POINT_COUNTS	0 0 1 0
+
+# Info at: https://developer.x-plane.com/article/airplane-parameterized-light-guide/
+# LIGHT_PARAM	 airplane_panel_sp   Px   	Py	   Pz	 R	  G		B	I Size Dx Dy Dz Width
+
+#Dome Light L
+LIGHT_PARAM	 airplane_panel_sp   -0.472    1.090   -3.35 0.82 0.82 1.00 0 1.414 0.0 0.0 0.0 1.0
+
+#Dome Light R
+LIGHT_PARAM	 airplane_panel_sp   0.472    1.090   -3.35 0.82 0.82 1.00 0 1.414 0.0 0.0 0.0 1.0
+
+#Pedestal flood light
+LIGHT_PARAM	 airplane_panel_sp   0.0    0.8   -4.1 0.82 0.82 1.00 3 2.0 0 -0.99499 0.1 0.9
+
+# CA table lights
+LIGHT_PARAM	 airplane_panel_sp   -0.5577 0.3333 -4.5  1.00 0.89 0.81 3 1.0 0.0 -1.0 0.42 0.701
+
+# CA tablet lights
+LIGHT_PARAM	 airplane_panel_sp   -0.8 0.7 -4.0  1.00 0.37 0.16 3 0.5 -0.35 -0.75 -0.40 0.93969
+
+#Console lights left
+LIGHT_PARAM	 airplane_inst_sp   -1.1471 0.0333 -4.2  1.00 0.89 0.81 22 0.4 0.0 -0.3 0.0 0.4
+LIGHT_PARAM	 airplane_inst_sp   -1.3463 0.0032 -3.65  1.00 0.89 0.81 22 0.4 0.0 -0.3 0.0 0.4
+LIGHT_PARAM	 airplane_inst_sp   -1.4369 -0.0101 -3.3  1.00 0.89 0.81 22 0.4 0.0 -0.3 0.0 0.4
+
+# FO table lights
+LIGHT_PARAM	 airplane_panel_sp   0.5577 0.3333 -4.5  1.00 0.89 0.81 3 1.0 0.0 -1.0 0.42 0.701
+
+# FO tablet lights
+LIGHT_PARAM	 airplane_panel_sp   0.8 0.7 -4.0  1.00 0.37 0.16 3 0.5 0.35 -0.75 -0.40 0.93969
+
+#Console lights right
+LIGHT_PARAM	 airplane_inst_sp   1.1471 0.0333 -4.2  1.00 0.89 0.81 23 0.4 0.0 -0.3 0.0 0.4
+LIGHT_PARAM	 airplane_inst_sp   1.3463 0.0032 -3.65  1.00 0.89 0.81 23 0.4 0.0 -0.3 0.0 0.4
+LIGHT_PARAM	 airplane_inst_sp   1.4369 -0.0101 -3.3  1.00 0.89 0.81 23 0.4 0.0 -0.3 0.0 0.4
+
+ANIM_begin
+	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/1/z/dir
+	# Lamp
+	ANIM_begin
+		ANIM_trans	   0.0000    0.0000    0.0000	   0.1000    0.0000    0.0000	0 1	ckpt/lights/1/x/dir
+		# Lamp
+		ANIM_begin
+			ANIM_trans	   0.0000    0.0000    0.0000	   0.0000    0.1000    0.0000	0 1	ckpt/lights/1/y/dir
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -0.15 -0.1 0.819152
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -0.21 -0.15 0.906307
+		ANIM_end
+	ANIM_end
+ANIM_end
+
+ANIM_begin
+	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/2/z/dir
+	# Lamp
+	ANIM_begin
+		ANIM_trans	   0.0000    0.0000    0.0000	   0.1000    0.0000    0.0000	0 1	ckpt/lights/2/x/dir
+		# Lamp
+		ANIM_begin
+			ANIM_trans	   0.0000    0.0000    0.0000	   0.0000    0.1000    0.0000	0 1	ckpt/lights/2/y/dir
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -1.50 0.40 0.906307
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -1.50 0.40 0.866025
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -1.50 0.40 0.642787
+		ANIM_end
+	ANIM_end
+ANIM_end
+
+ANIM_begin
+	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/3/z/dir
+	# Lamp
+	ANIM_begin
+		ANIM_trans	   0.0000    0.0000    0.0000	   0.1000    0.0000    0.0000	0 1	ckpt/lights/3/x/dir
+		# Lamp
+		ANIM_begin
+			ANIM_trans	   0.0000    0.0000    0.0000	   0.0000    0.1000    0.0000	0 1	ckpt/lights/3/y/dir
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 1 0.471 0 -1.50 0.40 0.906307
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 2 0.471 0 -1.50 0.40 0.866025
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 2 0.471 0 -1.50 0.40 0.642787
+		ANIM_end
+	ANIM_end
+ANIM_end
+
+ANIM_begin
+	ANIM_trans	  -0.1898    0.2453   -4.6109	  -0.1898    0.2453   -4.7109	0 1	ckpt/lights/4/z/dir
+	# Lamp
+	ANIM_begin
+		ANIM_trans	   0.0000    0.0000    0.0000	   0.1000    0.0000    0.0000	0 1	ckpt/lights/4/x/dir
+		# Lamp
+		ANIM_begin
+			ANIM_trans	   0.0000    0.0000    0.0000	   0.0000    0.1000    0.0000	0 1	ckpt/lights/4/y/dir
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 2 0.471 0 -0.15 -0.1 0.819152
+			LIGHT_PARAM	 airplane_panel_sp   0 0 0 1.00 0.89 0.81 2 0.471 0 -0.21 -0.15 0.9063077
+		ANIM_end
+	ANIM_end
+ANIM_end
+

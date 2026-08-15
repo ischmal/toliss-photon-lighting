@@ -68,7 +68,7 @@ class SupportedWingsGateTests(unittest.TestCase):
         out_dir = Path(tempfile.mkdtemp(prefix="photon_test_a339_build_"))
         self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
         args = _Args(airframe="a339", wing="stock", out=str(out_dir),
-                    flat=True, write=False)
+                    flat=True, write=False, target="exterior")
         B.cmd_build(args)  # must not raise
         self.assertTrue((out_dir / "ExternalLights_XP12.obj").is_file())
 
@@ -80,7 +80,7 @@ class SupportedWingsGateTests(unittest.TestCase):
         out_dir = Path(tempfile.mkdtemp(prefix="photon_test_buildall_"))
         self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
         args = _Args(airframe=None, wing="durantula", out=str(out_dir),
-                    flat=True, write=False)
+                    flat=True, write=False, target="exterior")
         B.cmd_build(args)
         written = sorted(p.name for p in out_dir.iterdir())
         self.assertEqual(written, [

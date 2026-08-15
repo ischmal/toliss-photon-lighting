@@ -1,0 +1,111 @@
+// Screen 4 — which features do you want installed?
+//
+// Three feature rows, the first with a wing-mod sub-choice.
+//
+// ⚠ THE DISPLAY EFFECTS ROW DOES NOT GATE THE INSTALL. The display-glow OBJ and
+// its `.acf` attachment are part of the base install and stay that way; this
+// checkbox presets the RUNTIME default, which is why its description ends "Can be
+// enabled or disabled later". The row exists because a tester read the display
+// effects as part of Gus's cockpit mod — it is there to say they are separate
+// things, not to make them optional. See docs/installer_gui_plan.md §3.1, which
+// also carries the two hazards in writing that preference.
+//
+// ⚠ The mockup puts an Uninstall button at the bottom of this screen. It is not
+// here: uninstall belongs next to the aircraft it acts on, and this screen is
+// where you choose what to ADD. It lives in the bottom bar on aircraft selection
+// instead. Still undecided — see the plan's §3.
+
+import { Tokens } from "../tokens.slint";
+import { Header1, OptionRow, SmallRadio } from "../widgets.slint";
+
+export component FeaturesScreen inherits Rectangle {
+    in property <bool> exterior: true;
+    in property <bool> displays: true;
+    in property <bool> interior: true;
+
+    // Whether this airframe HAS an interior variant at all (the A339 does not).
+    in property <bool> interior-available: true;
+    // ⚠ And whether it offers wing mods. `resolve_mount()` falls back to whatever
+    // mount exists, so offering RealWings on an airframe that has no such variant
+    // is how a stock OBJ ships mislabeled as a mod build.
+    in property <bool> wings-available: true;
+
+    // 0 = stock, 1 = RealWings, 2 = Durantula. Matches `--wing`.
+    in property <int> wing: 0;
+
+    callback toggle-exterior();
+    callback toggle-displays();
+    callback toggle-interior();
+    callback set-wing(int);
+
+    background: Tokens.screen-bg;
+
+    VerticalLayout {
+        spacing: Tokens.content-gap;
+        padding-left: Tokens.content-pad-x;
+        padding-right: Tokens.content-pad-x;
+        padding-top: Tokens.content-pad-y;
+        padding-bottom: Tokens.content-pad-y;
+        alignment: start;
+
+        Header1 {
+            height: 40px;
+            text: "Which features do you want installed?";
+        }
+
+        // ⚠ NO EXPLICIT HEIGHTS ON THESE ROWS. OptionRow sizes to its content, and
+        // pinning it clipped the two-line description against whatever followed —
+        // which read as the sub-radios overlapping the row above rather than as
+        // the row being too short for its own text.
+        OptionRow {
+            title: "Exterior Lighting by Photon";
+            description: "Modifies all exterior lighting and adds LED, Halogen and Xenon variants for each applicable light.";
+            checked: root.exterior;
+            toggled => { root.toggle-exterior(); }
+        }
+
+        // The wing-mod sub-choice, indented under the row it qualifies.
+        //
+        // ⚠ HIDDEN OUTRIGHT, not greyed, on an airframe with no wing mods — the
+        // A330 has none. A disabled control still says "this exists for your
+        // aircraft, but not right now", which is a different and wrong claim.
+        // ⚠ Clicking the selected one clears it back to stock: THREE states, two
+        // controls, because "no wing mod" is the common case and does not deserve
+        // a row of its own.
+        if root.wings-available: VerticalLayout {
+            padding-left: 30px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 8px;
+
+            SmallRadio {
+                label: "For RealWings Mod";
+                checked: root.wing == 1;
+                enabled: root.exterior;
+                clicked => { root.set-wing(root.wing == 1 ? 0 : 1); }
+            }
+
+            SmallRadio {
+                label: "For Durantula's Wing Mod";
+                checked: root.wing == 2;
+                enabled: root.exterior;
+                clicked => { root.set-wing(root.wing == 2 ? 0 : 2); }
+            }
+        }
+
+        OptionRow {
+            title: "Cockpit Display Effects by Photon";
+            description: "Modifies appearance of cockpit screens and displays to add effects and improve colors. Can be enabled or disabled later.";
+            checked: root.displays;
+            toggled => { root.toggle-displays(); }
+        }
+
+        // Same rule: the A330 has no interior variant at all, so the row goes.
+        if root.interior-available: OptionRow {
+            title: "Cockpit Lighting by Gus Rodrigues";
+            description: "Enhances cockpit lamps and lighting. Selectable options for LED, old halogen, and new halogen.";
+            checked: root.interior;
+            toggled => { root.toggle-interior(); }
+        }
+    }
+}

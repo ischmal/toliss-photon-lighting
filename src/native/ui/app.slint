@@ -1,0 +1,466 @@
+// The installer window: the frame, the step rail, and the entire C++ interface.
+//
+// ⚠ THE UI DECIDES NOTHING. Every `next()` and `back()` goes to C++, which works
+// out where to go and writes `step` back. The state machine lives in gui.cpp
+// beside the code that can actually answer "is this aircraft installable" — same
+// rule the TUI follows, and the reason all three front-ends stay in agreement.
+// What IS decided here is presentation: which screen a step shows, and how the
+// bottom bar is configured for it.
+//
+// Step numbering. 0 is the splash and has no rail — it sits AHEAD of the six
+// steps, so a rail with nothing marked would claim it is step zero of six. Every
+// later step maps to rail index `step - 1`.
+//
+//   0 splash · 1 directory · 2 aircraft · 3 features · 4 review · 5 run · 6 complete
+//
+// ⚠ STEP 5 IS "Run", NOT "Install" — that is the rail's label in the design, and
+// it is the better word, because the same screen runs an uninstall.
+
+// ⚠ SIDE-EFFECT IMPORTS — these register the families every `font-family` names.
+// Roboto is not installed by default on Windows or macOS, and Slint falls back to
+// a system font SILENTLY when a family is missing: the UI lays out fine and simply
+// is not the design, with no warning anywhere. See ui/assets/fonts/README.md.
+import "assets/fonts/Roboto-Regular.ttf";
+import "assets/fonts/Roboto-Medium.ttf";
+import "assets/fonts/Roboto-SemiBold.ttf";
+import "assets/fonts/Roboto-Bold.ttf";
+import "assets/fonts/Roboto-Black.ttf";
+import "assets/fonts/RobotoMono-Light.ttf";
+import "assets/fonts/RobotoMono-Medium.ttf";
+
+import { Tokens } from "tokens.slint";
+import { AircraftEntry, StepRail, BottomBar } from "widgets.slint";
+import { SplashScreen } from "screens/splash.slint";
+import { DirectoryScreen } from "screens/directory.slint";
+import { AircraftScreen } from "screens/aircraft.slint";
+import { FeaturesScreen } from "screens/features.slint";
+import { ReviewScreen, Attribute } from "screens/review.slint";
+import { RunScreen, LogLine } from "screens/run.slint";
+import { CompleteScreen } from "screens/complete.slint";
+
+export { AircraftEntry, Attribute, LogLine }
+
+export component App inherits Window {
+    title: "ToLiss Photon Lighting Installer";
+    // ⚠ SET FROM C++, AND DELIBERATELY LEFT EMPTY ON WINDOWS. `Window.icon` is ONE
+    // image: bind it here and winit hands the frame a single 256x256 bitmap as the
+    // window's SMALL icon, which the title bar then squashes to 16 px with a crude
+    // stretch while the hand-tuned 16 px entry in res/photon.ico goes unused.
+    // Measured 2026-08-14: WM_GETICON returned 256x256 and the class icon was
+    // empty. Windows takes ApplyWindowIcon() instead, which LoadImage()s the .ico
+    // group at the exact size the shell asked for -- and it can only win the slot
+    // if nothing here is also writing it.
+    //
+    // ⚠ NOT SOLVED BY POINTING AT A SMALLER PNG. One image cannot serve a 16 px
+    // title bar and a 256 px task-view tile; a smaller one just moves the bad
+    // scale. ⚠ NOR BY LEAVING THE BINDING AND OVERRIDING AFTERWARDS -- tried, and
+    // winit re-applies its own icon when it creates the window, so an override
+    // racing it lands first and is silently replaced.
+    //
+    // Linux is the platform this exists for; macOS ignores window icons entirely
+    // (an unbundled binary is faceless there until someone builds an .app).
+    // icon-source keeps the image embedded so C++ has something to hand back.
+    in property <image> window-icon;
+    icon: root.window-icon;
+    out property <image> icon-source: @image-url("assets/icon.png");
+    width: Tokens.window-w;
+    height: Tokens.window-h;
+    background: Tokens.screen-bg;
+
+    // ─── frame ───────────────────────────────────────────────────────────────
+    in property <string> version: "";
+    in-out property <int> step: 0;
+    in property <bool> dry-run: false;
+
+    // ─── directory ───────────────────────────────────────────────────────────
+    in-out property <string> xplane-root;
+    in property <string> root-status;
+    in property <bool> root-status-ok: true;
+
+    // ─── aircraft ────────────────────────────────────────────────────────────
+    in property <[AircraftEntry]> aircraft: [];
+    in property <int> selected: -1;
+    // Only when the selected aircraft actually has something installed.
+    in property <bool> uninstall-available: false;
+
+    // ─── features ────────────────────────────────────────────────────────────
+    in property <bool> exterior: true;
+    in property <bool> displays: true;
+    in property <bool> interior: true;
+    in property <bool> interior-available: true;
+    in property <bool> wings-available: true;
+    in property <int> wing: 0;
+
+    // ─── review ──────────────────────────────────────────────────────────────
+    in property <string> aircraft-folder;
+    in property <string> aircraft-name;
+    in property <string> version-transition;
+    in property <[Attribute]> attributes: [];
+
+    // ─── run / complete ──────────────────────────────────────────────────────
+    in property <float> progress: 0.0;
+    // ⚠ A MODEL OF LINES AGAIN (2026-08-14), where it was one string. The string
+    // was here so a read-only TextInput could select the whole log across lines —
+    // but a TextInput has ONE color and the log now needs three (green marker,
+    // white message, red for a line that reported something). Copying is served by
+    // `copy-log` below, which puts the lot on the clipboard in one action.
+    //
+    // ⚠ C++ STILL KEEPS THE LINES ITSELF and this model is built from them, so
+    // there is exactly one representation and `copy-log` joins the same list the
+    // screen is drawing.
+    in property <[LogLine]> log-lines: [];
+    // The ERROR/WARN subset of the above, filtered by C++ from the one vector it
+    // keeps. The Run screen repeats them under a rule once the run has stopped —
+    // see screens/run.slint for why that is the same condition as "did not advance
+    // itself" rather than a second opinion about it.
+    in property <[LogLine]> problems: [];
+    // Whether the run ENDED BADLY. Drives the progress bar's red state and the
+    // Complete screen's glyph, both of which must agree with the C++-rendered
+    // sentences — so all three read the same `ok`.
+    in property <bool> run-failed: false;
+    // Both headlines are RENDERED BY C++ (`RunHeadline`/`RunDoneHeadline`,
+    // `CompleteHeadline`) — they name the operation and announce a dry run, neither
+    // of which the UI knows. These defaults are only what the Slint preview shows.
+    in property <string> run-headline: "Installing...";
+    // Gates the Next button on the Run screen: the design shows the button there
+    // from the start, and pressing it mid-install would leave a half-written
+    // aircraft behind.
+    in property <bool> run-finished: false;
+    in property <string> complete-headline: "Operation complete";
+    in property <string> complete-summary;
+    // Whether every supported ToLiss aircraft under this root is now current.
+    // ⚠ RE-DETECTED ON THE WAY TO Complete, so it counts the run that just
+    // happened — before that, the answer is always the state before the install.
+    in property <bool> all-up-to-date: false;
+
+    // ─── callbacks ───────────────────────────────────────────────────────────
+    callback next();
+    callback back();
+    // A rail row. ⚠ ITS ARGUMENT IS A STEP NUMBER, not a rail index — the mapping
+    // is applied where the rail is built, below, and nowhere else.
+    callback go-to-step(int);
+    callback uninstall();
+    callback browse();
+    callback path-edited(string);
+    callback select-aircraft(int);
+    // The aircraft list's context menu. ⚠ ITS ARGUMENT IS THE RIGHT-CLICKED ROW,
+    // NOT `selected` — a right-click deliberately does not move the selection, so
+    // the two can differ and C++ must use the one it is handed.
+    callback open-aircraft-folder(int);
+    callback toggle-exterior();
+    callback toggle-displays();
+    callback toggle-interior();
+    callback set-wing(int);
+    callback modify-another();
+    // ⚠ NAVIGATION, NOT A FILE. It returns to the Run screen, which is still
+    // holding the log it drew. See BottomBar.
+    callback view-log();
+    callback open-org();
+    callback open-github();
+    // The whole installer log onto the clipboard. ⚠ It replaced drag-selection in
+    // the log well, which the coloring cost — see screens/run.slint.
+    callback copy-log();
+    // The Complete screen's summary sentence onto the clipboard. Its own callback
+    // rather than a parameter on `copy-log`, because the two copy different things
+    // and C++ holds each of them in a different place.
+    callback copy-result();
+
+    // Presentation only — see the header note.
+    property <bool> on-splash: root.step == 0;
+    property <bool> running: root.step == 5;
+    property <bool> done: root.step == 6;
+
+    // The bottom bar's two conditions, hoisted so the key handler and the bar
+    // itself cannot disagree about whether a key is legal.
+    property <bool> can-advance: (root.step != 2 || root.selected >= 0)
+        && (!root.running || root.run-finished);
+    // ⚠ `!running` IS THE SAFETY CONDITION AND MUST STAY. Rewinding out of a run
+    // in progress would walk away from a half-written aircraft. `GoBack` is a plain
+    // `step - 1` with no side effects, so every other step of it is free.
+    property <bool> can-go-back: root.step > 0 && !root.running;
+
+    // ⚠ THE RAIL IS LIVE ON Complete (2026-08-14). It was dead there, on the
+    // argument that a finished install must not be walkable back into Review — a
+    // Review built BEFORE the run still promises "0.8.3 → 0.8.4" about an aircraft
+    // that now has 0.8.4 on it. That argument was aimed at the wrong control.
+    // LOOKING at a previous screen restores a set of answers and costs nothing; what
+    // commits anything is pressing Next, and Next from any of those screens walks
+    // the wizard forward again from there, rebuilding everything after it exactly as
+    // a first pass would. So the lock belongs on the forward move, where it already
+    // is, and not on the backward one — the stale Review cannot be acted on without
+    // passing through the same `GoNext` that rebuilds it.
+    //
+    // ⚠ WHAT IS STILL DEAD IS A RUN IN PROGRESS, and the one row `blocked` below
+    // names. `run-finished` — not `!running` — is the test, so the Run screen the
+    // "View log" button returns to is not a dead end.
+    //
+    // ⚠ PRESENTATION ONLY. gui.cpp re-checks the target; this decides what LOOKS
+    // clickable, and the two are allowed to be written separately because only one
+    // of them can actually move the wizard.
+    property <bool> rail-navigable:
+        root.step > 0 && (!root.running || root.run-finished);
+
+    // ─── keyboard ────────────────────────────────────────────────────────────
+    // ⚠ THIS SCOPE WRAPS THE WHOLE WINDOW AND IS THE FALLBACK, NOT THE HANDLER.
+    // Slint delivers a key to the focused item and then walks up the parents, so
+    // a scope around everything gets what the focused control rejected. Enter on
+    // a focused button therefore clicks THAT button, and Enter with focus
+    // nowhere in particular advances the wizard.
+    //
+    // ⚠ `focus-on-click: false` IS LOAD-BEARING. A FocusScope with the default
+    // returns EventAccepted from its own press handler — at this size it would
+    // eat every click in the window before any TouchArea saw one, and the entire
+    // UI would go dead to the mouse. It is also why it is not `focus-on-tab-
+    // navigation` either: it would otherwise be a tab stop with nothing in it.
+    forward-focus: rootKeys;
+
+    // ─── where the keyboard lands ────────────────────────────────────────────
+    // ⚠ FOCUS MUST BE PUT SOMEWHERE WHEN THE STEP CHANGES. Every screen lives in an
+    // `if`, so advancing DESTROYS the focused control; focus becomes nothing and
+    // Enter stops working entirely until the user thinks to press Tab.
+    //
+    // ⚠ ON FOUR SCREENS IT GOES STRAIGHT TO THE PRIMARY BUTTON (2026-08-14) rather
+    // than to the fallback scope. Both end up doing the same thing on Enter — the
+    // root scope's handler IS "press the primary button" — so what this buys is
+    // the FOCUS RING: the screen now shows which control Enter will operate
+    // instead of leaving it to be guessed.
+    //
+    // ⚠ THAT MAKES THE RING APPEAR WITHOUT A Tab, WHICH IS A DELIBERATE BREAK from
+    // the `:focus-visible` behaviour every button otherwise has (`focus-on-click:
+    // false`, written up on PhotonButton). It is the point: a ring nobody asked for
+    // is noise, but a ring on the one control the screen is waiting for is the
+    // answer to "what happens if I hit Enter".
+    //
+    // The four, and why each qualifies — every one is a screen with nothing to fill
+    // in, only something to agree with:
+    //   • Splash      — there is one thing to do.
+    //   • Directory   — ONLY when the path is usable. If it is not, the user has
+    //                   work to do here and the keyboard has no business skipping
+    //                   past it.
+    //   • Features    — everything is prechecked and any row the airframe cannot
+    //                   use is hidden, so the defaults are already an answer.
+    //   • Complete    — EITHER of its two, and which one is a question about the
+    //                   install (see below). One of them is the bar's Exit and the
+    //                   other is the screen's own button, which is the whole reason
+    //                   this is two properties rather than one.
+    //
+    // ⚠ Aircraft (2) and Review (4) are deliberately absent. Aircraft REQUIRES a
+    // choice — Next is disabled until one is made — and Review exists to be read;
+    // pre-arming the button that writes to someone's X-Plane install is the one
+    // place this would be actively wrong.
+    //
+    // ⚠ ON Complete THE RING AND THE BLUE FILL ARE ONE DECISION (2026-08-14). If
+    // every supported aircraft under this root is now current there is nothing left
+    // to modify and the likely next move is to leave, so **Exit** takes Primary and
+    // the focus; otherwise **Modify another aircraft** takes both. What must never
+    // happen is the two disagreeing — a blue button that Enter does not press is
+    // worse than no recommendation at all — which is why one flag drives both, here
+    // and in `next-primary`/`all-up-to-date` below.
+    property <bool> focus-bar-next: root.on-splash
+        || (root.step == 1 && root.root-status-ok)
+        || root.step == 3
+        || (root.done && root.all-up-to-date);
+    // ⚠ Complete FOCUSES ITSELF, so this handler must keep its hands off. Slint
+    // refuses to reach an element inside an `if` from outside it, so the screen
+    // takes an `autofocus` flag and calls `.focus()` in its own `init`. Without
+    // this exclusion the two would race for the keyboard on arrival.
+    //
+    // ⚠ THE TWO ARE EXCLUSIVE BY CONSTRUCTION and must stay so: `apply-focus` reads
+    // them in order, so a state where both are true would silently prefer the bar
+    // AND leave the screen calling `.focus()` on its own button a frame later.
+    property <bool> screen-owns-focus: root.done && !root.all-up-to-date;
+
+    function apply-focus() {
+        if (root.focus-bar-next) {
+            bar.focus-next();
+        } else if (!root.screen-owns-focus) {
+            rootKeys.focus();
+        }
+    }
+
+    // ⚠ BOTH, AND THE `init` IS NOT REDUNDANT. `changed step` does not fire for the
+    // step the window opens on, so without this the splash — the one screen that is
+    // never arrived at — would be the only one that did not get its focus.
+    changed step => { root.apply-focus(); }
+    init => { root.apply-focus(); }
+
+    rootKeys := FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+
+        key-pressed(event) => {
+            // Enter is the default action — the bottom bar's primary button.
+            if (event.text == Key.Return && root.can-advance) {
+                root.next();
+                return accept;
+            }
+            // ⚠ Escape is BACK, not close. There is no Cancel in this wizard and
+            // inventing one that discards a half-finished install is the wrong
+            // way to read the key; stepping back is the reversible reading.
+            //
+            // ⚠ BACKSPACE IS THE SAME KEY (2026-08-14), the browser's reading of
+            // it and the one people try. It is safe HERE and only here, because
+            // this scope is the FALLBACK: Slint gives the key to the focused item
+            // first, and an editable `TextInput` accepts Backspace unconditionally
+            // — even on empty text, since only `read-only` makes it decline
+            // (checked in Slint's `TextInput::key_event`). So the path field keeps
+            // deleting characters and never navigates. ⚠ THAT ALSO MEANS A
+            // READ-ONLY TextInput WOULD LEAK IT: there are none left, and a new one
+            // needs its own handler.
+            //
+            // ⚠ ON Run THIS DOES NOTHING (`!running`), which is the safety rule.
+            // ⚠ ON Complete IT GOES TO Run — the button for that move is there and
+            // called "View log"; the bar hides *Back* on that screen rather than
+            // the movement being unavailable, so the key doing it is consistent
+            // rather than a hole.
+            if ((event.text == Key.Escape || event.text == Key.Backspace)
+                    && root.can-go-back) {
+                root.back();
+                return accept;
+            }
+            return reject;
+        }
+
+        // ⚠ FIRST CHILD, AND THAT IS THE WHOLE CONTRACT. Slint hit-tests the
+        // LAST child first, so declared here this sits behind every screen and
+        // sees only what nothing else took — the rail, the margins, the bottom
+        // bar's spacer. Moved below the layout it would be on top of the entire
+        // UI and swallow every click, which is the same failure mode as a
+        // full-size FocusScope (§5.1) reached by a different route.
+        //
+        // Clicking dead space hands focus BACK to the root scope rather than
+        // dropping it: the ring goes away, and Enter still advances the wizard.
+        // `clear-focus()` would do the first and lose the second, leaving a
+        // window where the keyboard silently stops working until someone
+        // presses Tab.
+        TouchArea {
+            clicked => { rootKeys.focus(); }
+        }
+
+        VerticalLayout {
+            // The splash is full-bleed; every other step gets the rail.
+            HorizontalLayout {
+                if !root.on-splash: StepRail {
+                    width: Tokens.sidebar-w;
+                    current: root.step - 1;
+                    navigable: root.rail-navigable;
+                    // The Run row — step 5, so rail index 4. ⚠ THE NUMBER IS
+                    // WRITTEN HERE FOR THE SAME REASON `navigate` IS: this file
+                    // owns the step ⇄ rail-index mapping, and the widget cannot
+                    // see the numbering. Why Run and nothing else: StepRail.
+                    blocked: 4;
+                    // ⚠ THE ONE PLACE THE RAIL-INDEX MAPPING IS SPELT OUT, and it
+                    // is the inverse of `current` two lines up. The header's map
+                    // (step 0 is the splash and has no rail; every later step is
+                    // rail index `step - 1`) lives in this file precisely so it is
+                    // not re-derived in a widget that cannot see the numbering.
+                    navigate(index) => { root.go-to-step(index + 1); }
+                    steps: [
+                        "X-Plane Directory",
+                        "Select Aircraft",
+                        "Select Features",
+                        "Review",
+                        "Run",
+                        "Complete",
+                    ];
+                }
+
+                if root.on-splash: SplashScreen { }
+
+                if root.step == 1: DirectoryScreen {
+                    path <=> root.xplane-root;
+                    status: root.root-status;
+                    status-ok: root.root-status-ok;
+                    browse => { root.browse(); }
+                    path-edited(p) => { root.path-edited(p); }
+                    // Enter in the path field is Next, on the same condition the
+                    // button uses — a text field that swallows Enter is the one
+                    // place the global handler cannot reach.
+                    accepted => {
+                        if (root.can-advance) { root.next(); }
+                    }
+                }
+
+                if root.step == 2: AircraftScreen {
+                    aircraft: root.aircraft;
+                    selected: root.selected;
+                    select(i) => { root.select-aircraft(i); }
+                    open-folder(i) => { root.open-aircraft-folder(i); }
+                }
+
+                if root.step == 3: FeaturesScreen {
+                    exterior: root.exterior;
+                    displays: root.displays;
+                    interior: root.interior;
+                    interior-available: root.interior-available;
+                    wings-available: root.wings-available;
+                    wing: root.wing;
+                    toggle-exterior => { root.toggle-exterior(); }
+                    toggle-displays => { root.toggle-displays(); }
+                    toggle-interior => { root.toggle-interior(); }
+                    set-wing(w) => { root.set-wing(w); }
+                }
+
+                if root.step == 4: ReviewScreen {
+                    xplane-root: root.xplane-root;
+                    aircraft-folder: root.aircraft-folder;
+                    aircraft-name: root.aircraft-name;
+                    version-transition: root.version-transition;
+                    attributes: root.attributes;
+                }
+
+                if root.running: RunScreen {
+                    progress: root.progress;
+                    log-lines: root.log-lines;
+                    problems: root.problems;
+                    headline: root.run-headline;
+                    failed: root.run-failed;
+                    finished: root.run-finished;
+                    copy-log => { root.copy-log(); }
+                }
+
+                if root.done: CompleteScreen {
+                    headline: root.complete-headline;
+                    summary: root.complete-summary;
+                    failed: root.run-failed;
+                    all-up-to-date: root.all-up-to-date;
+                    autofocus: root.screen-owns-focus;
+                    modify-another => { root.modify-another(); }
+                    copy-result => { root.copy-result(); }
+                    open-org => { root.open-org(); }
+                    open-github => { root.open-github(); }
+                }
+            }
+
+            bar := BottomBar {
+                version: root.version;
+                // ⚠ No Back on the splash (there is nowhere behind it), none while
+                // Run is working, and — since 2026-08-14 — none on Complete, where
+                // "View log" takes the slot. See `screens/complete.slint` for why
+                // that trade is a gain rather than a loss.
+                back-visible: root.can-go-back && !root.done;
+                // ⚠ Complete ONLY, and now unconditional there. It used to be gated
+                // on a log FILE having been written; it returns to the Run screen
+                // instead, and reaching Complete is what puts a log on that screen.
+                view-log-visible: root.done;
+                next-enabled: root.can-advance;
+                // ⚠ Primary everywhere except a Complete screen that still has
+                // something to modify — see `focus-bar-next` above, which is the
+                // same flag so the blue and the ring cannot part company.
+                next-primary: !root.done || root.all-up-to-date;
+                next-label: root.step == 4
+                    ? (root.dry-run ? "Dry run" : "Install")
+                    : (root.done ? "Exit" : "Next");
+                // ⚠ Only where it makes sense: an aircraft is chosen and
+                // something of ours is on it.
+                uninstall-visible: root.step == 2 && root.uninstall-available;
+
+                back => { root.back(); }
+                next => { root.next(); }
+                uninstall => { root.uninstall(); }
+                view-log => { root.view-log(); }
+                version-clicked => { root.open-org(); }
+            }
+        }
+    }
+}

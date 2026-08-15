@@ -144,6 +144,191 @@ Light-type properties: `class` (required for anything a fixture references),
 condition blocks. The bb/sp palette swatch is picked automatically from the
 `class` suffix (`*_bb` → bb, else sp).
 
+#### `aim:` and `spread:` — angles instead of a vector and a cosine
+
+Two properties are **sugar, resolved at load**, before the Emitter sees anything:
+
+| Write | Instead of | Meaning |
+|---|---|---|
+| `aim: <pitch> <yaw>;` | `dir: <x> <y> <z>;` | degrees |
+| `spread: <degrees>;` | `cone: <cosine>;` | half-angle |
+
+```
+light screen_glow {
+  spread: 26;      // == cone: 0.899
+  aim: 0 180;      // == dir: 0 0 1  (straight aft)
+}
+```
+
+**Convention**, in OBJ axes (+X right, +Y up, +Z aft):
+
+- `pitch` — degrees above horizontal. `0` level, `+90` straight up, `-90` straight down.
+- `yaw` — aircraft heading, clockwise seen from above. `0` **forward** (−Z), `90` right
+  (+X), `180` aft (+Z), `-90` left (−X).
+
+There is deliberately **no roll**. A cone is rotationally symmetric about its own axis,
+so two angles exhaust the degrees of freedom; a roll knob would be a control that
+provably does nothing — the same reasoning that keeps dead rows out of the menus.
+
+Why they exist, beyond readability:
+
+- **`cone` runs backwards.** It is a cosine, so widening a beam *lowers* it. That is how
+  "reduce the cone" became an edit that raises the number. `spread` reads the right way.
+- **An `aim:` cannot express a non-unit vector.** That is not a style preference — see
+  below. Angles make the whole class of bug unrepresentable.
+- The dev light tuner edits **pitch/yaw/spread**, not components, and "Log DSL" prints
+  `aim:`/`spread:` ready to paste (`docs/dev-tools.md`).
+
+Both forms are accepted on a light **type** and on a per-light override, so whichever
+reads better at that spot wins. Declaring both forms of the same property
+(`dir:` *and* `aim:`) is an **error**, not a precedence rule: there is no reading of it
+that is not a mistake, and silently preferring one would be a value the author never
+sees.
+
+#### `dir` should be unit length, and nothing enforces it
+
+`cone` is cos(half-spread), and X-Plane compares it against a **dot product** with
+`dir`. So a `dir` that is not unit length makes cone and aim *interact*: the beam
+narrows or widens as a side effect of its own direction, and past a point the cone
+control stops appearing to do anything at all. Two standing in-sim reports fit that
+shape (`docs/dev-tools.md`).
+
+`build` reports every non-unit `dir:` with its unit form ready to paste:
+
+```
+note: 6 light type(s) have a non-unit `dir:`. ...
+    int_panelflood   dir 0 -0.15 -0.1   |d| 0.180   unit: 0 -0.832 -0.555
+```
+
+**It reports rather than rewrites, deliberately.** Normalizing should be a visible,
+reviewable edit to the `.phdsl`, not something a build does behind your back.
+`dir: 0 0 0` is omnidirectional and is never reported.
+
+The **whole interior was normalized on 2026-07-29** (interior deviation #5) after the
+maths turned out to explain two standing bugs — Gus's outer panel floods are 0.180 and
+0.258 long against cones of 0.819 and 0.906, i.e. effective thresholds of 4.5 and 3.5,
+which nothing can satisfy. `GusFidelityTests` compares aims with length canonicalized
+out, so a real change of *direction* still fails loudly.
+
+The **exterior is deliberately left alone**. `landing_mid` (1.031) and `landing_wide`
+(1.099) are within 10% of unit, are ToLiss's own transcribed values, have no in-sim
+complaint against them, and — decisively — the exterior's byte-identical output
+against the frozen `reference/photon/` goldens is the project's only exterior
+correctness net. Changing them to chase a ≤9% cone shift would spend that net for
+nothing. They stay in the build's report as a standing note, not as a to-do.
+
+### N-way categories
+
+A `categories` entry with **one** value is the two-way form and still means
+`<palette> led` — branch 0 uses that palette, branch 1 uses `led`. With **two or
+more**, branch *i* uses profile *i* and is gated on the category dataref reading
+*i*:
+
+```
+categories {
+  nav: halogen;                       // 2-way -> [halogen, led]
+  dome: int_old int_new int_led;      // 3-way -> branch i == dataref value i
+}
+```
+
+The two forms emit **different gate encodings**, and this is load-bearing:
+
+| branches | gate emitted for branch `i` of `n` |
+|---|---|
+| 2 | `ANIM_hide 1 1 <dref>` / `ANIM_hide 0 0 <dref>` |
+| 3+ | `ANIM_hide -0.5 <i-0.5> <dref>` (if `i > 0`) **and** `ANIM_hide <i+0.5> <n-0.5> <dref>` (if `i < n-1`) |
+
+Both forms are **hide**, never `ANIM_show`. An OBJ8 animation block starts
+*visible*, and a show/hide only acts while its range **matches** the dataref — so
+a lone `ANIM_show -0.5 0.5` leaves the branch visible at `2` as well, every branch
+draws at once, and switching the dataref does nothing. (That bug shipped in the
+interior and was caught in-sim on 2026-07-28.) With hides, "no match" is exactly
+the visible state, so a branch is on for its own value and off everywhere else.
+
+A three-way category therefore hides the open-ended range on each side of its own
+value; the middle branch emits two hide lines and the end branches one each.
+Multiple `ANIM_hide` in a single block AND together, so no nesting and no
+per-profile boolean datarefs are needed — `branch_gate` returns a list of lines.
+
+**Keep every exterior category one-valued**: that is what pins exterior output to
+the original one-line encoding and keeps the frozen `reference/photon/` goldens
+passing `check`.
+
+### `size:` vs `intensity:`
+
+Slot 8 of a `LIGHT_PARAM` is class-dependent. The exterior `*_bb` / `*_pm`
+classes read it as a photometric intensity and X-Plane wants the `cd` suffix;
+the interior's `airplane_panel_sp` / `airplane_inst_sp` read the same slot as a
+bare fractional **size**. Declaring `size:` selects the bare rendering,
+`intensity:` the `…cd` one. Never both on one light.
+
+### `spill_dref:` — custom lights
+
+A light type carrying `spill_dref` emits a `LIGHT_SPILL_CUSTOM` instead of a
+`LIGHT_PARAM`, and needs no `class`:
+
+```
+LIGHT_SPILL_CUSTOM  x y z  r g b a  s  dx dy dz  semi  <dref>
+```
+
+`alpha:` supplies the `a` slot. X-Plane runs the **baked** parameters through
+that dataref — a plugin may modify them in place — and draws them unmodified if
+the dataref isn't found, so bake `alpha` at the value you want in the
+plugin-absent case. Used for exactly one light (the interior map spot, whose
+brightness source is a ToLiss dataref rather than a rheostat `index`).
+
+### `optimize:` — a cheaper alternative for a stack of lights
+
+A light may declare how it behaves when the user asks for fewer lights:
+
+```
+int_panelflood#a { cone: 0.819;  optimize: boost 1.5; }   // the reduced set
+int_panelflood#b { cone: 0.906;  optimize: drop; }        // stack only
+```
+
+`drop` means "not in the reduced set"; `boost <f>` means "this light IS the
+reduced set, at `<f>`× its slot-8 magnitude" (`size:` here, `intensity:` on an
+exterior class) to stand in for the ones that went away. A light declaring
+**neither** is emitted once and unconditioned, so a group with no `optimize:`
+anywhere — which is everything but the four main panel floods — is byte-identical
+to what it was before the feature existed.
+
+Where both appear, the emitter writes the group twice, gated against each other
+on `ToLissPhoton/<target>/optimized`:
+
+```
+ANIM_begin
+  ANIM_hide 1 1 ToLissPhoton/interior/optimized     # the authored stack
+  ... every drop + boost light, at its authored size ...
+ANIM_end
+ANIM_begin
+  ANIM_hide 0 0 ToLissPhoton/interior/optimized     # the reduced set
+  ... the boost lights only, scaled ...
+ANIM_end
+```
+
+⚠ **0 is the authored look, and that is not arbitrary.** An `ANIM_hide` whose
+dataref does not exist reads 0 forever, so with the plugin absent — or older than
+the OBJ — you get what the DSL authored, never a reduced set nobody chose.
+
+⚠ **Exterior lights may not declare it.** No `ToLissPhoton/exterior/optimized`
+exists, so it would fail open and silently while breaking the frozen goldens;
+`build` refuses it instead. A malformed value is refused too, rather than falling
+through as "no optimize" — which would put the whole stack in the reduced set and
+read in-sim as the switch doing nothing.
+
+**Which light to keep** is a judgement, not a rule the builder can apply: for the
+panel floods it is the widest cone of each stack (cone is a cosine, so the
+*smallest* number), because that is the one that sets where the pool reaches.
+`tests/test_interior.py::OptimizedLightCountTests` pins that per fixture.
+
+### The interior profile axis
+
+`axis intprofile: int_old int_new int_led;` is the interior's own profile
+dimension, deliberately separate from `profile`. No light carries both, so
+keeping them apart means an `@int_led` block never expands into a
+halogen/xenon/led cross product — and exterior resolution stays untouched.
+
 ## 4. lights.layout.phdsl
 
 ```
@@ -183,10 +368,32 @@ airframe a320 {
 }
 ```
 
-- **Fixture properties:** `category` (required unless `raw`), `mirror: true`,
-  `omit: <variant> ...`, `mount` (per-side via `@starboard`; `none` detaches),
-  `pos`, `offset`, `raw`.
+- **Fixture properties:** exactly one of `category` / `profile` (unless `raw`),
+  plus `mirror: true`, `omit: <variant> ...`, `mount` (per-side via `@starboard`;
+  `none` detaches), `pos`, `offset`, `raw`.
 - **Position fallback** per light: light `pos` → group `pos` → fixture `pos`.
+
+### `category:` vs `profile:` — gated or not
+
+A fixture is rendered one of two ways, and must say which:
+
+| | Emits | Switchable at runtime |
+|---|---|---|
+| `category: nav;` | one `ANIM_hide`-gated branch per profile the category declares | yes, via `ToLissPhoton/<target>/nav` |
+| `profile: screen;` | **one un-gated block** in palette `screen` | no — there is nothing to switch |
+
+`profile:` exists for a target with a **single look**, which so far means only the
+screen glow. Writing that as a category would force either a two-branch category
+whose branches render identically — **a dead menu row**, which has shipped twice on
+the interior and both times looked exactly like the mod not being installed — or a
+fake second palette existing only to satisfy the one-value shorthand.
+
+An un-gated fixture is not a static one: the screen lights vary per frame through
+their spill dataref's **alpha**, which is a brightness channel, not a gate. Reach
+for `profile:` when a fixture has one appearance, never to skip writing a category
+that genuinely has two.
+
+Declaring both, or neither, is a parse error.
 
 ### `offset` — moving a whole fixture per wing mod
 
@@ -252,7 +459,7 @@ offset: 0 0 0;                          // stock/durantula: no shift
 these fixtures (they're omitted for RealWings) and no other property conditions on
 `@fence`/`@sharklet`, so nothing else expands over it. `patch_realwings.py` picks
 the value by the mod OBJ's filename (`…NEO.obj → sharklet`, else `fence`) and, per
-airframe, honours a319/a321 `extends` overrides of the offset (appearance is
+airframe, honors a319/a321 `extends` overrides of the offset (appearance is
 inherited unchanged, so only placement varies). Don't confuse the `@fence`/
 `@sharklet` *conditions* with the `group fence`/`group sharklet` blocks in the same
 fixtures — same words, unrelated: the groups are the (omitted) stock lights, the
@@ -293,7 +500,7 @@ block inside an extends airframe *replaces* the inherited fixture.
   per wing mod, the `offset` above. The boundary is empirical: what you have to
   tune lives in the DSL, what you copy from ToLiss and freeze lives in a
   snippet. A per-variant snippet whose only difference from stock is its
-  placement should be deleted in favour of an `offset`.
+  placement should be deleted in favor of an `offset`.
 - `reference/legacy/lights.poc.jsonc` is **superseded** but kept as a frozen
   record of the migration source; `load_config()` only falls back to it if the
   DSL pair is missing. Don't edit it.
@@ -302,15 +509,37 @@ block inside an extends airframe *replaces* the inherited fixture.
 
 ```
 src/lights/      lights.style.phdsl, lights.layout.phdsl, mounts/, raw/  ← you edit this
-src/plugin/      PI_ToLissPhoton.py                           ← you edit this
+src/native/      the shipping plugin (C++ .xpl)                ← you edit this
 build/           the generator (code only)
 dist/            generated installable X-Plane tree  (gitignored)
-reference/       frozen goldens for `check` + superseded configs
+reference/photon/  frozen goldens for `check`
+reference/gus/     vendored interior source data (Gus's OBJs + textures)
+reference/legacy/  superseded configs
 ```
 
 The rule: **everything under `src/` is hand-authored, everything under `dist/`
-is generated.** No exceptions — the plugin is edited at `src/plugin/` and staged
-into `dist/` by the build, so `dist/` is a complete drop-in.
+is generated.** `reference/` is a third category: frozen inputs and goldens that
+are neither edited nor generated.
+
+### Targets
+
+Each airframe builds one OBJ **per target** — `exterior` (`lights_out3xx_XP12.obj`),
+`interior` (`lights_inn.obj`, the cockpit lights) and `screens`
+(`lights_screens.obj`, the EXPERIMENTAL display glow). A fixture declares
+`target: interior;` or `target: screens;` to route into those; the default is
+`exterior`, so every pre-existing fixture is unaffected.
+`build --target {exterior,interior,screens,both}` selects.
+
+⚠ **`both` means exterior + interior — it never builds `screens`**
+(`DEFAULT_TARGETS` in `build/build_objs.py`). `dist/` is what `make_release.py`
+packages, so an experiment must be asked for by name rather than arriving in a
+release bundle by default. See `docs/screens_plan.md`.
+
+An airframe with no entry for a target in `OBJ_TARGETS` doesn't build it at all —
+that's how the A330-900 is kept out of the interior mod, mirroring how
+`SUPPORTED_WINGS` gates its absent wing mods. The interior fixtures live in the
+`airframe a320` block so a319/a321 inherit them verbatim via `extends`, and a339
+(which doesn't extend a320) inherits nothing.
 
 ## 7. Editor support
 
