@@ -201,8 +201,13 @@ class DisplaysMasterTests(unittest.TestCase):
     #: are ABOUT the setting rather than about the effect: the two halves of
     #: persistence, the pane that edits it, and the performance tool's own
     #: save/restore. Everything else is a consumer and must ask the helper.
+    #: ⚠ BuildSettingsTab is in here because it edits gDisplays.spill from the
+    #: other direction — "Disable screen backlight illumination", the cost
+    #: phrasing of the Displays tab's look phrasing. It is a pane that EDITS the
+    #: setting, not a consumer of it, so the master gate is not its to apply.
     RAW_OK = {"DisplaysFromJson", "SaveProfilesFile", "SaveDisplays",
-              "BuildDisplaysTab", "PerfLeverGet", "PerfLeverSet", "PerfStepsAB"}
+              "BuildDisplaysTab", "BuildSettingsTab",
+              "PerfLeverGet", "PerfLeverSet", "PerfStepsAB"}
 
     def test_the_helper_is_the_only_reader(self):
         offenders = []

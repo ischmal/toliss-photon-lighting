@@ -2436,12 +2436,30 @@ static void UiItemTooltip(const char* fmt, ...) {
     va_end(args);
 }
 
+// The trailing "(?)" affordance — a dim marker beside a control carrying the
+// sentences its label has no room for. The Displays rows have been written this
+// way since they existed; it is a helper now because the Settings tab is the same
+// idiom, and two hand-rolled copies of a two-line shape is how one of them comes
+// to use IsItemHovered where the other uses ForTooltip.
+//
+// A MARKER rather than a tooltip on the control itself: a checkbox with nothing
+// beside it gives no sign that there is anything to hover, so the explanation is
+// only ever found by accident.
+//
+// `help` may be null, for a caller whose row sometimes has nothing to say.
+static void UiHelpMarker(const char* help) {
+    if (!help) return;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    UiItemTooltip("%s", help);
+}
+
 // ========================= the settings window ===============================
-// ONE window, four tabs — Exterior / Cockpit / Displays / About. It was four
-// separate windows (two Custom grids and an About box), and the split cost more
-// than it bought: three menu paths that each opened a different floating window,
-// none of which could be compared side by side, and an About box that had to
-// repeat what the others already said.
+// ONE window, five tabs — Exterior / Cockpit / Displays / Settings / About. It
+// was four separate windows (two Custom grids and an About box), and the split
+// cost more than it bought: three menu paths that each opened a different
+// floating window, none of which could be compared side by side, and an About box
+// that had to repeat what the others already said.
 //
 // The tabs are not symmetrical, deliberately:
 //
@@ -2455,6 +2473,9 @@ static void UiItemTooltip(const char* fmt, ...) {
 //     two cannot drift apart.
 //   * Displays is not a profile axis at all: one look per effect, so it is
 //     switches and strengths. See DisplaySettings.
+//   * Settings is about the PLUGIN rather than about a look — what it may cost
+//     and what it may drive. It is the home of every control the other tabs used
+//     to carry that did not answer "which era?". See BuildSettingsTab.
 //   * About is static text, and is the one tab that is always there.
 //
 // ⚠ THE COCKPIT TAB HAS THREE STATES, not two (2026-08-14). It used to appear
@@ -2490,10 +2511,16 @@ static const int kMaxBtns = kMaxCols;   // a row can never have more buttons tha
 // menu item named. kTabError leads because the Error tab does.
 //
 // The performance tool is NOT in here: it is its own floating window, opened
-// from a button at the bottom of the Displays tab. A measurement wants the
-// cockpit visible and the window out of the way, which a tab in the settings
-// window cannot be.
-enum { kTabError = 0, kTabExterior, kTabCockpit, kTabDisplays, kTabAbout, kTabCount };
+// from a button on the Settings tab and one at the bottom of the Displays tab. A
+// measurement wants the cockpit visible and the window out of the way, which a
+// tab in the settings window cannot be.
+//
+// kTabSettings holds the plugin's own switches — what Photon may cost and what it
+// may drive — as against the three tabs before it, which choose how a light
+// LOOKS. It sits last of the four for that reason, and before About because About
+// is not a setting at all.
+enum { kTabError = 0, kTabExterior, kTabCockpit, kTabDisplays, kTabSettings,
+       kTabAbout, kTabCount };
 // -1 = "leave whichever tab is showing alone", which is what an already-open
 // window gets when the user clicks the menu item for the tab they are on.
 static int gWantTab = -1;
@@ -2621,50 +2648,6 @@ static void BuildProfileCombo(const ConfigAxis& w) {
     }
 }
 
-// The cockpit's one performance control. Scoped like every other row helper —
-// an ImGui item's ID is its label hashed with the ID stack, and this pane is
-// built from two places (the settings window and the Dev window's Cockpit tab).
-static void BuildCockpitPerformance() {
-    ImGui::PushID("cockpit-perf");
-    ImGui::Spacing();
-    ImGui::SeparatorText("Performance");
-    ImGui::Spacing();
-    bool on = gCockpit.optimized;
-    if (ImGui::Checkbox("Use simplified lighting", &on)) SetCockpitOptimized(on);
-    UiItemTooltip(
-        "Lowers lighting fidelity for slightly better GPU performance. "
-        "Results may vary.");
-    ImGui::PopID();
-}
-
-// The Exterior tab's one non-color control, and the only place in the plugin
-// where a user can tell Photon to leave something alone.
-//
-// COLLAPSED by default and under its own header: every other control on this tab
-// answers "what should this light look like?", and this one answers "how much of
-// this aeroplane may the plugin drive?". Open by default it would be the first
-// thing read on a tab whose subject is the first question.
-//
-// Scoped like every other helper called from more than one pane — the shipping
-// window and the Dev window's Exterior tab both build this.
-static void BuildExteriorAdvanced() {
-    ImGui::PushID("exterior-advanced");
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Advanced")) {
-        ImGui::Spacing();
-        bool on = gExterior.waveform;
-        if (ImGui::Checkbox("Allow plugin to override beacon/strobe flash timing", &on))
-            SetWaveformOverride(on);
-        UiItemTooltip(
-            "On, Photon reshapes the beacon and strobe flashes to suit the "
-            "fitting: a crisp square pulse for LED, a strike-and-decay for "
-            "xenon. Off, ToLiss's own flash timing is left exactly as it is.\n"
-            "The light colors chosen above still apply either way - the colors "
-            "come from the aircraft's objects and the timing from this plugin.");
-    }
-    ImGui::PopID();
-}
-
 // The grid of per-category looks — the body of both axis tabs.
 //
 // ⚠ SPLIT OUT OF BuildConfigTab so its early return on a failed BeginTable stays
@@ -2762,16 +2745,12 @@ static void BuildConfigTab(const ConfigAxis& w) {
     ImGui::Spacing();
     BuildCategoryGrid(w, inert);
 
-    // One extra section per axis, each under its own heading rather than as a
-    // sixth/tenth row of the grid above — every row up there answers "which
-    // era?", and neither of these does. In the grid they would read as profiles
-    // nobody had heard of.
-    //
-    //   Cockpit  — the light COUNT: "how many lights may that look cost?"
-    //   Exterior — the waveform override: "may the plugin reshape the flash?"
-    if (w.interior) BuildCockpitPerformance();
-    else            BuildExteriorAdvanced();
-
+    // ⚠ NOTHING ELSE BELONGS ON EITHER AXIS TAB. Each carried one extra section
+    // until 2026-08-15 — the cockpit's light COUNT ("how many lights may that
+    // look cost?") and the exterior's waveform override ("may the plugin reshape
+    // the flash?") — and both are on the Settings tab now, with the rest of the
+    // switches that are about the plugin rather than about a look. A control that
+    // does not answer "which era?" has no home on a page that asks only that.
     ImGui::EndDisabled();
 }
 
@@ -2806,11 +2785,12 @@ static bool DisplayToggleRow(const char* label, const char* help,
                              bool* on, float* gain) {
     ImGui::PushID(label);
     bool dirty = ImGui::Checkbox(label, on);
-    if (help) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered()) UiTooltip("%s", help);
-    }
+    // The same "(?)" these rows have always carried, through the shared helper —
+    // which also means the marker answers while the row is GRAYED (the master
+    // switch below disables all three), where the raw IsItemHovered this used to
+    // call returned false. A control's explanation is worth most when the control
+    // cannot be clicked.
+    UiHelpMarker(help);
     if (gain) {
         ImGui::Indent();
         ImGui::BeginDisabled(!*on);
@@ -2879,8 +2859,9 @@ static void BuildDisplaysTab() {
                "panelfx.txt in the plugin folder.");
     }
 
-    // The way in to the performance tool. It sits here rather than on the menu
-    // because what it measures is this page: the switches above are the levers
+    // One of the two ways in to the performance tool (the other is the Settings
+    // tab's, which is where the cost switches are). It is here as well because
+    // what a run measures is largely THIS page: the switches above are the levers
     // it moves. NOT inside the BeginDisabled block — a user who has turned the
     // master off is entitled to measure that.
     ImGui::Spacing();
@@ -2893,6 +2874,95 @@ static void BuildDisplaysTab() {
 
     ImGui::PopID();
     if (dirty) SaveDisplays();
+}
+
+// ---- the Settings tab -------------------------------------------------------
+// The plugin's own switches, as against the three tabs before it, which choose
+// how a light LOOKS. Two questions, one section each: what may Photon COST
+// (Performance), and how much of the aeroplane may it DRIVE (Advanced).
+//
+// Both sections used to hang off whichever axis tab their subject was nearest —
+// the cockpit light count under Cockpit, the waveform override under Exterior —
+// where each was the one control on its page not answering "which era?". They are
+// here together now (2026-08-15) because that is the question a user arrives with:
+// "what can I turn down?" is not asked one axis at a time.
+//
+// ⚠ THE FIRST ROW IS DELIBERATELY THE INVERSE OF THE DISPLAYS TAB'S, AND BOTH
+// STAY. One flag, gDisplays.spill, asked from two directions: "do I want the
+// screens to light the cockpit?" is a look and belongs beside the other display
+// effects, while "may I have that back for the frame rate?" is a cost and belongs
+// here — phrased as the thing being switched OFF, so a tick means cheaper as it
+// does on every other row in this section. Someone who dislikes the effect and
+// someone hunting for frames reach for different pages, and neither finds the
+// other's wording obvious.
+//
+// ⚠ Inverted AT THE WIDGET, never in the field. gDisplays.spill means
+// "illumination is on" everywhere else in the plugin, the prefs file included; a
+// second stored flag with the opposite sense is how two pages come to disagree
+// about one setting.
+static void BuildSettingsTab() {
+    // Scoped like every other pane built from more than one place — the settings
+    // window and the Dev window's Settings tab. See tests/test_ui.py.
+    ImGui::PushID("settings");
+    ImGui::Spacing();
+    ImGui::SeparatorText("Performance");
+    ImGui::Spacing();
+
+    bool spillOff = !gDisplays.spill;
+    if (ImGui::Checkbox("Disable screen backlight illumination", &spillOff)) {
+        gDisplays.spill = !spillOff;
+        SaveDisplays();
+    }
+    UiHelpMarker("Disables the emitted lighting from the six primary screens. "
+                 "May slightly reduce GPU usage.");
+    // The Displays tab's master switch covers this one, so while it is off there
+    // is no illumination to disable and unticking here would appear to do
+    // nothing. Said only in the state where it matters — i.e. where the user has
+    // just asked for an effect that another page has already switched off.
+    if (!spillOff && !gDisplays.enabled)
+        UiHint("Display effects are switched off on the Displays tab, so the "
+               "screens are not lighting the cockpit either way.");
+
+    // ⚠ HIDDEN where the cockpit mod is not installed, not disabled — the one
+    // place in the plugin that hides rather than grays. It drives an OBJ that is
+    // not on this aircraft, and unlike the Cockpit TAB (shown inert, because a
+    // whole page has room to say how to get the mod) a single row here has
+    // nowhere to explain itself and would read as a setting that does nothing.
+    if (gInteriorInstalled) {
+        ImGui::Spacing();
+        bool optimized = gCockpit.optimized;
+        if (ImGui::Checkbox("Use simplified panel flood lights", &optimized))
+            SetCockpitOptimized(optimized);
+        UiHelpMarker("Uses fewer emitted cockpit panel flood lights. May "
+                     "slightly reduce GPU usage.");
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Open performance analysis tool...")) ShowPerfWindow();
+    UiItemTooltip("Opens a separate window that times the cockpit with Photon's "
+                  "effects switched off one at a time, so you can see what each "
+                  "of them costs on this machine.");
+
+    // COLLAPSED by default and under its own header. Everything above answers
+    // "what may this cost?", which is a question with an obvious right answer for
+    // most people; this one answers "how much may the plugin change?", which is
+    // not, and open by default it would be the first thing read.
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Advanced")) {
+        ImGui::Spacing();
+        bool waveform = gExterior.waveform;
+        if (ImGui::Checkbox("Allow ToLiss Photon to control strobe/beacon timing",
+                            &waveform))
+            SetWaveformOverride(waveform);
+        UiHelpMarker(
+            "This plugin overrides certain datarefs to modify the flash behavior "
+            "of strobes and beacons. You can disable this for troubleshooting or "
+            "if undesired.\n"
+            "The colors chosen on the Exterior tab still apply either way - the "
+            "colors come from the aircraft's objects and the timing from this "
+            "plugin.");
+    }
+    ImGui::PopID();
 }
 
 // ================================ About tab ==================================
@@ -3090,6 +3160,16 @@ static void BuildMainUi() {
         }
         if (ImGui::BeginTabItem("Displays", nullptr, TabFlags(kTabDisplays))) {
             if (UiBeginPanel("##pane")) BuildDisplaysTab();
+            UiEndPanel();
+            ImGui::EndTabItem();
+        }
+        // ⚠ Inside the ordinary branch with the axis tabs, not beside About.
+        // Every switch on it either lets Photon drive something on this aircraft
+        // or turns an effect off to buy frames back, and on a reverted install
+        // there is nothing being driven and nothing being drawn — see the block
+        // comment above, and BuildErrorTab, which is the whole answer there.
+        if (ImGui::BeginTabItem("Settings", nullptr, TabFlags(kTabSettings))) {
+            if (UiBeginPanel("##pane")) BuildSettingsTab();
             UiEndPanel();
             ImGui::EndTabItem();
         }
@@ -3317,9 +3397,10 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
         XPLMAppendMenuSeparator(gIntMenuID);
         gIntCustomItemIndex = XPLMAppendMenuItem(gIntMenuID, "Custom...",
                                                  (void*)kMenuCustom, 0);
-        // The simplified-lighting toggle is NOT here: it lives on the Cockpit
-        // tab's Performance section only (2026-08-09). A checkable row below
-        // Custom... read as a sixth profile nobody had heard of.
+        // The simplified-flood toggle is NOT here: it lives in the Settings
+        // tab's Performance section only (2026-08-09; it was the Cockpit tab's
+        // until 2026-08-15). A checkable row below Custom... read as a sixth
+        // profile nobody had heard of.
     }
 
     // Both go to MenuHandler, whose refcon IS the tab index.
@@ -8006,8 +8087,9 @@ static const PerfLever kLevers[kLeverCount] = {
      "them.", true},
     {"Cockpit flood light stacks",
      "The main panel floods as authored - two or three overlapping lights each, "
-     "ten in all. Off is the Cockpit tab's 'Use simplified lighting': four, one "
-     "per lamp. Real lights again, so this is the renderer's cost, not ours.\n"
+     "ten in all. Off is the Settings tab's 'Use simplified panel flood lights': "
+     "four, one per lamp. Real lights again, so this is the renderer's cost, not "
+     "ours.\n"
      "Dev-only because the A/B run does not move it - it is a cockpit setting "
      "rather than a display effect, and it is measured by the sweep.", true},
 };
@@ -13509,13 +13591,13 @@ static void BuildLightEditor(DbgLight& l) {
                         l.source.c_str(), l.index);
     if (l.boost > 0.0f) {
         ImGui::TextDisabled("simplified flood - drawn at size x%.2f "
-                            "(the multiplier on the Cockpit tab)",
+                            "(the multiplier on the Settings tab)",
                             (double)gDbgFloodBoost);
         if (ImGui::IsItemHovered())
             UiTooltip("This is the one-light-per-lamp copy the 'Use simplified "
-                      "lighting' checkbox switches to. The size below is the "
-                      "AUTHORED size; the shared multiplier scales it live and "
-                      "writes back as `optimize: boost <f>` in the DSL.");
+                      "panel flood lights' checkbox switches to. The size below "
+                      "is the AUTHORED size; the shared multiplier scales it "
+                      "live and writes back as `optimize: boost <f>` in the DSL.");
     }
     // Which of the OBJ's profile branches these numbers came from, and whether
     // it is the one on screen. Said HERE rather than only on the toolbar,
@@ -13720,13 +13802,13 @@ static void BuildLightEditor(DbgLight& l) {
     }
 }
 
-// ---- dev-only extras under the shared Cockpit pane --------------------------
-// The Dev window's Cockpit tab is the SHIPPING pane plus this: a live intensity
+// ---- dev-only extras under the shared Settings pane -------------------------
+// The Dev window's Settings tab is the SHIPPING pane plus this: a live intensity
 // multiplier for the simplified main panel floods, i.e. the DSL's
-// `optimize: boost <f>` as a knob. It sits on THIS tab, beside the "Use
-// simplified lighting" checkbox that shows what it drives, and deliberately not
-// inside BuildCockpitPerformance — that pane is built by the shipping window
-// too, and nothing dev-only may reach a release (same rule as the probe).
+// `optimize: boost <f>` as a knob. It sits on THAT tab, beside the "Use
+// simplified panel flood lights" checkbox that shows what it drives, and
+// deliberately not inside BuildSettingsTab — that pane is built by the shipping
+// window too, and nothing dev-only may reach a release (same rule as the probe).
 static void BuildDevCockpitTuning() {
     if (!gDbgScanned) DbgLoadManifest();
     int boosted = 0;
@@ -13745,8 +13827,8 @@ static void BuildDevCockpitTuning() {
         // manifest carries the boost rows too, so the count alone is satisfied
         // and the slider would appear over an OBJ that bakes the factor and
         // reads no dataref at all. It would move nothing, which on this
-        // particular knob is indistinguishable from the "Use simplified
-        // lighting" gate below being off.
+        // particular knob is indistinguishable from the "Use simplified panel
+        // flood lights" gate above being off.
         if (gDbgReadOnly && boosted)
             ImGui::TextDisabled("authored: optimize: boost %.2f, on %d light(s)",
                                 (double)gDbgFloodBoostSeed, boosted);
@@ -13775,9 +13857,9 @@ static void BuildDevCockpitTuning() {
         // The gate this knob depends on, said HERE: with the full stacks drawing
         // the simplified set is hidden and the slider looks inert.
         if (!gCockpit.optimized)
-            UiHint("'Use simplified lighting' is OFF above, so the full stacks "
-                   "are drawing and the simplified floods are hidden - turn it "
-                   "on to see what this knob moves.");
+            UiHint("'Use simplified panel flood lights' is OFF above, so the "
+                   "full stacks are drawing and the simplified floods are "
+                   "hidden - turn it on to see what this knob moves.");
         if (!gDbgNote.empty()) ImGui::TextDisabled("%s", gDbgNote.c_str());
     }
     ImGui::PopID();
@@ -14039,10 +14121,14 @@ static void BuildDevUi() {
     // The same two builders the shipping settings window uses, so a tuning pass
     // never has to wonder whether the Dev window's copy has drifted.
     DevTab("Exterior", [] { BuildConfigTab(kExtAxis); });
-    // The shipping pane plus the dev-only simplified-flood knob — appended
-    // OUTSIDE the shared builder so it cannot reach the release window.
-    DevTab("Cockpit",  [] { BuildConfigTab(kIntAxis); BuildDevCockpitTuning(); });
+    DevTab("Cockpit",  [] { BuildConfigTab(kIntAxis); });
     DevTab("Displays", [] { BuildDisplaysTab(); });
+    // The shipping pane plus the dev-only simplified-flood knob — appended
+    // OUTSIDE the shared builder so it cannot reach the release window. It moved
+    // here with the checkbox it depends on (2026-08-15): the knob scales the
+    // simplified floods, and "Use simplified panel flood lights" is what decides
+    // whether those are the lights drawing at all.
+    DevTab("Settings", [] { BuildSettingsTab(); BuildDevCockpitTuning(); });
     // Same pane as the shipping Performance window, with `dev` true: the internal
     // levers and the full sweep are the only difference.
     DevTab("Perf",     [] { BuildPerfTab(true); });

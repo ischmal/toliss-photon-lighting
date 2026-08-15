@@ -1045,8 +1045,8 @@ class OptimizedLightCountTests(unittest.TestCase):
         """A debug build emits BOTH flood sets as tunable lights (2026-08-09; it
         used to skip `optimize:` entirely, which left the simplified floods
         untunable) and keeps the ToLissPhoton/interior/optimized gate between
-        them — the Cockpit tab's "Use simplified lighting" checkbox picks which
-        set draws, exactly as on a shipping OBJ. Each simplified copy's manifest
+        them — the Settings tab's "Use simplified panel flood lights" checkbox
+        picks which set draws, exactly as on a shipping OBJ. Each simplified copy's manifest
         row records the authored (unboosted) size plus the factor under `boost`,
         which is what lets the Dev window drive the factor as ONE live
         multiplier; its baked seed is size*boost so a plugin-absent load still

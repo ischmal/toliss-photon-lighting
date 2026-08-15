@@ -307,7 +307,8 @@ class TabTests(unittest.TestCase):
         names = [n.split("=")[0].strip() for n in m.group(1).split(",")]
         self.assertEqual(names,
                          ["kTabError", "kTabExterior", "kTabCockpit",
-                          "kTabDisplays", "kTabAbout", "kTabCount"])
+                          "kTabDisplays", "kTabSettings", "kTabAbout",
+                          "kTabCount"])
         order = [t for t in re.findall(r"TabFlags\((kTab\w+)\)",
                                        _fn("BuildMainUi"))]
         self.assertEqual(order, names[:-1],
@@ -316,14 +317,19 @@ class TabTests(unittest.TestCase):
 
     def test_the_axis_tabs_are_gone_while_the_error_tab_is_up(self):
         """Grayed beside the explanation, they invite being tried; absent, the
-        explanation is the page."""
+        explanation is the page.
+
+        ⚠ Settings goes with them, not with About. Every switch on it either lets
+        Photon drive something on this aircraft or turns an effect off to buy
+        frames back, and on a reverted install nothing is being driven and nothing
+        is being drawn."""
         body = _fn("BuildMainUi")
         branch = re.search(r"if \(gInstallStale\) \{(.*?)\n    \} else \{(.*?)\n    \}",
                            body, re.S)
         self.assertIsNotNone(branch, "BuildMainUi's stale branch moved")
         stale, ordinary = _code(branch.group(1)), _code(branch.group(2))
         self.assertIn('"Error"', stale)
-        for gone in ('"Exterior"', '"Cockpit"', '"Displays"'):
+        for gone in ('"Exterior"', '"Cockpit"', '"Displays"', '"Settings"'):
             self.assertNotIn(gone, stale)
             self.assertIn(gone, ordinary)
 
@@ -388,14 +394,15 @@ class CockpitTabTests(unittest.TestCase):
         self.assertIn("Cockpit Lighting by Gus Rodrigues", body)
 
     def test_everything_on_the_inert_tab_is_disabled(self):
-        """Including the Performance checkbox at the bottom, which is a cockpit
-        setting and does nothing without the mod."""
+        """The whole pane, from the profile dropdown to the last row of the
+        grid — there is nothing else on it since the Performance section moved to
+        the Settings tab."""
         body = _code(_fn("BuildConfigTab"))
         self.assertRegex(body, r"const bool inert = w\.interior && !gInteriorInstalled;")
         self.assertIn("ImGui::BeginDisabled(inert);", body)
         self.assertLess(body.index("ImGui::BeginDisabled(inert);"),
                         body.index("BuildProfileCombo(w);"))
-        self.assertLess(body.index("BuildCockpitPerformance();"),
+        self.assertLess(body.index("BuildCategoryGrid(w, inert);"),
                         body.index("ImGui::EndDisabled();"))
 
     def test_the_disabled_stack_is_balanced_on_every_path(self):
@@ -429,21 +436,87 @@ class CockpitTabTests(unittest.TestCase):
         self.assertNotIn("gInteriorSupported", body)
 
 
+class SettingsTabTests(unittest.TestCase):
+    """The Settings tab (2026-08-15) — the plugin's own switches, as against the
+    three tabs before it, which choose how a light LOOKS. Two sections: what
+    Photon may COST, and how much of the aeroplane it may DRIVE.
+
+    Both used to hang off whichever axis tab their subject was nearest, where each
+    was the one control on its page not answering "which era?"."""
+
+    def test_the_two_sections_are_there_and_advanced_is_collapsible(self):
+        body = _fn("BuildSettingsTab")
+        self.assertIn('ImGui::SeparatorText("Performance")', body)
+        self.assertIn('ImGui::CollapsingHeader("Advanced")', body)
+
+    def test_the_axis_tabs_no_longer_carry_either_section(self):
+        """⚠ MOVED, not copied. Two live checkboxes on one flag, on two tabs, is
+        a setting that appears to forget itself depending on where it was last
+        looked at."""
+        body = _code(_fn("BuildConfigTab"))
+        for gone in ("SetCockpitOptimized", "SetWaveformOverride",
+                     'SeparatorText("Performance")', 'CollapsingHeader("Advanced")'):
+            self.assertNotIn(gone, body)
+
+    def test_the_backlight_row_is_the_inverse_of_the_displays_tabs(self):
+        """⚠ DELIBERATE, and both stay. "Do I want the screens to light the
+        cockpit?" is a look and belongs on the Displays tab; "may I have that back
+        for the frame rate?" is a cost and belongs here, phrased as the thing
+        being switched OFF so a tick means cheaper like every other row in the
+        section.
+
+        ⚠ Inverted AT THE WIDGET. A second stored flag with the opposite sense is
+        how two pages come to disagree about one setting, so the field keeps its
+        one meaning and only the checkbox is turned around."""
+        body = _code(_fn("BuildSettingsTab"))
+        self.assertIn('"Disable screen backlight illumination"', body)
+        self.assertIn("bool spillOff = !gDisplays.spill;", body)
+        self.assertIn("gDisplays.spill = !spillOff;", body)
+        # ...and it reaches the disk, like every other switch that edits a
+        # persisted flag straight rather than through a setter.
+        self.assertIn("SaveDisplays();", body)
+        # The Displays tab still owns the positive form.
+        self.assertIn('"Enable backlight illumination"', _fn("BuildDisplaysTab"))
+
+    def test_the_flood_row_is_hidden_without_the_cockpit_mod(self):
+        """⚠ Hidden, not disabled — the one place in the plugin that hides rather
+        than grays. The Cockpit TAB is shown inert because a whole page has room
+        to say how to get the mod; a single row here has nowhere to explain itself
+        and would read as a setting that does nothing."""
+        body = _code(_fn("BuildSettingsTab"))
+        m = re.search(r"if \(gInteriorInstalled\) \{(.*?)\n    \}", body, re.S)
+        self.assertIsNotNone(m, "the simplified-flood row is no longer gated")
+        self.assertIn("SetCockpitOptimized", m.group(1))
+        self.assertIn('"Use simplified panel flood lights"', m.group(1))
+
+    def test_the_performance_tool_is_reachable_from_here(self):
+        """It is a performance section; the tool that measures one belongs in it.
+        The Displays tab's button stays — the switches up there are most of what a
+        run moves."""
+        self.assertIn("ShowPerfWindow();", _code(_fn("BuildSettingsTab")))
+        self.assertIn("ShowPerfWindow();", _code(_fn("BuildDisplaysTab")))
+
+    def test_the_dev_window_builds_the_same_pane(self):
+        """The Dev window's first tabs call the SHIPPING builders, so a tuning
+        pass never has to wonder whether a duplicated copy has drifted. The
+        dev-only flood-boost knob is appended after it — outside the shared
+        builder, which the release window also builds."""
+        body = _code(_fn("BuildDevUi"))
+        self.assertRegex(body, r'DevTab\("Settings",\s*\[\] \{ BuildSettingsTab\(\); '
+                               r'BuildDevCockpitTuning\(\); \}\);')
+        self.assertNotIn("BuildDevCockpitTuning", body.split('DevTab("Settings"')[0])
+
+
 class WaveformSwitchTests(unittest.TestCase):
-    """The Exterior tab's Advanced section: "Allow plugin to override
-    beacon/strobe flash timing". The two halves of the exterior are separable —
-    color comes from the OBJ, timing from the flight loop — and this is the only
-    control in the plugin that tells Photon to leave one of them alone."""
+    """The Settings tab's Advanced section: "Allow ToLiss Photon to control
+    strobe/beacon timing". The two halves of the exterior are separable — color
+    comes from the OBJ, timing from the flight loop — and this is the only control
+    in the plugin that tells Photon to leave one of them alone."""
 
     def test_the_control_exists_and_is_worded_as_a_permission(self):
-        body = _fn("BuildExteriorAdvanced")
+        body = _fn("BuildSettingsTab")
         self.assertIn('ImGui::CollapsingHeader("Advanced")', body)
-        self.assertIn('"Allow plugin to override beacon/strobe flash timing"', body)
-
-    def test_it_is_on_the_exterior_tab_only(self):
-        body = _code(_fn("BuildConfigTab"))
-        self.assertRegex(body, r"if \(w\.interior\) BuildCockpitPerformance\(\);\s*\n"
-                               r"\s*else\s+BuildExteriorAdvanced\(\);")
+        self.assertIn('"Allow ToLiss Photon to control strobe/beacon timing"', body)
 
     def test_the_default_is_what_the_add_on_has_always_done(self):
         """An upgrade must not silently change the look. A prefs file written
@@ -486,7 +559,7 @@ class WaveformSwitchTests(unittest.TestCase):
                          % sorted(set(owners)))
         # ⚠ And the UI goes through the setter, not the field: a checkbox bound
         # straight to it would change the look and never reach the disk.
-        self.assertIn("SetWaveformOverride(on)", _fn("BuildExteriorAdvanced"))
+        self.assertIn("SetWaveformOverride(waveform)", _fn("BuildSettingsTab"))
 
     def test_the_engine_stops_at_the_waveform_work_and_no_earlier(self):
         """⚠ The map spill alpha and the six screen-glow sizes live in the same

@@ -1019,12 +1019,21 @@ An OBJ newer than the plugin gives the authored cockpit, never a reduced set
 nobody chose.
 
 ⚠ **It is NOT a category and not a look.** Every category row answers "which
-era?"; this answers "how many lights may that cost?". Hence its own heading on the
-Cockpit tab (*Performance ▸ Use simplified lighting*) — not a sixth row of the
-grid, where it would read as a profile the user had never heard of. It was also a
+era?"; this answers "how many lights may that cost?". Hence a heading of its own
+rather than a sixth row of the grid, where it would read as a profile the user had
+never heard of — and, since 2026-08-15, a **tab** of its own: it is the *Settings*
+tab's *Performance ▸ Use simplified panel flood lights*, beside the other two
+switches that trade a Photon effect for frames. (It was the Cockpit tab's
+*Performance ▸ Use simplified lighting* from 2026-08-04 to then.) It was also a
 checkable item at the foot of the Cockpit submenu until 2026-08-09; that row was
 removed (a settings checkbox is enough, and in a menu it read as a profile), so
-the tab's checkbox is now the only way to reach it.
+that one checkbox is now the only way to reach it.
+
+⚠ **The row is HIDDEN, not disabled, where the cockpit mod is not installed** —
+the one place in the plugin that hides rather than grays. The Cockpit *tab* is
+shown inert in that state because a whole page has room to name the installer
+option that fixes it; a single row on a page about performance has nowhere to
+explain itself and would read as a setting that does nothing.
 
 ⚠ **It is a GLOBAL setting, not per-livery** — a statement about the machine, not
 about the aeroplane. It lives beside the Displays block under `"$cockpit"` in

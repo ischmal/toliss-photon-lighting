@@ -1,13 +1,13 @@
 ---
 name: photon-dev-window
-description: The PHOTON_DEV-only Dev window in ToLissPhoton.xpl — its tabs (Exterior, Cockpit, Displays, Perf, Panel FX, Lights, History, Probe, Build, Log, ImGui), the Build tab's worker thread, and the Lights-tab / PI_PhotonDevReload.py pool-ownership standoff. Load before editing Dev-window UI, the Build tab, or the light-editor pool.
+description: The PHOTON_DEV-only Dev window in ToLissPhoton.xpl — its tabs (Exterior, Cockpit, Displays, Settings, Perf, Panel FX, Lights, History, Probe, Build, Log, ImGui), the Build tab's worker thread, and the Lights-tab / PI_PhotonDevReload.py pool-ownership standoff. Load before editing Dev-window UI, the Build tab, or the light-editor pool.
 ---
 
 # The Dev window
 
 `PHOTON_DEV` builds add **Plugins ▸ ToLiss Photon ▸ Dev**, whose one window holds every
-knob, tabbed: **Exterior** / **Cockpit** / **Displays** / **Perf** (the shipping settings
-panes) ·
+knob, tabbed: **Exterior** / **Cockpit** / **Displays** / **Settings** / **Perf** (the
+shipping settings panes) ·
 **Panel FX** (the layer editor) · **Lights** (the live light editor) · **History** (FX
 undo/journal) · **Probe** (panel-FBO probe, plus the display-power readout and the **CB
 watch** — the only way to learn a `CBArray` index, since nothing names its 363 elements:
@@ -22,16 +22,19 @@ look in-sim like "the number never moves" and every one wants a different fix; a
 "not bound" line cost a session each time.
 
 ⚠ **This is the SECOND window now.** The shipping UI is its own tabbed window (Exterior /
-Cockpit / Displays / About, `BuildMainUi`), reachable from the ordinary menu in every build,
-plus a separate shipping **Performance window** opened from a button at the bottom of the
-Displays tab. The Dev window's first four tabs call **the same builders** —
-`BuildConfigTab(kExtAxis)`, `BuildConfigTab(kIntAxis)`, `BuildDisplaysTab`,
-`BuildPerfTab(true)` — deliberately, so a tuning pass never has to wonder whether a
-duplicated copy has drifted. Add a control to the shipping pane and it appears in both; add
-one *here* and it will not. The Dev Cockpit tab appends one dev-only section AFTER the
-shared builder — `BuildDevCockpitTuning()`, the **simplified-flood intensity multiplier**
-(`gDbgFloodBoost`, the live `optimize: boost <f>`) — deliberately outside
-`BuildCockpitPerformance`, which the shipping window also builds.
+Cockpit / Displays / Settings / About, `BuildMainUi`), reachable from the ordinary menu in
+every build, plus a separate shipping **Performance window** opened from a button on the
+Settings tab and one at the bottom of the Displays tab. The Dev window's first five tabs call
+**the same builders** — `BuildConfigTab(kExtAxis)`, `BuildConfigTab(kIntAxis)`,
+`BuildDisplaysTab`, `BuildSettingsTab`, `BuildPerfTab(true)` — deliberately, so a tuning pass
+never has to wonder whether a duplicated copy has drifted. Add a control to the shipping pane
+and it appears in both; add one *here* and it will not. The Dev **Settings** tab appends one
+dev-only section AFTER the shared builder — `BuildDevCockpitTuning()`, the
+**simplified-flood intensity multiplier** (`gDbgFloodBoost`, the live `optimize: boost <f>`)
+— deliberately outside `BuildSettingsTab`, which the shipping window also builds. ⚠ **It
+moved here from the Cockpit tab with the checkbox it depends on** (2026-08-15): the knob
+scales the simplified floods and *"Use simplified panel flood lights"* is what decides
+whether those are the lights drawing at all.
 
 ⚠ **Every Dev tab goes through `DevTab(label, body)`**, which opens the `#23282e` panel
 (`UiBeginPanel`) the content sits on. `ImGuiCol_WindowBg` is transparent — a tab that calls
@@ -90,7 +93,7 @@ are. See the `panel-fx` skill.
     applied over an installable one they would show numbers nothing is rendering.
   - **Info rows carry the same slot numbers as debug rows** (same `DEBUG_SLOT_BASE`, same
     order), so `slot 12` is one light whichever build is installed.
-  - The Cockpit tab's flood-boost slider checks `gDbgReadOnly` **before** the `boosted`
+  - The Settings tab's flood-boost slider checks `gDbgReadOnly` **before** the `boosted`
     count: an info manifest carries the boost rows too, so the count alone is satisfied
     and the slider would appear over an OBJ that bakes the factor.
 - **The Lights tab MERGES both debug manifests** (2026-08-09): the two targets live on
@@ -103,7 +106,7 @@ are. See the `panel-fx` skill.
   selected, every shared attribute — v[0..8] plus pitch/yaw, i.e. everything but
   position — is copied onto the other five AFTER the frame's widgets run. Untick to
   tune one screen alone.
-- **Save tuning** (Lights tab toolbar + the Cockpit dev section) writes every light
+- **Save tuning** (Lights tab toolbar + the Settings tab's dev section) writes every light
   whose values differ from its baked seeds, in .phdsl shape, plus the `boost:` factor,
   to `<repo>/.scratch/light_tuning.txt` (repo path from the Build tab, which
   `deploy.ps1 -Dev` seeds once; falls back to

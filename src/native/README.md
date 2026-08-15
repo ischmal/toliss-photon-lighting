@@ -218,18 +218,34 @@ flag is a copy, not a full recompile. `deploy.ps1` always passes `-DPHOTON_DEV` 
 because a cached `ON` would otherwise be sticky.
 
 **The settings window** (Plugins ▸ ToLiss Photon ▸ … ) is the SHIPPING UI and is one tabbed
-window: Error / Exterior / Cockpit / Displays / About, and every menu path that opens it
-names a tab. The **performance tool is a separate window**, opened from a button at the
-bottom of the Displays tab and from nowhere else — a run is watched against the cockpit, so
-it has to be able to sit somewhere the settings window is not.
+window: Error / Exterior / Cockpit / Displays / Settings / About, and every menu path that
+opens it names a tab. The **performance tool is a separate window**, opened from a button on
+the Settings tab and one at the bottom of the Displays tab — a run is watched against the
+cockpit, so it has to be able to sit somewhere the settings window is not.
 
-⚠ **Two of those five tabs come and go, on two different questions**, and both used to be
+⚠ **`Settings` is the tab for controls that are about the PLUGIN rather than about a look**
+(2026-08-15): *Performance* — screen backlight illumination, the cockpit's simplified flood
+lights, and the way in to the performance tool — and a collapsed *Advanced* holding the
+waveform override. The first two used to sit on the axis tab their subject was nearest (the
+flood count under Cockpit, the waveform override under Exterior's *Advanced*), where each was
+the one control on its page not answering "which era?". Two things to know before editing it:
+
+- ⚠ **Its backlight row is the INVERSE of the Displays tab's, and both stay.** One flag,
+  `gDisplays.spill`, asked from two directions: *"do I want the screens to light the
+  cockpit?"* is a look and belongs beside the other display effects, while *"may I have that
+  back for the frame rate?"* is a cost and belongs here, phrased as the thing being switched
+  OFF so a tick means cheaper like every other row in the section. ⚠ **The inversion is at
+  the WIDGET** — the field keeps its one meaning everywhere else, prefs file included.
+- ⚠ **The simplified-flood row is HIDDEN without the cockpit mod, not grayed** — see
+  `docs/interior_plan.md` §4.6.
+
+⚠ **Two of those six tabs come and go, on two different questions**, and both used to be
 one bool:
 
 - **Error** appears when `gInstallStale` — a ToLiss update or a reinstall has put the stock
-  exterior OBJ back — and when it does it **replaces** Exterior / Cockpit / Displays rather
-  than joining them, because the plugin has switched every feature off and a grayed page
-  beside the explanation invites trying it. The menu changes shape with it: one row,
+  exterior OBJ back — and when it does it **replaces** Exterior / Cockpit / Displays /
+  Settings rather than joining them, because the plugin has switched every feature off and a
+  grayed page beside the explanation invites trying it. The menu changes shape with it: one row,
   *Reinstall required…*, and About. See CLAUDE.md §*A reverted install*.
 - **Cockpit** has THREE states, not two (2026-08-14): live where the mod is installed;
   **present but wholly disabled**, under a line naming the installer option, where the
@@ -294,7 +310,8 @@ Lights · History · Probe · Build · Log · ImGui demo.
 
 ## The performance tool
 
-The **Performance window** (shipping — Displays tab ▸ *Performance analysis…*), and the Dev
+The **Performance window** (shipping — Settings tab ▸ *Open performance analysis tool…*, or
+Displays tab ▸ *Performance analysis…*), and the Dev
 window's **Perf** tab — **one builder, `BuildPerfPane(bool dev)`**. It switches effects off one at a time and times
 the result: live fps, frame time, the 1% low, a frame-time plot, and per-run averages with
 the difference from the baseline. `tests/test_perf.py` pins the contracts below.
