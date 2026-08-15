@@ -37,6 +37,24 @@ std::vector<std::string> ParseLibraryVdf(const std::string& text);
 // so it must not be able to block an install by failing to introspect processes.
 bool XplaneRunning();
 
+// Does one process name — a Windows image name, or one line of `ps -A -o comm=` —
+// name the X-Plane binary? Split out of `XplaneRunning` so the matching itself is
+// testable without processes; the platform half stays untestable by nature.
+//
+// ⚠ THIS USED TO BE `find("X-Plane") != npos` ON UNIX and that is a real bug, not
+// a tidy-up (fixed 2026-08-15). `ps -o comm=` prints the FULL PATH on macOS, so
+// every process running out of `/Applications/X-Plane 12/` matched — X-Plane's own
+// updater, any helper, anything at all under that folder. It only ever produced a
+// spurious warning while the TUI owned this check, because the TUI offers
+// "continue anyway"; the GUI waits on it, so a false positive there is an install
+// that can never start.
+//
+// Matches the three real binaries and nothing that merely lives beside them:
+//   Windows  X-Plane.exe
+//   macOS    …/X-Plane.app/Contents/MacOS/X-Plane
+//   Linux    X-Plane-x86_64
+bool IsXplaneProcessName(const std::string& raw);
+
 // ─── the aircraft scan ───────────────────────────────────────────────────────
 struct SkunkCfg {
     std::string module;

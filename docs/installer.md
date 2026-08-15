@@ -920,32 +920,40 @@ to produce something nobody downloads.
 A manual `workflow_dispatch` run does everything *except* `release`, so bundles can be
 downloaded and tested before publishing.
 
-### ⚠ The GUI ships on Windows only; macOS and Linux ship the TUI
+### ⚠ The GUI ships on all three platforms — and what it took to get there
 
-**`matrix.gui` is the one statement of that** (2026-08-15). The bundle rule is
-untouched — each platform still carries exactly one executable — it is just not the
-same front-end on all three. The bundle README already reads this way: Windows says
-*"Double-click `photon-installer.exe`"*, macOS and Linux say *"open a terminal and run
-`./photon-installer`"*.
+**`matrix.gui` is the one statement of which front-end a platform ships**, and it is
+ON everywhere as of 2026-08-15. It stays a per-row value so a platform can be dropped
+back to the TUI by editing one word — a state this matrix was in for exactly one
+commit, when the GUI turned out not to build on Unix at all.
 
-**Why.** The GUI was developed on Windows against a Figma design, and
-`run-installer.ps1` says *"Windows/win_x64 only"* in its own header. Turning it on for
-the whole matrix made CI the first-ever Unix build of it, and both Unix jobs failed to
-**link**: Corrosion does not propagate Slint's transitive system libraries, the same
-defect the `opengl32`/`imm32` note in `CMakeLists.txt` already describes for Windows.
-The missing sets were **fontconfig** on Linux (every undefined symbol was `Fc*`) and
-roughly a dozen frameworks plus `-lobjc` on macOS (`CoreFoundation`, `AppKit`,
-`Foundation`, `CoreGraphics`, `CoreText`, `CoreVideo`, `QuartzCore`, `OpenGL`,
-`Carbon`, `CoreServices`). ⚠ **That nothing at all propagated on macOS — rather than a
-couple of libraries being under-reported, as on Windows — points at the universal
-two-arch/lipo path losing the link interface**, so treat "just add the frameworks" as
-unproven.
+**What was wrong.** The GUI was developed on Windows against a Figma design, and
+`run-installer.ps1` still says *"Windows/win_x64 only"* in its header. Turning it on
+for the whole matrix made CI the first-ever Unix build of it, and both Unix jobs
+failed to **link**: Corrosion does not propagate Slint's transitive system libraries,
+the same defect the `opengl32`/`imm32` note in `CMakeLists.txt` describes for Windows.
+Both lists are now explicit, derived from the actual undefined-symbol dumps:
 
-⚠ **Linking was never the whole gap.** `platform::PickFolder` has no non-Windows
-implementation (it returns an empty string, and `platform.h` says so deliberately —
-"degrades to typing the path into the field"), so a Unix GUI would ship a **Browse
-button that does nothing**, on a front-end nobody has ever run there. The TUI is
-tested, has no dead controls, and is what those users are already told to run.
+- **Linux — exactly one library.** Every undefined symbol was `Fc*`, from `fontique`
+  under Slint's text stack. ⚠ **Installing `libfontconfig-dev` is not enough**, and
+  that is the trap: the headers satisfy the Rust build script, the compile succeeds,
+  and the failure lands at the final C++ link where nothing put `-lfontconfig` on the
+  line. Resolved through pkg-config, with a link-by-name fallback and a warning rather
+  than a hard configure error.
+- **macOS — ten frameworks plus `-lobjc`**: CoreFoundation, Foundation, AppKit,
+  CoreGraphics, CoreText, CoreVideo, QuartzCore, OpenGL, Carbon, CoreServices.
+  ⚠ **This is the least-proven thing in the build.** On Windows exactly two libraries
+  were under-reported; on macOS *nothing* propagated — ~300 symbols across every
+  framework the backend touches — which points at the universal (`arm64;x86_64`) lipo
+  path dropping the link interface wholesale rather than at an incomplete list. **If
+  it regresses, test single-arch first** (`-DCMAKE_OSX_ARCHITECTURES=arm64`) before
+  adding frameworks.
+
+⚠ **Linking was never the whole gap.** `platform::PickFolder` returned "" on
+everything but Windows, so a Unix GUI would have shipped a **Browse button that did
+nothing**. It is now `choose folder` via osascript on macOS and zenity-then-kdialog on
+Linux — see `platform.cpp`, and note the no-shell rule there: the start path is
+user-supplied, so it never goes through a command string.
 
 ⚠ **The flag's default is OFF, and that is not the same as "OFF here."**
 `option(PHOTON_GUI ... OFF)` stays, because a contributor's checkout and the core-only
@@ -963,16 +971,16 @@ that quietly picked Slint up would either fail to link or ship the untested GUI,
 neither would fail any other step. **Change that `message(STATUS)` string and the check
 breaks** — change both together.
 
-**What the GUI costs, where it is on.** Rust is installed explicitly rather than taken
+**What the GUI costs.** Rust is installed explicitly rather than taken
 from the runner image: Slint v1.17.1 declares `rust-version = "1.92"`, and an image
 drifting below that would break the build on a tag push — the one run nobody wants to
 debug. `stable` is deliberate; the reproducibility that matters is pinned at the
 **Slint tag** (`v1.17.1`, `GIT_SHALLOW`, in `src/native/CMakeLists.txt`), while pinning
 rustc would instead break the day a transitive crate needs something newer. Cargo's
 *downloads* are cached, and the Slint **compile** is cached on `workflow_dispatch`
-only — a published bundle is built from nothing. Windows runs ~15 min with a cold
-cache; macOS and Linux are back to their pre-GUI runtime, which on macOS also means it
-is no longer compiling Slint twice for the universal binary.
+only — a published bundle is built from nothing. Windows ran ~15 min with a cold
+cache; expect macOS to be the long pole, since Corrosion builds Slint once per
+architecture and lipos the results for the universal binary.
 
 **Gotchas.** The manual **Run workflow** button only appears once `release.yml` is on the
 default branch (`main`); nothing auto-runs on a branch push (no `on: push: branches`) — only

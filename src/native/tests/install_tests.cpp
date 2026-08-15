@@ -2112,3 +2112,47 @@ TEST("progress: the plan is built from sizes and never reads the files") {
     CHECK_EQ(progress::FileSizeOrZero(U8(d / "one.obj")), 1000u);
     CHECK_EQ(progress::FileSizeOrZero(U8(d / "nope.obj")), 0u);
 }
+
+// ─── the X-Plane-running matcher ─────────────────────────────────────────────
+// ⚠ THE PLATFORM HALF IS UNTESTABLE (it enumerates live processes), so the RULE
+// is split out and pinned here instead. This existed as `find("X-Plane") != npos`
+// on Unix until 2026-08-15, which is why the negative cases below carry the
+// weight: `ps -o comm=` prints the FULL PATH on macOS, so the old form matched
+// every process running out of /Applications/X-Plane 12/.
+
+TEST("detect: the three real X-Plane binaries are recognized") {
+    CHECK(detect::IsXplaneProcessName("X-Plane.exe"));                    // Windows
+    CHECK(detect::IsXplaneProcessName(
+        "/Applications/X-Plane 12/X-Plane.app/Contents/MacOS/X-Plane"));  // macOS
+    CHECK(detect::IsXplaneProcessName("X-Plane-x86_64"));                 // Linux
+}
+
+TEST("detect: the matcher is case- and whitespace-insensitive") {
+    // `ps` pads its column and always leaves the newline on.
+    CHECK(detect::IsXplaneProcessName("  x-plane  \n"));
+    CHECK(detect::IsXplaneProcessName("X-PLANE.EXE\r\n"));
+    CHECK(detect::IsXplaneProcessName("\tX-Plane\t"));
+}
+
+TEST("detect: a process merely living beside X-Plane does not match") {
+    // ⚠ THE WHOLE POINT. Every one of these matched the old substring rule, and
+    // on the GUI — which WAITS on this answer rather than only warning — a false
+    // positive is an install that can never start.
+    CHECK(!detect::IsXplaneProcessName("/Applications/X-Plane 12/Installer"));
+    CHECK(!detect::IsXplaneProcessName("/Applications/X-Plane 12/X-Plane Installer"));
+    CHECK(!detect::IsXplaneProcessName("X-Plane 12 Installer"));
+    CHECK(!detect::IsXplaneProcessName("/opt/X-Plane/bin/log_tailer"));
+    CHECK(!detect::IsXplaneProcessName("com.laminar.X-Plane.helper"));
+}
+
+TEST("detect: the hyphen rule admits Linux's suffix but not a space") {
+    // `X-Plane-x86_64` must pass and `X-Plane 12 Installer` must not, which is
+    // exactly why the prefix tested is `x-plane-` and never a bare `x-plane`.
+    CHECK(detect::IsXplaneProcessName("X-Plane-x86_64"));
+    CHECK(detect::IsXplaneProcessName("x-plane-anything"));
+    CHECK(!detect::IsXplaneProcessName("x-plane 12"));
+    CHECK(!detect::IsXplaneProcessName("xplane"));
+    CHECK(!detect::IsXplaneProcessName("notx-plane"));
+    CHECK(!detect::IsXplaneProcessName(""));
+    CHECK(!detect::IsXplaneProcessName("   \n"));
+}

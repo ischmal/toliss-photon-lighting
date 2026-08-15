@@ -197,6 +197,33 @@ std::vector<RootCandidate> XplaneCandidates(const std::string& selfPathUtf8) {
     return found;
 }
 
+bool IsXplaneProcessName(const std::string& raw) {
+    // Trim: `ps` pads and always leaves the newline on.
+    std::size_t b = raw.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return false;
+    const std::size_t e = raw.find_last_not_of(" \t\r\n");
+    std::string name = raw.substr(b, e - b + 1);
+
+    // Basename. macOS reports the whole path here; the other two do not.
+    const std::size_t slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+
+    // ⚠ STRIP `.exe` BEFORE COMPARING, so one rule covers all three platforms.
+    const std::string kExe = ".exe";
+    if (name.size() > kExe.size() &&
+        name.compare(name.size() - kExe.size(), kExe.size(), kExe) == 0) {
+        name.resize(name.size() - kExe.size());
+    }
+
+    // ⚠ EXACT, OR THE `x-plane-` PREFIX — never a bare `x-plane` prefix. The
+    // hyphen is what admits Linux's `X-Plane-x86_64` while still rejecting
+    // `X-Plane 12 Installer`, whose basename starts `x-plane ` with a SPACE.
+    return name == "x-plane" || name.rfind("x-plane-", 0) == 0;
+}
+
 bool XplaneRunning() {
     // ⚠ ANY FAILURE MEANS "NOT RUNNING". This check exists to warn the user, so it
     // must never be able to block an install by failing to introspect processes.
@@ -210,9 +237,16 @@ bool XplaneRunning() {
     bool running = false;
     if (::Process32FirstW(snap, &entry)) {
         do {
-            std::wstring name(entry.szExeFile);
-            std::transform(name.begin(), name.end(), name.begin(), ::towlower);
-            if (name == L"x-plane.exe") {
+            // Narrowed rather than compared as wide: the image name is ASCII, and
+            // routing both platforms through ONE matcher is the point — a rule that
+            // lived twice is how the two drifted apart in the first place.
+            const std::wstring wide(entry.szExeFile);
+            std::string name;
+            name.reserve(wide.size());
+            for (const wchar_t c : wide) {
+                name.push_back(c < 128 ? static_cast<char>(c) : '?');
+            }
+            if (IsXplaneProcessName(name)) {
                 running = true;
                 break;
             }
@@ -226,7 +260,7 @@ bool XplaneRunning() {
     char buf[512];
     bool running = false;
     while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
-        if (std::string(buf).find("X-Plane") != std::string::npos) {
+        if (IsXplaneProcessName(buf)) {
             running = true;
             break;
         }

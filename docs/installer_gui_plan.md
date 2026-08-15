@@ -41,7 +41,7 @@ has to agree with.
 |---|---|---|
 | Toolkit | **Slint** | The mockup is a designed UI; Dear ImGui (already vendored, MIT) would have been free but cannot reproduce an arbitrary design faithfully. |
 | License | **GPLv3, whole repo** | Slint's other option is royalty-free *with attribution conditions*. **Applied 2026-08-12** — `LICENSE` is the GPLv3 text and README §Usage says so. |
-| Ship model | **The GUI replaces the TUI in the bundle — on Windows** | `build_bundle` ships exactly one executable; a download must not hand the user two things to double-click. **macOS and Linux ship the TUI** (2026-08-15): the GUI has only ever been built and run on Windows, it does not link on Unix, and `PickFolder` has no implementation there. One binary per platform still holds. |
+| Ship model | **The GUI replaces the TUI in the bundle, on all three platforms** | `build_bundle` ships exactly one executable; a download must not hand the user two things to double-click. Briefly Windows-only (2026-08-15) when the GUI turned out not to link on Unix; both link lists and `PickFolder` are now implemented, so it is universal again. |
 | The TUI | **Kept, reachable with `--tui`** | SSH and headless boxes still need it, and `photoncore_tests` covers its string engine. It is built either way; it is just not what a double-click gets. |
 | Linkage | **Static Slint** | See the bundle rule — a `slint_cpp.dll` beside the binary has nowhere to go in `data/`. |
 | Default | **`PHOTON_GUI=OFF`, and CI states it per platform** | The default keeps a contributor's checkout (and the core-only tree) buildable with no Rust. CI passes `-DPHOTON_GUI=${{ matrix.gui }}` — **ON for Windows, OFF for macOS/Linux** — and installs Rust only where it is ON. |
@@ -268,18 +268,25 @@ rather than part of this scaffold.
 
 **Build and linkage**
 
-- ⚠ **THE GUI DOES NOT LINK ON LINUX OR macOS, AND LINKING IS NOT THE WHOLE GAP**
-  (2026-08-15, first Unix build ever attempted). Corrosion does not propagate
-  Slint's transitive system libraries — the same defect as the `opengl32`/`imm32`
-  note below. Linux wanted **fontconfig** (every undefined symbol was `Fc*`);
-  macOS wanted ~a dozen frameworks plus `-lobjc` (`CoreFoundation`, `AppKit`,
-  `Foundation`, `CoreGraphics`, `CoreText`, `CoreVideo`, `QuartzCore`, `OpenGL`,
-  `Carbon`, `CoreServices`). ⚠ **That NOTHING propagated on macOS, rather than a
-  couple of libraries being under-reported as on Windows, points at the universal
-  two-arch/lipo path losing the link interface** — "just add the frameworks" is
-  unproven. ⚠ And `platform::PickFolder` has no non-Windows implementation, so a
-  Unix GUI ships a **Browse button that does nothing**. Hence the ship model:
-  Windows GUI, Unix TUI.
+- ⚠ **SLINT'S TRANSITIVE SYSTEM LIBRARIES ARE LINKED EXPLICITLY ON ALL THREE
+  PLATFORMS** (2026-08-15, from the first Unix build ever attempted). Corrosion does
+  not propagate them — the same defect as the `opengl32`/`imm32` note below. Linux
+  wanted **fontconfig** and nothing else (every undefined symbol was `Fc*`); macOS
+  wanted ten frameworks plus `-lobjc` (`CoreFoundation`, `Foundation`, `AppKit`,
+  `CoreGraphics`, `CoreText`, `CoreVideo`, `QuartzCore`, `OpenGL`, `Carbon`,
+  `CoreServices`). ⚠ **`libfontconfig-dev` being installed is NOT the same as
+  `-lfontconfig` being on the link line** — the headers satisfy the Rust build
+  script and the compile succeeds, so the failure lands at the very end.
+  ⚠ **THE macOS LIST IS THE LEAST-PROVEN PART.** On Windows exactly two libraries
+  were under-reported; on macOS *nothing* propagated, ~300 symbols, which points at
+  the universal two-arch/lipo path dropping the link interface wholesale. **If it
+  regresses, test single-arch first** (`-DCMAKE_OSX_ARCHITECTURES=arm64`) before
+  adding frameworks.
+- ⚠ **`PickFolder` IS IMPLEMENTED EVERYWHERE NOW** — osascript on macOS,
+  zenity-then-kdialog on Linux — because a GUI whose Browse button does nothing is
+  worse than no GUI. ⚠ **"" REMAINS A NORMAL ANSWER**: cancelled, or a minimal
+  Linux box with neither picker installed. The path field is editable precisely so
+  that degrades to typing rather than failing.
 - ⚠ **`PHOTON_GUI` STAYS OFF BY DEFAULT — AND CI STATES IT ON EVERY RUNNER, BOTH
   WAYS.** The default is for the core-only tree and a contributor's checkout, which
   must keep building `photon-installer` with no Rust present; flipping the *default*

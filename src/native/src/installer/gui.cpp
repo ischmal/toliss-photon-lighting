@@ -206,6 +206,9 @@ const char* WingLabel(int index) {
 // `slint::Timer` instead (`kWingPollMs`): everything that touches `Gui` or the UI
 // then runs on the UI thread by construction, and a timer cannot outlive the loop.
 constexpr int kWingPollMs = 40;
+// The close-X-Plane wait's poll interval. Matches the TUI's kPollIntervalSeconds
+// (screens.cpp) — the same job, and no reason for the two to feel different.
+constexpr int kXplanePollMs = 2000;
 
 class WingProbe {
 public:
@@ -946,6 +949,17 @@ std::string SummaryLine(const RunContext& ctx, bool ok, const std::string& error
 //
 // The verbs match the TUI's own step title (`ScreenPerform`), which has said
 // "Installing…" / "Uninstalling…" all along.
+// Post a new Run-screen headline from the worker. The UI is single-threaded and
+// every other cross-thread update in this file goes the same way.
+void SetRunHeadline(const slint::ComponentWeakHandle<App>& weak,
+                    const std::string& text) {
+    slint::invoke_from_event_loop([weak, text] {
+        auto ui = weak.lock();
+        if (!ui) return;
+        (*ui)->set_run_headline(slint::SharedString(text));
+    });
+}
+
 std::string RunHeadline(bool uninstalling, bool dryRun) {
     if (dryRun) return "Dry run - nothing is being written.";
     return uninstalling ? "Uninstalling..." : "Installing...";
@@ -966,6 +980,51 @@ std::string CompleteHeadline(bool ok, bool uninstalling, bool dryRun) {
     if (!ok) return "Something went wrong";
     if (dryRun) return "Dry run complete";
     return uninstalling ? "Uninstall complete" : "Install complete";
+}
+
+// ─── the close-X-Plane gate ──────────────────────────────────────────────────
+// The GUI's half of what the TUI does in `ScreenCheckNotRunning` (screens.cpp),
+// and it was simply missing here until 2026-08-15: a GUI user UPGRADING Photon
+// with the sim up got a bare "file in use" failure, because Windows keeps a
+// loaded `.xpl` memory-mapped and refuses to overwrite it. `actions.cpp` says
+// outright that skipping an identical plugin "is precisely what lets an OBJ-only
+// reinstall run while X-Plane is open, which the 'please close X-Plane' screen
+// relies on" — a screen this front-end did not have.
+//
+// ⚠ IT RUNS ON THE WORKER, NOT THE EVENT LOOP, and needs no new UI: the Run
+// screen's headline and log are already driven from here, so the wait reports
+// itself through the channels the run was going to use anyway.
+//
+// Three cases skip the wait entirely, and each is the same argument — nothing
+// this run does can collide with a locked file:
+//   * uninstall never replaces the plugin binary;
+//   * an install whose plugin is already byte-identical only rewrites OBJs,
+//     which X-Plane loads into memory and releases;
+//   * ⚠ A DRY RUN WRITES NOTHING AT ALL. The TUI gates dry runs too, which is a
+//     wart worth not copying — a dry run is exactly what you do WHILE the sim is
+//     open, and making it demand you close the thing is friction for no hazard.
+void WaitForXplaneToClose(const RunContext& ctx, RunLog& log,
+                          const actions::Options& opts) {
+    if (ctx.uninstalling || ctx.dryRun) return;
+    if (actions::PluginIsCurrent(opts.xplaneRoot)) return;
+    if (!detect::XplaneRunning()) return;
+
+    // ⚠ INFO, NOT THE TUI'S WARN. A WARN clears `RunLog::Clean()`, which is what
+    // gates the Run screen's auto-advance — so warning here would strand a
+    // perfectly successful install on the log screen. The user watched the
+    // headline say it was waiting; there is nothing left for them to read.
+    // ⚠ "INFO" is spelled out because `RunLog::Write` overrides without repeating
+    // the base's default argument, so the derived type takes no one-arg call.
+    log.Write("X-Plane appears to be running - waiting for it to close", "INFO");
+    SetRunHeadline(ctx.weak, "Waiting for X-Plane to close...");
+
+    while (detect::XplaneRunning()) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kXplanePollMs));
+    }
+
+    log.Write("X-Plane closed - continuing", "INFO");
+    SetRunHeadline(ctx.weak, RunHeadline(ctx.uninstalling, ctx.dryRun));
 }
 
 void StartRun(Gui& g) {
@@ -1017,6 +1076,12 @@ void StartRun(Gui& g) {
         bool ok = true;
         std::string error;
         RunLog log(ctx);
+
+        // ⚠ BEFORE THE TRY, AND IT CANNOT THROW. The wait is not part of the
+        // operation — a failure inside it would be reported as the install having
+        // gone wrong, when nothing has been attempted yet.
+        WaitForXplaneToClose(ctx, log, opts);
+
         try {
             if (ctx.uninstalling) {
                 actions::Uninstall(opts, log);
