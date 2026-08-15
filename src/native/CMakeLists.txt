@@ -385,12 +385,77 @@ endif()
 if(APPLE)
     # Universal 2 + deployment target come from the cache variables at the top of
     # this file — set there, before any target, so photoncore gets them too.
+    if(PHOTON_GUI)
+        # ⚠ SLINT'S TRANSITIVE APPLE FRAMEWORKS — the macOS twin of the
+        # opengl32/imm32 block above, and the SAME Corrosion defect. ⚠ BUT NOTE THE
+        # DIFFERENCE IN DEGREE, because it is the one clue to what is actually
+        # wrong: on Windows exactly two libraries were under-reported, whereas here
+        # NOTHING propagated at all — ~300 undefined symbols spanning every
+        # framework the backend touches. That points at the universal
+        # (arm64;x86_64) lipo path dropping the link interface wholesale rather
+        # than at an incomplete list, so ⚠ IF THIS LIST EVER LOOKS WRONG, TEST
+        # SINGLE-ARCH FIRST (-DCMAKE_OSX_ARCHITECTURES=arm64) before adding to it.
+        #
+        # Derived from the actual undefined-symbol dump of the 2026-08-15 CI
+        # failure, not from a template:
+        #   CoreFoundation -> CF*/kCF* (run loop, bundles, strings, URLs)
+        #   AppKit         -> NS*, NSApplicationMain, NSAccessibility*, NSImageName*
+        #   Foundation     -> NSSearchPathForDirectoriesInDomains, NSRunLoopCommonModes
+        #   CoreGraphics   -> CGDisplay*/CGImage*/CGSMainConnectionID
+        #   CoreText       -> CTFont*, kCTFontURLAttribute  (text shaping)
+        #   CoreVideo      -> CVDisplayLink*                (vsync)
+        #   QuartzCore     -> kCAGravityTopLeft
+        #   OpenGL         -> CGLErrorString, CGLSetParameter  (glutin's GL context)
+        #   Carbon         -> TIS*/UCKeyTranslate/LMGetKbdType (keyboard layout)
+        #   CoreServices   -> LSCopyDefaultApplicationURLForURL (opening links)
+        #   objc           -> objc_msgSend, class_*, sel_*     (the ObjC runtime)
+        target_link_libraries(photon-installer PRIVATE
+            "-framework CoreFoundation"
+            "-framework Foundation"
+            "-framework AppKit"
+            "-framework CoreGraphics"
+            "-framework CoreText"
+            "-framework CoreVideo"
+            "-framework QuartzCore"
+            "-framework OpenGL"
+            "-framework Carbon"
+            "-framework CoreServices"
+            objc)
+    endif()
 elseif(NOT MSVC)
     # The same flags the `.xpl` already uses: a distro's libstdc++ is older than the
     # one this was built against more often than not, and the installer has to run
     # before anything else does.
     target_link_options(photon-installer PRIVATE
         -static-libgcc -static-libstdc++)
+    if(PHOTON_GUI)
+        # ⚠ THE LINUX TWIN, AND IT IS EXACTLY ONE LIBRARY. Every undefined symbol in
+        # the 2026-08-15 CI failure was `Fc*` — FcPatternCreate, FcConfigSubstitute,
+        # FcFontSort, FcInitLoadConfig — all from `fontique`, the font-enumeration
+        # crate under Slint's text stack. ⚠ INSTALLING `libfontconfig-dev` IS NOT
+        # ENOUGH and that is the trap: the headers satisfy the Rust build script,
+        # the compile succeeds, and the failure lands at the final C++ link where
+        # nothing has put `-lfontconfig` on the line.
+        #
+        # Found by pkg-config rather than hard-coded, because the library name is
+        # stable but its location is not (multiarch dirs, Nix, containers).
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(PHOTON_FONTCONFIG QUIET fontconfig)
+        endif()
+        if(PHOTON_FONTCONFIG_FOUND)
+            target_link_libraries(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LIBRARIES})
+            target_link_directories(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LIBRARY_DIRS})
+        else()
+            # ⚠ FALL BACK TO THE BARE NAME rather than failing configure. A distro
+            # without the .pc file may still have the .so, and a hard error here
+            # would block a build that was going to work.
+            message(WARNING
+                "fontconfig not found via pkg-config; linking -lfontconfig by name. "
+                "If the link fails on Fc* symbols, install libfontconfig-dev.")
+            target_link_libraries(photon-installer PRIVATE fontconfig)
+        endif()
+    endif()
 endif()
 
 if(PHOTON_CORE_ONLY)

@@ -85,10 +85,16 @@ bool SetClipboardText(const std::string& textUtf8);
 // A native "pick a folder" dialog, for the Browse button on the X-Plane directory
 // screen. Returns the chosen path as UTF-8, or "" if the user cancelled.
 //
-// ⚠ WINDOWS ONLY TODAY, and it returns "" everywhere else rather than pretending.
-// That degrades to typing the path into the field, which is why the field is
-// editable and not a read-only display of whatever the dialog returned — the
-// screen has to stay usable on a platform with no picker behind it.
+// Implemented on all three platforms (macOS and Linux added 2026-08-15, when the
+// GUI stopped being Windows-only): IFileOpenDialog on Windows, `choose folder` via
+// osascript on macOS, zenity then kdialog on Linux.
+//
+// ⚠ "" IS A NORMAL ANSWER AND ALWAYS HAS BEEN — the user cancelled, or the box has
+// no picker installed at all (a minimal Linux desktop has neither zenity nor
+// kdialog, and that must not be an error). It degrades to typing the path into the
+// field, which is why the field is editable and not a read-only display of
+// whatever the dialog returned — the screen has to stay usable with nothing behind
+// the button.
 std::string PickFolder(const std::string& titleUtf8, const std::string& startUtf8);
 
 // ─── misc ────────────────────────────────────────────────────────────────────

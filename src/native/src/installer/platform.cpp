@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <vector>
 
 #include "core/fsutil.h"
 
@@ -19,6 +20,7 @@
 #include <shobjidl.h>
 #else
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -57,6 +59,69 @@ bool Spawn(const char* prog, const std::string& arg) {
     }
     return true;
 }
+
+// Run a child to completion and capture its stdout. ⚠ NO SHELL, for the reason
+// `Spawn` states above and more sharply: `startUtf8` is a path the user chose, and
+// building a command string around it is the injection hazard. argv is built
+// BEFORE the fork so the child does nothing but dup/exec — after a fork in a
+// threaded process (Slint owns several), allocating is not async-signal-safe.
+//
+// False means "no answer": failed to start, exited non-zero — which is how every
+// picker here reports CANCELLED — or printed nothing. All three are the same thing
+// to the caller, and none of them is an error worth surfacing.
+bool RunCapture(const char* prog, const std::vector<std::string>& args,
+                std::string* out) {
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(prog));
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    int fds[2];
+    if (::pipe(fds) != 0) return false;
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(fds[0]);
+        ::close(fds[1]);
+        return false;
+    }
+    if (pid == 0) {
+        ::close(fds[0]);
+        ::dup2(fds[1], STDOUT_FILENO);
+        ::close(fds[1]);
+        ::execvp(prog, argv.data());
+        ::_exit(127);
+    }
+    ::close(fds[1]);
+    std::string buf;
+    char chunk[512];
+    ssize_t n;
+    while ((n = ::read(fds[0], chunk, sizeof(chunk))) > 0) {
+        buf.append(chunk, static_cast<std::size_t>(n));
+    }
+    ::close(fds[0]);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
+    while (!buf.empty() && (buf.back() == '\n' || buf.back() == '\r')) buf.pop_back();
+    if (buf.empty()) return false;
+    *out = buf;
+    return true;
+}
+
+#ifdef __APPLE__
+// Escape for an AppleScript double-quoted string literal. The shell is out of the
+// picture (RunCapture execs osascript directly), but the script text still has one
+// level of quoting of its own, and a folder legitimately may contain a `"`.
+std::string EscapeAppleScript(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+#endif
 #endif
 
 }  // namespace
@@ -119,9 +184,42 @@ std::string PickFolder(const std::string& titleUtf8, const std::string& startUtf
     }
     if (weInitialized) ::CoUninitialize();
     return chosen;
+#elif defined(__APPLE__)
+    // AppleScript's own folder chooser, driven through osascript. ⚠ DELIBERATELY
+    // NOT NSOpenPanel: that would need this file compiled as Objective-C++ (.mm)
+    // and a run loop of its own to pump the panel, and the GUI already owns the
+    // only run loop there is. osascript keeps the picker out of our process
+    // entirely, which is also why it cannot deadlock against Slint's event loop.
+    std::string script = "POSIX path of (choose folder with prompt \"" +
+                         EscapeAppleScript(titleUtf8) + "\"";
+    if (!startUtf8.empty()) {
+        script += " default location POSIX file \"" + EscapeAppleScript(startUtf8) + "\"";
+    }
+    script += ")";
+    std::string out;
+    if (!RunCapture("osascript", {"-e", script}, &out)) return std::string();
+    // ⚠ `POSIX path of` RETURNS A TRAILING SLASH on a folder. Everything else here
+    // stores and compares paths without one, so a stray slash would make the same
+    // folder read as two different roots between this and a typed path.
+    while (out.size() > 1 && out.back() == '/') out.pop_back();
+    return out;
 #else
-    (void)titleUtf8;
-    (void)startUtf8;
+    // zenity (GTK) then kdialog (KDE). ⚠ NEITHER IS GUARANTEED — a minimal or
+    // headless box has no picker at all, and that is exactly the case platform.h
+    // documents: return empty and let the user type the path into the field, which
+    // is why that field is editable rather than a read-only display of the dialog's
+    // answer. A missing picker must never be an error.
+    std::string out;
+    std::vector<std::string> zen = {"--file-selection", "--directory",
+                                    "--title=" + titleUtf8};
+    // The trailing slash is what makes zenity start INSIDE the folder rather than
+    // beside it with the folder selected.
+    if (!startUtf8.empty()) zen.push_back("--filename=" + startUtf8 + "/");
+    if (RunCapture("zenity", zen, &out)) return out;
+
+    const std::vector<std::string> kde = {
+        "--getexistingdirectory", startUtf8.empty() ? std::string(".") : startUtf8};
+    if (RunCapture("kdialog", kde, &out)) return out;
     return std::string();
 #endif
 }

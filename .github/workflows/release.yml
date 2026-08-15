@@ -12,22 +12,29 @@ name: Build installers
 # (deleted 2026-08-09). The install/uninstall/detect coverage they carried lives in
 # `photoncore_tests` now — see src/native/tests/install_tests.cpp.
 #
-# ⚠ THE ONE EXECUTABLE IS THE GUI ON WINDOWS AND THE TUI EVERYWHERE ELSE
-# (2026-08-15). `matrix.gui` is the single statement of that, and the bundle rule
-# is untouched — each platform still ships exactly one binary, it is just not the
-# same front-end on all three.
+# ⚠ THE ONE EXECUTABLE IS THE GUI, ON ALL THREE PLATFORMS (2026-08-15).
+# `matrix.gui` is the single statement of that, and the bundle rule is untouched:
+# each platform still ships exactly one binary.
 #
-# The split is where the GUI has actually been built and run. It was developed on
-# Windows against a Figma design; `run-installer.ps1` says "Windows/win_x64 only"
-# in its own header. Turning it on for the whole matrix made CI the first-ever
-# Unix build of it, and both Unix jobs failed to LINK — Corrosion does not
-# propagate Slint's transitive system libraries (fontconfig on Linux; roughly a
-# dozen frameworks plus -lobjc on macOS), the same defect this file's Windows
-# `opengl32`/`imm32` note already describes. That is fixable, but linking is not
-# the whole gap: `platform::PickFolder` has no non-Windows implementation, so a
-# Unix GUI would ship a Browse button that does nothing. The TUI is tested, has
-# no dead controls, and is what the bundle README already tells macOS and Linux
-# users to run.
+# ⚠ IT SHIPPED WINDOWS-GUI/UNIX-TUI FOR EXACTLY ONE COMMIT, and the reasons are
+# worth keeping because they are what the fixes had to answer. The GUI was
+# developed on Windows against a Figma design (`run-installer.ps1` still says
+# "Windows/win_x64 only"), so turning it on for the whole matrix made CI the
+# first-ever Unix build of it, and both Unix jobs failed to LINK: Corrosion does
+# not propagate Slint's transitive system libraries, the same defect this file's
+# `opengl32`/`imm32` note describes for Windows. Both are now linked explicitly in
+# CMakeLists from the actual undefined-symbol dumps — fontconfig on Linux, ten
+# frameworks plus -lobjc on macOS. And linking was never the whole gap:
+# `platform::PickFolder` had no non-Windows implementation, so a Unix GUI would
+# have shipped a Browse button that did nothing. It is now osascript on macOS and
+# zenity/kdialog on Linux.
+#
+# ⚠ THE macOS LINK LIST IS THE LEAST-PROVEN THING HERE. On Windows exactly two
+# libraries were under-reported; on macOS NOTHING propagated, ~300 symbols across
+# every framework the backend touches, which points at the universal
+# (arm64;x86_64) lipo path dropping the link interface wholesale rather than at an
+# incomplete list. If it regresses, test single-arch first
+# (-DCMAKE_OSX_ARCHITECTURES=arm64) before adding frameworks.
 #
 # ⚠ THE FLAG'S DEFAULT IS OFF AND THAT IS NOT THE SAME AS "OFF HERE". A
 # contributor's checkout must build with no Rust, so `option(PHOTON_GUI ... OFF)`
@@ -78,18 +85,21 @@ jobs:
       # ⚠ `gui` IS THE SHIP MODEL, not a build tweak — see the header. It decides
       # which front-end that platform's single executable is, and it gates Rust,
       # the Linux -dev packages and both caches, none of which a TUI build needs.
+      # It is ON everywhere as of 2026-08-15; it stays a per-row value so a
+      # platform can be dropped back to the TUI by editing ONE word, which is the
+      # state this matrix was in for exactly one commit.
       #
-      # ⚠ IF macOS IS EVER FLIPPED ON, `rust_targets` MUST LIST BOTH. CMakeLists
-      # asks for `arm64;x86_64`, but cargo builds ONE architecture at a time —
-      # Corrosion drives it per-arch and lipos the results, which it can only do if
-      # rustc has both std libraries. The runner is arm64, so `x86_64-apple-darwin`
-      # is the one nobody has locally and the one CI would have to add; CMakeLists
-      # FATAL_ERRORs on it rather than failing deep inside a Slint build log.
+      # ⚠ macOS MUST LIST BOTH RUST TARGETS. CMakeLists asks for `arm64;x86_64`,
+      # but cargo builds ONE architecture at a time — Corrosion drives it per-arch
+      # and lipos the results, which it can only do if rustc has both std
+      # libraries. The runner is arm64, so `x86_64-apple-darwin` is the one nobody
+      # has locally and the one CI must add; CMakeLists FATAL_ERRORs on it rather
+      # than failing deep inside a Slint build log.
       matrix:
         include:
           - { os: windows-latest, os_name: Windows, arch: win_x64, gui: "ON", rust_targets: x86_64-pc-windows-msvc }
-          - { os: macos-latest, os_name: macOS, arch: mac_x64, gui: "OFF", rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
-          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64, gui: "OFF", rust_targets: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, os_name: macOS, arch: mac_x64, gui: "ON", rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+          - { os: ubuntu-latest, os_name: Linux, arch: lin_x64, gui: "ON", rust_targets: x86_64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
