@@ -520,9 +520,10 @@ way to pick one up.
 
 A debug interior build also keeps the `ToLissPhoton/interior/optimized` gate and
 emits the **simplified flood copies as tunable lights of their own** (manifest rows
-carrying `boost`), so the Dev window's Cockpit tab can drive the `optimize: boost`
-factor as one live multiplier. "Use simplified lighting" on the Cockpit tab picks
-which set draws, exactly as on a shipping OBJ.
+carrying `boost`), so the Dev window's Settings tab can drive the `optimize: boost`
+factor as one live multiplier. "Use simplified panel flood lights" on that same tab
+picks which set draws, exactly as on a shipping OBJ. (Both were on the **Cockpit**
+tab until 2026-08-15; the knob moved with the checkbox it depends on.)
 
 **Brightness source.** Each manifest row carries a `source`, which is the knob the
 plugin multiplies the light's alpha by — `LIGHT_SPILL_CUSTOM` has no `INDEX` slot, so
