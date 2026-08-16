@@ -26,6 +26,6 @@
 
 namespace photon {
 
-constexpr char kPhotonVersion[] = "0.9.1";
+constexpr char kPhotonVersion[] = "0.9.2";
 
 }  // namespace photon
