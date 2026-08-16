@@ -58,6 +58,16 @@
 #include "core/constants.h"
 #include "core/version.h"
 
+// The cockpit-light intensity multiplier's patcher. Shared with the installer,
+// which re-applies the saved factor to a freshly staged lights_inn.obj; the
+// plugin applies it from the Settings tab and on aircraft load. The one place
+// the shipping .xpl writes into an aircraft folder — a baked-value rewrite of
+// OUR OWN interior OBJ only (ApplyToFile refuses anything else), because the
+// 87 LIGHT_PARAM lamps have no dataref hook and changing their light type to
+// get one was tried and rejected (it changes the look, and it buys a per-frame
+// callback per light for a value that changes once a month).
+#include "core/patch_intensity.h"
+
 // Every window in this plugin is Dear ImGui, shipping ones included, so the
 // backend comes in unconditionally.
 #include "imgui_xplm.h"
@@ -203,8 +213,27 @@ static const char* kIntOptimizedRef = "ToLissPhoton/interior/optimized";
 
 struct CockpitSettings {
     bool optimized = false;      // false = Gus's full stack
+    // The intensity multiplier baked into lights_inn.obj (1.0 = Gus's authored
+    // brightness). ⚠ NOT a dataref and not read per frame: the value lives in
+    // the OBJ's own light lines (core/patch_intensity.h), so changing it means
+    // rewriting the file and reloading the aircraft. Global for the same reason
+    // `optimized` is — the interior OBJ is byte-identical across A319/A320/A321
+    // and "my cockpit is too dim" is a statement about this machine's setup
+    // (environment mods, monitor), not about one paint scheme.
+    float intensity = 1.0f;
 };
 static CockpitSettings gCockpit;
+
+// What the OBJ the sim ACTUALLY LOADED carries, captured by DetectInstall
+// before the on-load re-apply brings the file up to date. The Settings tab
+// compares it against gCockpit.intensity to say "takes effect after reload"
+// exactly when that is true — the file on disk is no guide, because the sim
+// renders what it read at load time, not what is there now.
+static float gIntensityLoadedFactor = 1.0f;
+
+static float ClampIntensity(float v) {
+    return (float)photon::intensity::Clamp((double)v);
+}
 
 // Needed only by the prefs migration below. Kept next to the table so a reorder
 // is caught by eye rather than by a wrong-looking cockpit.
@@ -1992,12 +2021,21 @@ static void DisplaysFromJson(const json::Value& v) {
 // Its own key rather than a member of "$displays" because that block is about
 // the SCREENS and this is about the cockpit lamps; a reader should not have to
 // know that "displays" grew a cockpit setting.
-static const char* kCockpitKey = "$cockpit";
+// ⚠ THE INSTALLER READS THIS BLOCK (core/patch_intensity.cpp SavedFactor), so
+// its key and the intensity key come from constants.h rather than being spelled
+// here — a reader and a writer that each owned their literal is how the two
+// halves would drift.
+static const char* kCockpitKey = photon::kPrefsCockpitKey;
 
 static void CockpitFromJson(const json::Value& v) {
     if (v.type != json::Value::Obj) return;
     const json::Value* p = v.find("optimized");
     if (p && p->type == json::Value::Int) gCockpit.optimized = p->i != 0;
+    const json::Value* f = v.find(photon::intensity::kIntensityJsonKey);
+    // ⚠ `d`, never `i` — the parser types every number Int and fills both, and
+    // `i` would truncate 2.5x to 2x (see the gain note in DisplaysFromJson).
+    if (f && f->type == json::Value::Int)
+        gCockpit.intensity = ClampIntensity((float)f->d);
 }
 
 // The third global block: the waveform override (see ExteriorSettings). Its own
@@ -2061,9 +2099,12 @@ static void SaveProfilesFile() {
         // means default" is only safe for a setting whose default is a state the
         // user can also choose on purpose, and a switch has no such reading.
         {
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), ",\n  \"%s\": {\"optimized\": %d}",
-                          kCockpitKey, gCockpit.optimized ? 1 : 0);
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          ",\n  \"%s\": {\"optimized\": %d, \"%s\": %.2f}",
+                          kCockpitKey, gCockpit.optimized ? 1 : 0,
+                          photon::intensity::kIntensityJsonKey,
+                          gCockpit.intensity);
             f << buf;
         }
         // And the third. Always written, same argument again: "absent means
@@ -2225,6 +2266,45 @@ static void SetCockpitOptimized(bool on) {
     UpdateChecks();
     Log(std::string("cockpit lights: ")
         + (on ? "optimized (one light per position)" : "full stack"));
+}
+
+// The loaded aircraft's interior OBJ, or empty when there is no aircraft path.
+static fs::path LoadedInteriorObjPath() {
+    char fileName[512] = {0}, path[512] = {0};
+    XPLMGetNthAircraftModel(0, fileName, path);
+    if (!path[0]) return fs::path();
+    return fs::path(path).parent_path() / "objects" / kInteriorObjName;
+}
+
+// Bake gCockpit.intensity into the loaded aircraft's lights_inn.obj. Called
+// from the Settings-tab slider's commit and from the aircraft-load path — the
+// second is what carries one saved setting to all three A3xx airframes: each
+// converges the next time it is loaded, with no walk of the Aircraft folder.
+//
+// ⚠ Both gates, deliberately: `gInteriorInstalled` because there is nothing of
+// ours to rewrite otherwise (ApplyToFile would refuse the stock file anyway —
+// this is the cheap first layer), and `!gInstallStale` because the contract for
+// a reverted install is to do NOTHING, file writes included. The quiet case
+// (already at the saved factor — every load after the first) logs nothing.
+static void ApplyInteriorIntensity(const char* why) {
+    if (!gInteriorInstalled || gInstallStale) return;
+    const fs::path obj = LoadedInteriorObjPath();
+    if (obj.empty()) return;
+    std::string detail;
+    const photon::intensity::Applied r = photon::intensity::ApplyToFile(
+        obj, (double)gCockpit.intensity, detail);
+    if (r == photon::intensity::Applied::kAlready) return;
+    Log(std::string("cockpit light intensity (") + why + "): " + detail);
+}
+
+// The intensity slider's commit — on RELEASE, never per drag tick: this one
+// rewrites a file where its neighbors flip a flag. The field itself is updated
+// live by the slider so the label tracks the drag; committing an unchanged
+// value costs one small read (ApplyToFile answers "already").
+static void CommitCockpitIntensity() {
+    gCockpit.intensity = ClampIntensity(gCockpit.intensity);
+    SaveProfilesFile();
+    ApplyInteriorIntensity("setting changed");
 }
 
 // The waveform override, same shape as the two above: one flag, no per-livery
@@ -2943,6 +3023,37 @@ static void BuildSettingsTab() {
                   "effects switched off one at a time, so you can see what each "
                   "of them costs on this machine.");
 
+    // The cockpit-light intensity multiplier — its own section, because unlike
+    // everything under Performance it is a LOOK, not a cost. It still belongs
+    // on THIS tab: like `optimized` it is one global statement about the
+    // machine (the interior OBJ is byte-identical across the three A3xx), not
+    // a per-livery era choice, and the Cockpit tab is the era grid. HIDDEN,
+    // not grayed, where the mod is not installed — same rule and same reason
+    // as the simplified-floods row above.
+    if (gInteriorInstalled) {
+        ImGui::Spacing();
+        ImGui::SeparatorText("Cockpit lighting");
+        ImGui::Spacing();
+        float v = gCockpit.intensity;
+        ImGui::SetNextItemWidth(220.0f);
+        // The field updates live so the readout tracks the drag; the file
+        // write and the prefs save wait for the RELEASE (the commit below).
+        if (ImGui::SliderFloat("Brightness", &v,
+                               (float)photon::intensity::kMin,
+                               (float)photon::intensity::kMax, "%.1fx"))
+            gCockpit.intensity = ClampIntensity(v);
+        if (ImGui::IsItemDeactivatedAfterEdit()) CommitCockpitIntensity();
+        UiHelpMarker("You can increase the brightness of the cockpit lighting "
+                     "if you find it is too dark. You must restart the "
+                     "simulator to see the changes.");
+        // Shown exactly while what the sim RENDERS (captured at load) differs
+        // from the setting — not while the file differs, which it stops doing
+        // the moment the commit rewrites it.
+        if (!photon::intensity::SameFactor((double)gIntensityLoadedFactor,
+                                           (double)gCockpit.intensity))
+            UiHint("Must restart X-Plane to see changes.");
+    }
+
     // COLLAPSED by default and under its own header. Everything above answers
     // "what may this cost?", which is a question with an obvious right answer for
     // most people; this one answers "how much may the plugin change?", which is
@@ -3528,6 +3639,7 @@ static void DetectInstall() {
     const fs::path objects = fs::path(path).parent_path() / "objects";
 
     ObjScan ext = kObjUnreadable;
+    const std::string icao = AircraftIcao();
     for (const photon::Airframe& af : photon::Airframes()) {
         const fs::path obj = objects / af.objName;
         std::error_code ec;
@@ -3536,6 +3648,22 @@ static void DetectInstall() {
         // would make "present but unreadable" indistinguishable from "a different
         // airframe" and walk on to try the other three.
         if (!fs::is_regular_file(obj, ec)) continue;
+        // ⚠ A GENERIC fingerprint needs the aircraft's own word for it — the
+        // installer's IdentifyAirframe corroborates against the `.acf`'s
+        // acf/_ICAO stamp, and this is the same test read the cheap way, off
+        // the sim's own dataref for the loaded aircraft. Without it an A340
+        // (which carries the a339's ExternalLights_XP12.obj too) resolved as
+        // an a339 whose OBJ is stock, i.e. gInstallStale — a Reinstall-
+        // required menu pointing at an installer that (rightly) refuses the
+        // aircraft. An A340 is UNRECOGNIZED, never stale.
+        //
+        // ⚠ Only a POSITIVE mismatch rejects. An empty read is "could not
+        // tell", and the rule is ScanObj's: evidence may disable, its absence
+        // may not — DetectInstall runs once per load with no 1 Hz retry, so a
+        // transiently empty dataref would otherwise keep a genuine A339 dark
+        // for the whole session.
+        if (af.acfIcao[0] != '\0' && !icao.empty() && icao != af.acfIcao)
+            continue;
         gAirframeKey = af.key;
         ext = ScanObj(obj, kExteriorObjNeedle);
         break;
@@ -3560,6 +3688,15 @@ static void DetectInstall() {
     // wrong way.
     gInteriorInstalled = ScanObj(objects / kInteriorObjName, kInteriorObjNeedle)
                        == kObjModded;
+    // What the sim just LOADED is what it renders until the next reload —
+    // captured here, before the on-load re-apply in UpdateMenuVisibility
+    // brings the file itself up to date. The Settings tab's "takes effect
+    // after the aircraft is reloaded" hint compares against exactly this;
+    // the file on disk is no guide once it has been re-patched.
+    gIntensityLoadedFactor =
+        gInteriorInstalled
+            ? (float)photon::intensity::FactorOfFile(objects / kInteriorObjName)
+            : 1.0f;
 
     if (gInstallStale) {
         Log("INSTALL REVERTED: " + gAirframeKey + "/objects/"
@@ -3666,6 +3803,12 @@ static void UpdateMenuVisibility() {
             PerfShutdown();
             return;
         }
+        // Bring this aircraft's lights_inn.obj up to the saved intensity —
+        // the aircraft that just loaded may not be the one the slider was
+        // moved on, and a reinstall may have reset the file. The common case
+        // (already right) is one small read; the change lands next reload,
+        // which the Settings tab says whenever it is true.
+        ApplyInteriorIntensity("aircraft load");
         ResolveGlowMap();      // pick the skin-glow index map for this airframe
         // ToLiss's own glow array, the pass-through source for the redirected
         // regions while the waveform override is off. Bound here and retried at

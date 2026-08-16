@@ -24,6 +24,7 @@
 #include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_glow.h"
+#include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
 #include "core/version.h"
 #include "installer/tui.h"
@@ -1457,6 +1458,139 @@ TEST("tui: a body that fits shows no scroll markers at all") {
     const std::string frame = tui::ComposeFrame(1, {"just", "a", "few", "rows"});
     CHECK(frame.find("more above") == std::string::npos);
     CHECK(frame.find("more below") == std::string::npos);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// intensity — the cockpit-light multiplier baked into lights_inn.obj
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// A miniature of the real generated file: CRLF, tab-indented light lines of all
+// three kinds inside an ANIM gate, the interior needle carried by the gate's
+// dataref, and a POINT_COUNTS line for the factor marker to anchor on. The
+// numbers are real ones from dist/A320/objects/lights_inn.obj.
+std::string InnObjFixture() {
+    return
+        "I\r\n800\r\nOBJ\r\n\r\nTEXTURE\t\r\nPOINT_COUNTS\t0 0 1 0\r\n"
+        "# ToLiss Photon Lighting - interior (cockpit) lights\r\n"
+        "ANIM_begin\r\n"
+        "\tANIM_hide 0.5 2.5 ToLissPhoton/interior/dome\r\n"
+        "\t# Dome Lights -> Old Halogen\r\n"
+        "\tLIGHT_PARAM\tairplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 0 "
+        "1.414 0 0 0 1\r\n"
+        "\tLIGHT_PARAM\tairplane_inst_sp -1.147 0.033 -4.2 1 0.37 0.16 22 "
+        "0.4 0 -1 0 0.4\r\n"
+        "\tLIGHT_SPILL_CUSTOM\t0.244 1.097 -3.463 1 0.37 0.16 0.25 1 "
+        "0.146 -0.799 -0.584 0.97 ToLissPhoton/interior/spill/map\r\n"
+        "ANIM_end\r\n";
+}
+
+bool HasLine(const std::string& text, const std::string& needle) {
+    return text.find(needle) != std::string::npos;
+}
+
+}  // namespace
+
+TEST("intensity: PatchText scales slot 8 of every light kind and nothing else") {
+    int scaled = 0;
+    const std::string out = intensity::PatchText(InnObjFixture(), 2.0, scaled);
+    CHECK_EQ(scaled, 3);
+    // slot 8 doubled; position, color, rheostat index, aim and cone untouched
+    CHECK(HasLine(out, "airplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 0 "
+                       "2.828 0 0 0 1"));
+    CHECK(HasLine(out, "airplane_inst_sp -1.147 0.033 -4.2 1 0.37 0.16 22 "
+                       "0.8 0 -1 0 0.4"));
+    CHECK(HasLine(out, "LIGHT_SPILL_CUSTOM\t0.244 1.097 -3.463 1 0.37 0.16 "
+                       "0.25 2 0.146 -0.799 -0.584 0.97 "
+                       "ToLissPhoton/interior/spill/map"));
+    // each scaled line rides with its authored original...
+    CHECK(HasLine(out, std::string(intensity::kOrigPrefix) +
+                           "LIGHT_PARAM\tairplane_panel_sp -0.472"));
+    // ...the gate (the cockpit-submenu sentinel) is untouched...
+    CHECK(HasLine(out, "ANIM_hide 0.5 2.5 ToLissPhoton/interior/dome"));
+    CHECK(intensity::CanPatch(out));
+    // ...and the applied factor reads back.
+    CHECK(intensity::SameFactor(intensity::FactorIn(out), 2.0));
+    CHECK(intensity::SameFactor(intensity::FactorIn(InnObjFixture()), 1.0));
+}
+
+TEST("intensity: repatching recomputes from the originals, never compounds") {
+    // 2x then 3x must equal 3x applied once — byte for byte, not merely
+    // numerically — or every adjustment would drift the file a little further
+    // from Gus's authored values.
+    int n = 0;
+    const std::string direct = intensity::PatchText(InnObjFixture(), 3.0, n);
+    const std::string stepped = intensity::PatchText(
+        intensity::PatchText(InnObjFixture(), 2.0, n), 3.0, n);
+    CHECK_EQ(stepped, direct);
+}
+
+TEST("intensity: 1x restores the authored bytes exactly") {
+    // The mechanism must leave NO trace at 1x — no marker, no orig comments —
+    // so a user who tried the slider and put it back has the file the
+    // installer staged, and a byte-diff against the payload stays clean.
+    int n = 0;
+    const std::string patched = intensity::PatchText(InnObjFixture(), 2.0, n);
+    const std::string restored = intensity::PatchText(patched, 1.0, n);
+    CHECK_EQ(restored, InnObjFixture());
+    CHECK_EQ(n, 3);   // three lines restored
+}
+
+TEST("intensity: newline flavor is preserved both ways") {
+    // The shipped file is CRLF; a `--target interior --write` dev build may be
+    // LF. Either way the patch must not be a whole-file line-ending diff.
+    int n = 0;
+    CHECK(intensity::PatchText(InnObjFixture(), 2.0, n).find("\r\n") !=
+          std::string::npos);
+    std::string lf = InnObjFixture();
+    std::string noCr;
+    for (char c : lf) {
+        if (c != '\r') noCr.push_back(c);
+    }
+    CHECK(intensity::PatchText(noCr, 2.0, n).find('\r') == std::string::npos);
+}
+
+TEST("intensity: CanPatch refuses a stock OBJ and a --debug build") {
+    // The stock ToLiss lights_inn.obj binds none of our datarefs; a --debug
+    // build reads its lights from the dev tuning datarefs, so baked numbers do
+    // nothing there and the tuning session must not meet a rewritten file.
+    CHECK(intensity::CanPatch(InnObjFixture()));
+    CHECK(!intensity::CanPatch(
+        "I\r\n800\r\nOBJ\r\nLIGHT_PARAM\tairplane_panel_sp 0 0 0 1 1 1 0 1 "
+        "0 0 0 1\r\n"));
+    CHECK(!intensity::CanPatch(InnObjFixture() +
+                               "# ToLissPhoton/debug/light/0\r\n"));
+}
+
+TEST("intensity: out-of-range and garbage factors clamp to the harmless end") {
+    CHECK(intensity::SameFactor(intensity::Clamp(0.0), 1.0));
+    CHECK(intensity::SameFactor(intensity::Clamp(-3.0), 1.0));
+    CHECK(intensity::SameFactor(intensity::Clamp(99.0), 4.0));
+    int n = 0;
+    // A clamped-to-1x patch is a no-op that leaves no marker behind.
+    CHECK_EQ(intensity::PatchText(InnObjFixture(), 0.5, n), InnObjFixture());
+}
+
+TEST("intensity: SavedFactor reads the plugin's prefs, absent means 1x") {
+    TempDir tmp;
+    const std::string root = fsutil::PathToUtf8(tmp.path());
+    // no prefs file at all — a user who never touched the slider
+    CHECK(intensity::SameFactor(intensity::SavedFactor(root), 1.0));
+    const fs::path prefs =
+        tmp / "Output" / "preferences" / kProfilesJsonName;
+    // the shape the plugin writes, livery entries and all
+    Write(prefs,
+          "{\n  \"$displays\": {\"enabled\": 1},\n"
+          "  \"$cockpit\": {\"optimized\": 0, \"intensity\": 2.50},\n"
+          "  \"C:/Aircraft/a320.acf#0\": {\"profile\": 3}\n}\n");
+    CHECK(intensity::SameFactor(intensity::SavedFactor(root), 2.5));
+    // a factor outside the range clamps rather than propagating
+    Write(prefs, "{\"$cockpit\": {\"intensity\": 99}}");
+    CHECK(intensity::SameFactor(intensity::SavedFactor(root), 4.0));
+    // ⚠ corrupt reads as "never set", never as an error — same rule as the
+    // manifest's parser.
+    Write(prefs, "{not json");
+    CHECK(intensity::SameFactor(intensity::SavedFactor(root), 1.0));
 }
 
 int main(int argc, char** argv) { return photontest::RunAll(argc, argv); }

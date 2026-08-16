@@ -1125,7 +1125,15 @@ class OptimizedLightCountTests(unittest.TestCase):
         turned it on for a 40-livery folder did not mean "on this one paint"."""
         cpp = (REPO / "src" / "native" / "src" / "plugin.cpp").read_text(
             encoding="utf-8", errors="replace")
-        self.assertIn('kCockpitKey = "$cockpit"', cpp)
+        # The literal moved to constants.h (2026-08-16) because the INSTALLER
+        # now reads this block too (the intensity multiplier) — the plugin must
+        # bind the shared constant, not respell the key, or reader and writer
+        # drift apart.
+        self.assertIn("kCockpitKey = photon::kPrefsCockpitKey", cpp)
+        constants_h = (REPO / "src" / "native" / "src" / "core"
+                       / "constants.h").read_text(encoding="utf-8",
+                                                  errors="replace")
+        self.assertIn('kPrefsCockpitKey[] = "$cockpit"', constants_h)
         # skipped by the livery loop, or EntryFromJson would read it as a
         # phantom aircraft and write it straight back as one
         self.assertIn("if (kv.first == kCockpitKey)", cpp)
@@ -1439,6 +1447,94 @@ class DebugLightBuildTests(unittest.TestCase):
             encoding="utf-8", errors="replace")
         self.assertIn(f"DebugMaxLights  = {B.DEBUG_MAX_LIGHTS}", dev)
         self.assertIn(f'DebugDataRefPrefix   = "{B.DEBUG_LIGHT_DREF}/"', dev)
+
+
+class IntensityMultiplierTests(unittest.TestCase):
+    """The cockpit-light intensity multiplier (2026-08-16): a 1x-4x factor baked
+    into lights_inn.obj's own light lines by core/patch_intensity — the light
+    TYPES stay exactly as Gus authored them (converting them to dataref-driven
+    custom lights was tried and rejected: it changes the look and adds per-frame
+    callbacks), so the value lives in the file and needs an aircraft reload.
+
+    TWO writers apply it — the plugin (Settings-tab slider, and every aircraft
+    load) and the installer (right after staging a fresh interior OBJ) — and
+    these pin the cross-file agreements between them that no compiler checks."""
+
+    @classmethod
+    def setUpClass(cls):
+        native = REPO / "src" / "native" / "src"
+        cls.plugin = (native / "plugin.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        cls.actions = (native / "core" / "actions.cpp").read_text(
+            encoding="utf-8", errors="replace")
+        cls.header = (native / "core" / "patch_intensity.h").read_text(
+            encoding="utf-8", errors="replace")
+
+    def test_the_json_key_is_one_constant_on_both_sides(self):
+        """The plugin WRITES "$cockpit"."intensity" and the installer READS it
+        back (SavedFactor). Each side spelling its own literal is how a reader
+        and a writer drift, so the plugin must go through the shared constants
+        for both the block key and the value key — never a bare literal."""
+        self.assertIn('kIntensityJsonKey[] = "intensity"', self.header)
+        # read (CockpitFromJson) and write (SaveProfilesFile) both go through it
+        self.assertGreaterEqual(
+            self.plugin.count("photon::intensity::kIntensityJsonKey"), 2)
+        self.assertNotIn('"intensity"', self.plugin)
+
+    def test_the_slider_commits_on_release_never_per_drag_tick(self):
+        """The commit rewrites a FILE where every neighboring control flips a
+        flag — per drag tick it would be dozens of rewrites per adjustment."""
+        i = self.plugin.index('SliderFloat("Brightness"')
+        window = self.plugin[i:i + 500]
+        self.assertIn("IsItemDeactivatedAfterEdit()", window)
+        self.assertIn("CommitCockpitIntensity()", window)
+
+    def test_the_apply_gates_on_installed_and_not_stale(self):
+        """⚠ Both, deliberately: gInteriorInstalled because there is nothing of
+        ours to rewrite otherwise, and !gInstallStale because a reverted
+        install's contract is to do NOTHING — file writes included."""
+        self.assertIn("if (!gInteriorInstalled || gInstallStale) return;",
+                      self.plugin)
+
+    def test_the_aircraft_load_path_reapplies_after_the_stale_gate(self):
+        """One saved setting reaches all three A3xx airframes by re-applying on
+        every load — and the call must sit AFTER the stale early-return, or a
+        reverted install would get its OBJ rewritten by the very code path that
+        just promised to do nothing."""
+        i = self.plugin.index("static void UpdateMenuVisibility() {")
+        body = self.plugin[i:self.plugin.index("\n}", i)]
+        self.assertIn('ApplyInteriorIntensity("aircraft load")', body)
+        self.assertGreater(body.index('ApplyInteriorIntensity("aircraft load")'),
+                           body.index("if (gInstallStale) {"))
+
+    def test_the_installer_applies_the_saved_factor_before_the_write(self):
+        """The installer half: SavedFactor(opts.xplaneRoot) patched into the
+        in-memory text BEFORE WriteOrThrow, so the aircraft sees exactly one
+        atomic write and a reinstall cannot silently reset the brightness."""
+        i = self.actions.index("std::vector<std::string> InstallInterior(")
+        body = self.actions[i:i + 3000]
+        saved = body.index("intensity::SavedFactor(opts.xplaneRoot)")
+        patched = body.index("intensity::PatchText(")
+        write = body.index("WriteOrThrow(target, text)")
+        self.assertLess(saved, patched)
+        self.assertLess(patched, write)
+
+    def test_the_settings_row_is_hidden_without_the_mod(self):
+        """Same rule as the simplified-floods row above it: HIDDEN, not grayed,
+        where the cockpit mod is not installed — it drives an OBJ that is not
+        on this aircraft, and a lone row has nowhere to explain itself."""
+        i = self.plugin.index('SeparatorText("Cockpit lighting")')
+        self.assertIn("if (gInteriorInstalled)", self.plugin[i - 800:i])
+
+    def test_the_patcher_only_touches_a_photon_interior_obj(self):
+        """CanPatch requires the interior needle and refuses a --debug build —
+        the stock ToLiss lights_inn.obj must never be rewritten, and a debug
+        OBJ's baked numbers are dead weight the tuning session must not meet."""
+        cpp = (REPO / "src" / "native" / "src" / "core"
+               / "patch_intensity.cpp").read_text(encoding="utf-8",
+                                                  errors="replace")
+        self.assertIn("kInteriorObjNeedle", cpp)
+        self.assertIn("kDebugNeedle", cpp)
 
 
 if __name__ == "__main__":
