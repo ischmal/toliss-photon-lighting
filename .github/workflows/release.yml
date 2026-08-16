@@ -5,16 +5,23 @@ name: Build installers
 #     one each for Windows / macOS / Linux
 #   * an all-platforms zip bundling the three above into one download
 #
-# ⚠ ONE INSTALLER SHIPS, AND EACH BUNDLE CARRIES EXACTLY ONE EXECUTABLE. The
-# frozen Python installer, the PyInstaller step that built it and the
-# Python-Universal job that shipped it are all gone (docs/installer_cpp_plan.md
-# §9/§10 decision 1), and so are `install.py`, `installer/` and the parity harness
-# (deleted 2026-08-09). The install/uninstall/detect coverage they carried lives in
-# `photoncore_tests` now — see src/native/tests/install_tests.cpp.
+# ⚠ EACH BUNDLE CARRIES TWO EXECUTABLES: THE GUI AND ITS CONSOLE FALLBACK
+# (2026-08-15). `photon-installer` is the Slint GUI, the thing users double-click;
+# `photon-installer-console` is the SAME installer built PHOTON_GUI=OFF — the
+# terminal wizard. It ships because the GUI renders through OpenGL, and on a
+# machine where GL is broken-but-present (Remote Desktop, old drivers, VMs) the
+# GUI opens as a BLACK WINDOW that can explain nothing — a user report, not a
+# hypothetical. The README names only the GUI in its install steps; the console
+# binary appears under TROUBLESHOOTING. The frozen Python installer, the
+# PyInstaller step that built it and the Python-Universal job that shipped it are
+# still gone (docs/installer_cpp_plan.md §9/§10 decision 1); the
+# install/uninstall/detect coverage they carried lives in `photoncore_tests` —
+# see src/native/tests/install_tests.cpp.
 #
-# ⚠ THE ONE EXECUTABLE IS THE GUI, ON ALL THREE PLATFORMS (2026-08-15).
-# `matrix.gui` is the single statement of that, and the bundle rule is untouched:
-# each platform still ships exactly one binary.
+# ⚠ THE DOUBLE-CLICK EXECUTABLE IS THE GUI, ON ALL THREE PLATFORMS (2026-08-15).
+# `matrix.gui` is the single statement of that. The console build has no matrix
+# row: it is identical on every platform (no Rust, no Slint, no SDK) and is built
+# unconditionally in its own step below.
 #
 # ⚠ IT SHIPPED WINDOWS-GUI/UNIX-TUI FOR EXACTLY ONE COMMIT, and the reasons are
 # worth keeping because they are what the fixes had to answer. The GUI was
@@ -83,11 +90,15 @@ jobs:
     strategy:
       fail-fast: false
       # ⚠ `gui` IS THE SHIP MODEL, not a build tweak — see the header. It decides
-      # which front-end that platform's single executable is, and it gates Rust,
-      # the Linux -dev packages and both caches, none of which a TUI build needs.
-      # It is ON everywhere as of 2026-08-15; it stays a per-row value so a
-      # platform can be dropped back to the TUI by editing ONE word, which is the
-      # state this matrix was in for exactly one commit.
+      # whether that platform's DOUBLE-CLICK executable (the GUI) gets built, and
+      # it gates Rust, the Linux -dev packages and both caches, none of which the
+      # console build needs. It is ON everywhere as of 2026-08-15.
+      # ⚠ FLIPPING A ROW OFF NO LONGER SHIPS A TUI-ONLY BUNDLE — it STOPS that
+      # platform's bundle: the bundle contract is now the GUI + console pair, and
+      # `make_release --bundle` hard-errors on a missing GUI rather than quietly
+      # publishing a one-executable download. That refusal is deliberate; a
+      # platform that genuinely cannot build the GUI needs a decision about what
+      # its download IS, not a silent downgrade.
       #
       # ⚠ macOS MUST LIST BOTH RUST TARGETS. CMakeLists asks for `arm64;x86_64`,
       # but cargo builds ONE architecture at a time — Corrosion drives it per-arch
@@ -270,6 +281,66 @@ jobs:
             }
           fi
 
+      # ── the console installer: the black-window fallback ─────────────────────
+      # ⚠ ITS OWN TREE, PHOTON_GUI=OFF + PHOTON_CORE_ONLY=ON — no Rust, no Slint,
+      # no X-Plane SDK, so this step is cheap everywhere and cannot be broken by
+      # any of the GUI's prerequisites. Both builds emit `photon-installer`;
+      # make_release renames this one `photon-installer-console` at staging time,
+      # telling the two apart BY CONTENT (the GUI embeds Slint's `SLINT_BACKEND`
+      # selector string), never by folder — see build/make_release.py.
+      #
+      # ⚠ THE CONFIGURE LOG IS GREPPED THE SAME WAY AS THE GUI'S, in the direction
+      # that matters here: Slint configured into THIS tree would ship a "fallback"
+      # that fails exactly when the GUI does, on a green run.
+      - name: Build the console installer (photon-installer-console)
+        shell: bash
+        working-directory: src/native
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build-console -A x64 -DPHOTON_GUI=OFF -DPHOTON_CORE_ONLY=ON 2>&1 | tee configure-console.log
+            cmake --build build-console --config Release --target photon-installer
+            exe="build-console/Release/photon-installer.exe"
+          else
+            cmake -S . -B build-console -DCMAKE_BUILD_TYPE=Release -DPHOTON_GUI=OFF -DPHOTON_CORE_ONLY=ON 2>&1 | tee configure-console.log
+            cmake --build build-console --target photon-installer
+            exe="build-console/photon-installer"
+          fi
+          needle="GUI build - photon-installer links Slint"
+          ! grep -q "$needle" configure-console.log || {
+            echo "::error::the console tree configured Slint in - this would ship a fallback that fails exactly when the GUI does"
+            exit 1
+          }
+          test -x "$exe" || { echo "::error::the console installer was not built at $exe"; exit 1; }
+
+          # ⚠ RUN IT, DON'T JUST LINK IT. The GUI binary gets exercised by
+          # photoncore_tests only indirectly; this one is the fallback for the
+          # user whose machine already failed once, so "it starts and says the
+          # right version" is the minimum bar. The version is compared against
+          # core/version.h — THE version — because a skew here means this tree
+          # built from different sources than the rest of the job, which is the
+          # stale-binary bug wearing CI's clothes.
+          want=$(sed -n 's/^constexpr char kPhotonVersion\[\] = "\([^"]*\)".*/\1/p' src/core/version.h)
+          got=$("$exe" version)
+          echo "console installer reports: '$got' (want '$want')"
+          [ -n "$want" ] && [ "$got" = "$want" ] || {
+            echo "::error::the console installer reports version '$got', but core/version.h says '$want'"
+            exit 1
+          }
+
+          # ⚠ macOS: universal in ONE build — no Rust in this binary, so the
+          # CMAKE_OSX_ARCHITECTURES cache default (arm64;x86_64) simply works,
+          # unlike the GUI's two-tree lipo dance. Assert rather than assume: a
+          # thin fallback would strand exactly the Intel-Mac user it exists for.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            lipo -info "$exe"
+            for arch in arm64 x86_64; do
+              lipo -info "$exe" | grep -q "$arch" || {
+                echo "::error::the console installer is missing the $arch slice"
+                exit 1
+              }
+            done
+          fi
+
       # ── the second macOS slice, and the universal binary ─────────────────────
       # ⚠ TWO FULL BUILDS IS THE PRICE OF A UNIVERSAL GUI INSTALLER, and it is not
       # avoidable from here: Slint's vendored Corrosion has no `CMAKE_OSX_ARCHITECTURES`
@@ -369,14 +440,19 @@ jobs:
         run: python -m unittest discover -s tests
 
       # Build the payload with THIS platform's arch only and pack the bundle, in
-      # one step: --bundle stages photon-installer + data/ + README.txt and picks
-      # zip/tar.gz per OS. Python is here for the BUILD TOOLING (the DSL emits the
-      # OBJs) — it is not a runtime or install-time dependency of what ships.
+      # one step: --bundle stages photon-installer + photon-installer-console +
+      # data/ + README.txt and picks zip/tar.gz per OS. Python is here for the
+      # BUILD TOOLING (the DSL emits the OBJs) — it is not a runtime or
+      # install-time dependency of what ships.
       # ⚠ `--installer-exe` IS PASSED ON macOS ONLY, and only because the lipo'd
       # binary is somewhere `find_installer_binary` does not look: it scans
       # `build*/` for `photon-installer[.exe]` and would happily stage the arm64-only
       # first pass. Everywhere else discovery is correct and the flag stays off —
-      # see the note on MSYS paths in the locate step.
+      # see the note on MSYS paths in the locate step. The CONSOLE binary is
+      # discovered on every platform (build-console/ is in the search list and
+      # classification is by content), so no --console-exe is passed anywhere —
+      # and make_release refuses a bundle without it, so the step above cannot be
+      # skipped silently.
       - name: Build platform bundle (own arch)
         shell: bash
         run: |

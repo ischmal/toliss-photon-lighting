@@ -235,10 +235,11 @@ endif()
 if(PHOTON_GUI)
     include(FetchContent)
 
-    # ⚠ STATIC, NOT SHARED — `build_bundle` ships exactly ONE executable plus
-    # `data/` and README.txt and cannot express a second file, so a slint_cpp DLL
-    # beside the binary has nowhere to go. It would also break the "runs from
-    # Downloads, from a USB stick" property the payload resolution depends on.
+    # ⚠ STATIC, NOT SHARED — every file in a bundle is an EXECUTABLE (the GUI,
+    # and since 2026-08-15 its console fallback) plus `data/` and README.txt; a
+    # slint_cpp DLL beside them is a file a user can delete, quarantine or fail
+    # to extract, and it would break the "runs from Downloads, from a USB stick"
+    # property the payload resolution depends on.
     # Saved and restored rather than set outright: FetchContent_MakeAvailable is an
     # add_subdirectory, so a bare `set` here would silently retarget anything
     # declared after this block too.
@@ -385,7 +386,10 @@ if(WIN32)
         # Slint build rather than a missing `-l`.
         #   opengl32 -> wglCreateContext, wglMakeCurrent, wglGetProcAddress, ...
         #   imm32    -> ImmGetContext, ImmSetCompositionWindow, ...
-        target_link_libraries(photon-installer PRIVATE opengl32 imm32)
+        # gdi32/user32 are OURS, not Slint's: the black-window remedies in
+        # gui.cpp probe a throwaway WGL context (ChoosePixelFormat/SetPixelFormat
+        # live in gdi32) and capture the window's pixels (PrintWindow, user32).
+        target_link_libraries(photon-installer PRIVATE opengl32 imm32 gdi32 user32)
     else()
         # A CONSOLE subsystem app: the TUI is a terminal UI, and a WIN32 subsystem
         # build would open with no console for it to draw in.

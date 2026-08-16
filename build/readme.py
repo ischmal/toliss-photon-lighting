@@ -6,17 +6,22 @@ One source of truth for the per-bundle READMEs so the three downloads
 ASCII art (lifted from `LogoArt()` in the installer's own screens.cpp) and the
 project links from build/constants.py, so nothing drifts.
 
-⚠ THERE IS ONE INSTALLER AND ONE KIND OF BUNDLE. The "Python" kind is gone with
-the Python-Universal download (docs/installer_cpp_plan.md §10 decision 1), and so
-is the paragraph naming a second executable. Every bundle now holds exactly one
-runnable file, which is the whole point: a README that has to explain which of two
-installers to run is a README describing a choice the user should never have been
-handed.
+⚠ ONE INSTALLER, TWO BUILDS, AND THE INSTALL STEPS NAME EXACTLY ONE OF THEM
+(2026-08-15). The bundle carries the GUI (`photon-installer`) and the console
+build (`photon-installer-console`), because the GUI renders through OpenGL and on
+a broken-GL machine (Remote Desktop, old drivers, VMs) it opens as a BLACK WINDOW
+that can explain nothing. The old rule — "a README that has to explain which of
+two installers to run is a README describing a choice the user should never have
+been handed" — still shapes the text: HOW TO INSTALL names only the GUI, and the
+console version appears under TROUBLESHOOTING, where the reader has already hit
+the one problem it exists for. (The "Python" second executable stays gone;
+docs/installer_cpp_plan.md §10 decision 1.)
 
 Kept pure-ASCII on purpose: a README.txt gets opened in Notepad and every other
 editor, so no smart quotes / arrows / dashes that can mojibake.
 
-    render("Windows", exe_name="photon-installer.exe", arch="win_x64")
+    render("Windows", exe_name="photon-installer.exe", arch="win_x64",
+           console_name="photon-installer-console.exe")
 """
 from __future__ import annotations
 
@@ -83,8 +88,8 @@ def _install_steps(kind: str, exe_name: str) -> list[str]:
             f"  2. Double-click  {exe_name}",
             "       If Windows SmartScreen appears (the app is not code-signed):",
             "       click  More info  >  Run anyway.",
-            "  3. Follow the on-screen steps (arrow keys / ENTER; ESC goes back).",
-            "     It auto-detects X-Plane 12; pick your aircraft and wing variant.",
+            "  3. Follow the on-screen steps. It auto-detects X-Plane 12; pick",
+            "     your aircraft and wing variant.",
         ]
     if kind == "macOS":
         return [
@@ -95,8 +100,8 @@ def _install_steps(kind: str, exe_name: str) -> list[str]:
             f"       (Double-clicking {exe_name} in Finder also works - it opens in",
             "        Terminal.) The app is not notarized, so if Gatekeeper blocks it:",
             f"        right-click > Open, or run:  xattr -d com.apple.quarantine {exe_name}",
-            "  3. Follow the on-screen steps (arrow keys / ENTER; ESC goes back).",
-            "     It auto-detects X-Plane 12; pick your aircraft and wing variant.",
+            "  3. Follow the on-screen steps. It auto-detects X-Plane 12; pick",
+            "     your aircraft and wing variant.",
         ]
     if kind == "Linux":
         return [
@@ -105,31 +110,66 @@ def _install_steps(kind: str, exe_name: str) -> list[str]:
             "     the data/ folder together - the installer reads data/ from beside it.",
             f"  2. Open a terminal in this folder and run:   ./{exe_name}",
             f"       (If it is not executable:  chmod +x {exe_name})",
-            "  3. Follow the on-screen steps (arrow keys / ENTER; ESC goes back).",
-            "     It auto-detects X-Plane 12; pick your aircraft and wing variant.",
+            "  3. Follow the on-screen steps. It auto-detects X-Plane 12; pick",
+            "     your aircraft and wing variant.",
         ]
     raise ValueError(f"unknown bundle kind {kind!r} - expected Windows/macOS/Linux")
 
 
-def _contents(kind: str, exe_name: str, arch: str | None) -> list[str]:
+def _contents(kind: str, exe_name: str, arch: str | None,
+              console_name: str | None) -> list[str]:
     """⚠ THIS LIST IS A CONTRACT WITH THE BUNDLE, not prose. It described a
     `dsl/` folder for one release after that folder stopped being staged (the
     installer no longer needs the toolchain at install time), which reads to a
     user as a download missing a piece. It then described a second installer for
     the length of the C++ transition. Change it in the same commit as
     make_release.build_bundle whenever the layout moves."""
-    return [
+    out = [
         "WHAT'S INCLUDED",
         f"  {exe_name}   the installer (self-contained - no Python needed)",
+    ]
+    if console_name:
+        out.append(f"  {console_name}   the same installer as a console")
+        out.append("               (text-mode) program - see TROUBLESHOOTING")
+    out += [
         "  data/        the files it installs:",
         "    objs/      pre-built light objects (wing variants x airframes)",
         "    textures/  cockpit textures for the interior mod (by Gus)",
         f"    plugin/    the native X-Plane plugin (this build: {arch or 'this platform'})",
         "    plugindata/  the plugin's own runtime data (panel effects)",
     ]
+    return out
 
 
-def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -> str:
+def _troubleshooting(kind: str, exe_name: str, console_name: str | None) -> list[str]:
+    """The black-window section — the reason the console build ships at all.
+
+    ⚠ IT NAMES THE SYMPTOM FIRST. A user staring at a black window searches the
+    README for the word "black", not for "renderer" or "console"."""
+    run = console_name if kind == "Windows" else f"./{console_name}"
+    sw = exe_name if kind == "Windows" else f"./{exe_name}"
+    out = [
+        "TROUBLESHOOTING",
+        "  If the installer opens as a BLACK OR BLANK WINDOW (this can happen over",
+        "  Remote Desktop, in a VM, or with old graphics drivers - the window is",
+        "  drawn by the GPU and some setups cannot do that):",
+    ]
+    if console_name:
+        out += [
+            f"    * Run  {run}",
+            "      instead. It is the SAME installer as a text-mode program in a",
+            "      console window - same steps, same result.",
+        ]
+    out += [
+        f"    * Or run  {sw} --software",
+        "      from a terminal, which draws the normal installer window on the",
+        "      CPU instead of the GPU.",
+    ]
+    return out
+
+
+def render(kind: str, *, exe_name: str | None = None, arch: str | None = None,
+           console_name: str | None = None) -> str:
     """Full README.txt text for one bundle. `kind` in {Windows, macOS, Linux}."""
     exe_name = exe_name or ""
     lines: list[str] = []
@@ -159,7 +199,9 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
         "  Close X-Plane before installing.",
         "",
     ]
-    lines += _contents(kind, exe_name, arch)
+    lines += _troubleshooting(kind, exe_name, console_name)
+    lines += [""]
+    lines += _contents(kind, exe_name, arch, console_name)
     lines += [
         "",
         "REQUIREMENTS",
@@ -188,6 +230,7 @@ def render(kind: str, *, exe_name: str | None = None, arch: str | None = None) -
 
 if __name__ == "__main__":  # quick manual preview: python build/readme.py [kind]
     k = sys.argv[1] if len(sys.argv) > 1 else "Windows"
-    txt = render(k, exe_name="photon-installer" + (".exe" if k == "Windows" else ""),
-                 arch="win_x64")
+    ext = ".exe" if k == "Windows" else ""
+    txt = render(k, exe_name="photon-installer" + ext, arch="win_x64",
+                 console_name="photon-installer-console" + ext)
     sys.stdout.buffer.write(txt.encode("utf-8"))
