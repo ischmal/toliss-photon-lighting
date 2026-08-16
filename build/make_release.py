@@ -6,11 +6,31 @@ Pre-builds the 9 OBJs (3 wing variants x 3 airframes) and stages the compiled
 native plugin, so the end-user installer needs neither the DSL toolchain nor a C++
 toolchain.
 
-⚠ THERE IS ONE INSTALLER AND IT IS COMPILED: `photon-installer`. The Python one is
-GONE — `install.py`, `installer/`, `build/make_exe.py`, the PyInstaller dependency,
-the Python-Universal bundle and the parity harness were all deleted on 2026-08-09
-(docs/installer_cpp_plan.md §9). The line to hold: a bundle carries exactly one
-executable, so no user is ever told which of two to run.
+⚠ THERE IS ONE INSTALLER, COMPILED, IN TWO BUILDS — and a bundle now carries BOTH
+(2026-08-15). `photon-installer` is the Slint GUI, the thing users double-click;
+`photon-installer-console` is the SAME installer compiled without the GUI
+(PHOTON_GUI=OFF): the full-screen terminal wizard, same flow, same actions, same
+payload. It ships because the GUI renders through OpenGL and on a machine where GL
+is broken-but-present (Remote Desktop, old drivers, VMs) the GUI opens as a BLACK
+WINDOW — at which point the user cannot be told anything by the GUI itself, and
+the console binary is the one that always works. The README's install steps still
+name exactly one thing to double-click; the console version appears only under
+TROUBLESHOOTING, so nobody is handed a choice unless the first choice failed.
+(The GUI binary also embeds the terminal UI behind `--tui` and a CPU renderer
+behind `--software`, but a user staring at a black window discovers neither flag —
+a second .exe with "console" in its name is the discoverable fallback.)
+
+The Python installer is still GONE — `install.py`, `installer/`,
+`build/make_exe.py`, the PyInstaller dependency, the Python-Universal bundle and
+the parity harness were all deleted on 2026-08-09 (docs/installer_cpp_plan.md §9).
+
+⚠ WHICH BINARY IS WHICH IS DECIDED BY CONTENT, NEVER BY FOLDER. Both builds emit a
+file called `photon-installer[.exe]`, and which tree holds which FRONT-END differs
+by machine: locally `build/` is deploy.ps1's tree (no GUI) while `build-gui/` has
+the GUI; on CI `build/` IS the GUI tree. A location rule already shipped the wrong
+front-end once (see release.yml's history). The GUI links Slint, whose backend
+selector embeds the literal `SLINT_BACKEND`; the console build cannot contain it.
+`installer_is_gui` reads the bytes.
 
 ⚠ THIS SCRIPT IS STILL PYTHON, AND THAT IS NOT A LEFTOVER. It runs at BUILD time,
 where the DSL toolchain lives; what the port removed was Python at INSTALL time. Its
@@ -62,7 +82,8 @@ platform's download; CI runs the same command on each of the three runners):
 
     release/ToLissPhoton-Installer-v<VER>-<Windows|macOS|Linux>[.zip|.tar.gz]
       └ ToLissPhoton-Installer-v<VER>-<OS>/
-          photon-installer[.exe]   the installer
+          photon-installer[.exe]           the installer (GUI)
+          photon-installer-console[.exe]   the console version (black-window fallback)
           data/                    objs/ + textures/ + plugin/<arch> + plugindata/
                                    + realwings_patch.json
           README.txt
@@ -146,6 +167,16 @@ PLUGIN_SOURCE_PATHS = (
     REPO / "src" / "native" / "CMakeLists.txt",
 )
 
+# ⚠ `src/installer/` is EXCLUDED from the freshness comparison: it is compiled
+# into `photon-installer` only, never the `.xpl` (CMakeLists: ToLissPhoton =
+# plugin.cpp + imgui + sysmetrics + photoncore), so no plugin rebuild can ever
+# freshen the binary against an edit there — the check would fire on EVERY
+# installer change and stay red until an unrelated plugin source moved. A check
+# that always fires gets --allow-stale-plugin typed as a reflex, which is the
+# note above proven right: this fired on the first installer-only edit after it
+# shipped (2026-08-15).
+PLUGIN_SOURCE_EXCLUDE = (REPO / "src" / "native" / "src" / "installer",)
+
 # platform.system() -> the pretty OS name used in the bundle filename + README.
 OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}
 
@@ -169,16 +200,20 @@ def _rmtree(path: Path):
     shutil.rmtree(path, onexc=_force_writable)
 
 
-def _newest_mtime(paths) -> float:
+def _newest_mtime(paths, exclude=()) -> float:
     """The newest mtime across `paths`, walking directories. Missing paths are
-    skipped — a check that cannot see its inputs must not accuse the output."""
+    skipped — a check that cannot see its inputs must not accuse the output.
+    Files under any `exclude` directory are not counted."""
+    def excluded(f: Path) -> bool:
+        return any(x == f or x in f.parents for x in exclude)
+
     newest = 0.0
     for p in paths:
         if p.is_file():
             newest = max(newest, p.stat().st_mtime)
         elif p.is_dir():
             for f in p.rglob("*"):
-                if f.is_file():
+                if f.is_file() and not excluded(f):
                     newest = max(newest, f.stat().st_mtime)
     return newest
 
@@ -328,7 +363,7 @@ def check_plugin_freshness(plugin_dir: Path, arches, allow_stale: bool):
     not in that list. `--allow-stale-plugin` exists for the one legitimate case:
     `--plugin-dir` pointed at a merged multi-arch folder assembled from downloaded
     CI artifacts, whose mtimes mean nothing about this checkout."""
-    newest_src = _newest_mtime(PLUGIN_SOURCE_PATHS)
+    newest_src = _newest_mtime(PLUGIN_SOURCE_PATHS, PLUGIN_SOURCE_EXCLUDE)
     if newest_src == 0.0:
         return                      # cannot see the sources; do not accuse
     stale = [(a, (plugin_dir / a / XPL_NAME).stat().st_mtime) for a in arches]
@@ -444,48 +479,95 @@ def stage_realwings_patch(payload: Path):
 
 # Where CMake leaves the compiled installer, per generator. Multi-config
 # generators (MSVC, Xcode) nest by configuration; single-config ones do not.
+# ⚠ THE FOLDER SAYS NOTHING ABOUT THE FRONT-END — locally `build/` is the no-GUI
+# deploy tree and `build-gui/` the GUI; on CI `build/` is the GUI tree and
+# `build-console/` the other. Every candidate is CLASSIFIED by content
+# (`installer_is_gui`) and the search below simply takes the first of each kind.
 INSTALLER_EXE_NAMES = ("photon-installer.exe", "photon-installer")
+# ⚠ THE DEDICATED INSTALLER TREES COME BEFORE `build/`. The deploy tree also
+# compiles a (console) photon-installer as a side effect of the plugin build,
+# but nothing keeps it fresh — run-installer.ps1 rebuilds build-gui/build-core
+# on every run and only ever builds `--target ToLissPhoton` in build/. Searched
+# first, build/'s copy shadowed a just-built build-core binary with one from
+# whenever the whole deploy tree last compiled.
 INSTALLER_BUILD_DIRS = (
-    REPO / "src" / "native" / "build",
+    REPO / "src" / "native" / "build-gui",
     REPO / "src" / "native" / "build-core",
+    REPO / "src" / "native" / "build-console",
+    REPO / "src" / "native" / "build",
 )
 
+# What the console build is CALLED in a bundle. On disk both builds emit
+# `photon-installer`; the rename happens at staging time, and the binary does not
+# read its own name (the payload resolves from its directory, not its argv[0]).
+CONSOLE_EXE_NAMES = {"photon-installer.exe": "photon-installer-console.exe",
+                     "photon-installer": "photon-installer-console"}
 
-def find_installer_binary(explicit: Path | None = None) -> Path | None:
-    """The compiled `photon-installer`, or None if it has not been built."""
+# ⚠ CONTENT, NEVER LOCATION. The GUI links Slint, whose backend selector embeds
+# this env-var name; a build without the GUI cannot contain it. The same
+# content-over-naming rule detection uses on aircraft folders, for the same
+# reason: a location rule already shipped the wrong front-end once (release.yml).
+GUI_BINARY_MARKER = b"SLINT_BACKEND"
+
+
+def installer_is_gui(exe: Path) -> bool:
+    return GUI_BINARY_MARKER in exe.read_bytes()
+
+
+def find_installer_binary(explicit: Path | None = None,
+                          gui: bool = True) -> Path | None:
+    """The compiled `photon-installer` of the requested FRONT-END, or None.
+
+    `explicit` short-circuits the search but not the classification — callers
+    that must not mislabel a binary (the bundle) still check `installer_is_gui`
+    on what this returns."""
     if explicit is not None:
         return explicit if explicit.is_file() else None
     for base in INSTALLER_BUILD_DIRS:
         for sub in ("", "Release", "RelWithDebInfo"):
             for name in INSTALLER_EXE_NAMES:
                 p = base / sub / name if sub else base / name
-                if p.is_file():
+                if p.is_file() and installer_is_gui(p) == gui:
                     return p
     return None
 
 
-def stage_compiled_installer(out: Path, explicit: Path | None = None) -> Path | None:
-    """Stage the compiled `photon-installer` beside `payload/`.
+def stage_compiled_installer(out: Path, explicit: Path | None = None,
+                             console_explicit: Path | None = None
+                             ) -> tuple[Path | None, Path | None]:
+    """Stage BOTH compiled installers beside `payload/` — the GUI under its own
+    name, the console build renamed `photon-installer-console`.
 
-    ⚠ IT GOES NEXT TO `payload/`, NOT INSIDE IT. The binary resolves its payload
-    from its OWN directory rather than the working directory — that is what lets a
-    user run it from Downloads, from a USB stick, or from inside
-    Resources/plugins/ — so the two have to be siblings.
+    ⚠ THEY GO NEXT TO `payload/`, NOT INSIDE IT. The binary resolves its payload
+    from its OWN directory rather than the working directory — that is what lets
+    a user run it from Downloads, from a USB stick, or from inside
+    Resources/plugins/ — so all three have to be siblings.
 
-    Absent is only a warning HERE, where a contributor with no C++ toolchain may
-    still want a staged payload to develop against. ⚠ `--bundle` turns the same
-    condition into a hard error, because a bundle without the installer is a
-    download with nothing to run — see `build_bundle`."""
-    exe = find_installer_binary(explicit)
-    if exe is None:
-        print("  ! photon-installer not built — staged without it "
-              "(build it: cmake --build src/native/build --config Release)")
-        return None
-    dest = out / exe.name
-    shutil.copyfile(exe, dest)
-    dest.chmod(dest.stat().st_mode | 0o111)   # keep it executable on macOS/Linux
-    print(f"  staged {dest.name} ({exe.stat().st_size // 1024} KiB) from {exe}")
-    return dest
+    Absent is only a warning HERE, where a contributor with no C++ toolchain (or
+    no Rust, for the GUI) may still want a staged payload to develop against.
+    ⚠ `--bundle` turns the same conditions into hard errors — see `build_bundle`."""
+    def stage(exe: Path | None, label: str, rename: dict | None) -> Path | None:
+        if exe is None:
+            return None
+        dest = out / (rename.get(exe.name, exe.name) if rename else exe.name)
+        shutil.copyfile(exe, dest)
+        dest.chmod(dest.stat().st_mode | 0o111)   # executable on macOS/Linux
+        print(f"  staged {dest.name} ({exe.stat().st_size // 1024} KiB, {label}) "
+              f"from {exe}")
+        return dest
+
+    gui = stage(find_installer_binary(explicit, gui=True), "GUI", None)
+    if gui is None:
+        print("  ! photon-installer (GUI) not built — staged without it "
+              "(build it: cmake -B src/native/build-gui -DPHOTON_GUI=ON "
+              "-DPHOTON_CORE_ONLY=ON, then --build)")
+    console = stage(find_installer_binary(console_explicit, gui=False),
+                    "console", CONSOLE_EXE_NAMES)
+    if console is None:
+        print("  ! photon-installer-console not built — staged without it "
+              "(build it: cmake -B src/native/build-core -DPHOTON_GUI=OFF "
+              "-DPHOTON_CORE_ONLY=ON, then --build)")
+    return gui, console
 
 
 def payload_arch(payload: Path) -> str | None:
@@ -494,9 +576,12 @@ def payload_arch(payload: Path) -> str | None:
                  if d.is_dir() and d.name.endswith("_x64")), None)
 
 
-def stage_readme(out: Path, os_name: str, exe_name: str, arch: str | None):
+def stage_readme(out: Path, os_name: str, exe_name: str, arch: str | None,
+                 console_name: str | None = None):
     (out / "README.txt").write_text(
-        _readme.render(os_name, exe_name=exe_name, arch=arch), encoding="utf-8")
+        _readme.render(os_name, exe_name=exe_name, arch=arch,
+                       console_name=console_name),
+        encoding="utf-8")
     print(f"staged README.txt ({os_name})")
 
 
@@ -541,19 +626,49 @@ def _archive(folder: Path, base_name: str, fmt: str, out_dir: Path,
 
 
 def build_bundle(out: Path, payload: Path, exe: Path | None,
-                 base_name: str, fmt: str) -> Path:
+                 console: Path | None, base_name: str, fmt: str) -> Path:
     """Assemble and pack the distributable per-platform bundle:
-    <out>/<base_name>/{photon-installer[.exe], data/, README.txt}.
+    <out>/<base_name>/{photon-installer[.exe], photon-installer-console[.exe],
+    data/, README.txt}.
 
-    ⚠ A MISSING BINARY IS FATAL HERE. Staging a payload without one is a
-    reasonable dev state; shipping a download whose only executable is absent is
-    not, and the failure would surface as a user unzipping 60 MiB with nothing to
-    double-click."""
+    ⚠ A MISSING BINARY IS FATAL HERE — EITHER OF THEM. Staging a payload without
+    them is a reasonable dev state; shipping a download whose executable is
+    absent is not. And the console binary is the black-window fallback: a bundle
+    without it looks complete, installs fine, and strands exactly the user whose
+    GPU cannot draw the GUI — which is the report that made it part of the
+    bundle in the first place.
+
+    ⚠ THE TWO ARE CLASSIFIED BY CONTENT BEFORE THEY ARE NAMED. Both builds emit
+    `photon-installer[.exe]`; a mixed-up pair would ship a bundle whose
+    "console" binary opens a window (or whose GUI opens a terminal), report
+    success, and pass every size check. `installer_is_gui` is the arbiter, the
+    same way CI greps the configure log."""
     if exe is None:
         raise SystemExit(
-            "cannot build a bundle without photon-installer — build it first:\n"
-            "  cmake --build src/native/build --config Release\n"
+            "cannot build a bundle without photon-installer (the GUI) — build it:\n"
+            "  cmake -B src/native/build-gui -A x64 -DPHOTON_GUI=ON -DPHOTON_CORE_ONLY=ON\n"
+            "  cmake --build src/native/build-gui --config Release\n"
+            "(needs Rust >= 1.92; src/native/run-installer.ps1 does all of this)\n"
             "or pass --installer-exe at the binary.")
+    if console is None:
+        raise SystemExit(
+            "cannot build a bundle without photon-installer-console — build it:\n"
+            "  cmake -B src/native/build-core -A x64 -DPHOTON_GUI=OFF -DPHOTON_CORE_ONLY=ON\n"
+            "  cmake --build src/native/build-core --config Release\n"
+            "(no Rust needed; src/native/run-installer.ps1 -Tui does all of this)\n"
+            "or pass --console-exe at the binary.")
+    if not installer_is_gui(exe):
+        raise SystemExit(
+            f"{exe} does not contain the GUI (no Slint inside) — it is the console\n"
+            f"build. A bundle naming it photon-installer would ship a download that\n"
+            f"opens a terminal when double-clicked. Point --installer-exe at a\n"
+            f"PHOTON_GUI=ON build.")
+    if installer_is_gui(console):
+        raise SystemExit(
+            f"{console} contains the GUI — it is not the console build. A bundle\n"
+            f"naming it photon-installer-console would ship a 'fallback' that fails\n"
+            f"exactly when the GUI does. Point --console-exe at a PHOTON_GUI=OFF\n"
+            f"build.")
     stage = out / base_name
     if stage.exists():
         _rmtree(stage)
@@ -561,14 +676,19 @@ def build_bundle(out: Path, payload: Path, exe: Path | None,
     binary = stage / exe.name
     shutil.copy2(exe, binary)
     binary.chmod(binary.stat().st_mode | 0o111)
+    console_name = CONSOLE_EXE_NAMES.get(console.name, console.name)
+    console_binary = stage / console_name
+    shutil.copy2(console, console_binary)
+    console_binary.chmod(console_binary.stat().st_mode | 0o111)
     # ⚠ `data/`, not `payload/` — the name the download has always used and the
     # one its README documents. The binary accepts both (core/payload.cpp).
     shutil.copytree(payload, stage / "data")
     arch = payload_arch(payload)
     os_name = OS_NAME.get(platform.system(), platform.system())
-    stage_readme(stage, os_name, exe.name, arch)
-    archive = _archive(stage, base_name, fmt, out, {exe.name})
-    print(f"  bundle: {base_name}/ ({exe.name} + data/, arch: {arch or 'none'})")
+    stage_readme(stage, os_name, exe.name, arch, console_name=console_name)
+    archive = _archive(stage, base_name, fmt, out, {exe.name, console_name})
+    print(f"  bundle: {base_name}/ ({exe.name} + {console_name} + data/, "
+          f"arch: {arch or 'none'})")
     return archive
 
 
@@ -594,8 +714,12 @@ def main():
                          "refusing. For --plugin-dir folders built elsewhere "
                          "(merged CI artifacts), never as a way past a rebuild.")
     ap.add_argument("--installer-exe",
-                    help="the compiled photon-installer to stage (default: the "
-                         "CMake output under src/native/build*/)")
+                    help="the compiled photon-installer (GUI) to stage (default: "
+                         "found by content under src/native/build*/)")
+    ap.add_argument("--console-exe",
+                    help="the compiled console installer to stage as "
+                         "photon-installer-console (default: found by content "
+                         "under src/native/build*/)")
     args = ap.parse_args()
 
     # ⚠ ONE PAYLOAD LOCATION FOR EVERY MODE. --payload-only used to default here
@@ -652,15 +776,16 @@ def main():
     # ⚠ NO README AT THE STAGING ROOT. It documents `data/` beside the binary, and
     # this level has `payload/` — a README describing a layout the reader is not
     # looking at is worse than none. It is written into the bundle instead.
-    exe = stage_compiled_installer(
-        out, Path(args.installer_exe) if args.installer_exe else None)
+    exe, console = stage_compiled_installer(
+        out, Path(args.installer_exe) if args.installer_exe else None,
+        Path(args.console_exe) if args.console_exe else None)
 
     if args.bundle:
         os_name = OS_NAME.get(platform.system(), platform.system())
         base_name = args.name or f"ToLissPhoton-Installer-v{VERSION}-{os_name}"
         fmt = ("tgz" if platform.system() == "Linux" else "zip") \
             if args.format == "auto" else args.format
-        archive = build_bundle(out, payload, exe, base_name, fmt)
+        archive = build_bundle(out, payload, exe, console, base_name, fmt)
         print(f"\nplatform bundle ready: {archive} "
               f"({archive.stat().st_size / 1e6:.1f} MB)")
         return

@@ -117,6 +117,37 @@ class FlagOwnershipTests(unittest.TestCase):
         self.assertFalse(_dev_guarded("static bool gIsToLiss = false;"))
 
 
+class RecognitionTests(unittest.TestCase):
+    """⚠ THE BUG THIS CLOSES (2026-08-15, from a user report): `IsToLiss` matched
+    the string "toliss" in the aircraft's path — and nothing else. A user who
+    renamed their folder "A320_V1p3p2" got an installer that installed happily
+    (core/detect.cpp identifies by CONTENT, deliberately, to support renamed
+    folders) and a plugin that never woke up: no menu, no features, a support
+    report reading "ToLiss Photon doesn't even appear in the Plugins menu". The
+    two halves of the project must not disagree about what a ToLiss is."""
+
+    def test_recognition_does_not_stop_at_the_folder_name(self):
+        """The fallback is the same airframe fingerprint DetectInstall trusts —
+        `Airframe::objName` present under objects/ — so the gate and the
+        detector cannot recognize different sets of aeroplanes."""
+        body = _fn("IsToLiss")
+        self.assertIn('blob.find("toliss")', body,
+                      "the cheap name test is gone - it is the fast positive, "
+                      "not the whole answer")
+        self.assertIn("photon::Airframes()", body)
+        self.assertIn("af.objName", body)
+
+    def test_the_fallback_answers_presence_not_content(self):
+        """CONTENT of the fingerprint OBJ is DetectInstall's question (installed
+        vs. reverted); this gate only answers "is this aeroplane ours". A
+        content scan here would make a reverted install read as not-a-ToLiss —
+        no menu at all — where the designed answer is the Reinstall-required
+        menu."""
+        body = _fn("IsToLiss")
+        self.assertIn("is_regular_file", body)
+        self.assertNotIn("ScanObj", body)
+
+
 class GateExpressionTests(unittest.TestCase):
     """⚠ THE GATE IS ONE EXPRESSION OVER TWO FLAGS. Both halves are load-bearing
     and each fails in its own direction: without `gIsToLiss` Photon paints on

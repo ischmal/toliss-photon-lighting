@@ -2,7 +2,10 @@
 //
 // Two modes, decided by the arguments alone:
 //
-//   photon-installer                  the interactive TUI (docs/installer.md)
+//   photon-installer                  the interactive installer — the Slint GUI
+//                                     in a PHOTON_GUI build (`--tui` for the
+//                                     terminal UI, `--software` for CPU
+//                                     rendering), the TUI otherwise
 //   photon-installer <subcommand> …   headless, scriptable, `--json`
 //
 // ⚠ THE PAYLOAD IS RESOLVED FROM THE EXECUTABLE'S OWN PATH, never the working
@@ -165,14 +168,15 @@ int main(int argc, char** argv) {
     }
 
     // ─── the interactive installer ───────────────────────────────────────────
-    // Three arguments reach it. Two mirror the Python installer's: `--dry-run`
+    // Four arguments reach it. Two mirror the Python installer's: `--dry-run`
     // (log everything, write nothing) and `--xplane-root PATH` (skip
-    // auto-detection). `--tui` picks the terminal UI over the GUI. Anything else
-    // is a typo, and saying so beats silently opening a full-screen UI over the
-    // top of it.
+    // auto-detection). `--tui` picks the terminal UI over the GUI; `--software`
+    // makes the GUI render on the CPU. Anything else is a typo, and saying so
+    // beats silently opening a full-screen UI over the top of it.
     std::string xplaneRoot;
     bool dryRun = false;
     bool forceTui = false;
+    bool forceSoftware = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& a = args[i];
         if (a == "--dry-run") {
@@ -183,6 +187,10 @@ int main(int argc, char** argv) {
             // and a script or a support instruction that says "run it with
             // --tui" would fail on exactly the build where it is redundant.
             forceTui = true;
+        } else if (a == "--software") {
+            // Same rule as `--tui`: a support instruction that says "add
+            // --software" must not error on the console build.
+            forceSoftware = true;
         } else if (a == "--xplane-root" && i + 1 < args.size()) {
             xplaneRoot = args[++i];
         } else if (a.rfind("--xplane-root=", 0) == 0) {
@@ -195,11 +203,33 @@ int main(int argc, char** argv) {
     }
 
 #ifdef PHOTON_GUI
+    // ⚠ THE BLACK-WINDOW ESCAPE HATCH. The GUI renders through OpenGL (Slint's
+    // winit/FemtoVG backend), and on a machine where GL is present but broken —
+    // Remote Desktop, an old integrated-GPU driver, a VM, an overlay hook — the
+    // window opens and paints NOTHING: no error, just black. Slint's software
+    // renderer is compiled into this binary (its C++ build defaults
+    // SLINT_FEATURE_RENDERER_SOFTWARE=ON) and is selected by the SLINT_BACKEND
+    // environment variable, which the backend reads lazily on first use — so
+    // setting it here, before RunGui creates the App, is early enough.
+    //
+    // ⚠ SET THROUGH BOTH APIS ON WINDOWS. Slint is Rust and reads the OS
+    // environment block (GetEnvironmentVariableW); our own diagnostics read the
+    // CRT's copy (getenv). The two only sync one way at startup, so writing one
+    // of them leaves the other stale.
+    if (forceSoftware && !forceTui) {
+#ifdef _WIN32
+        ::SetEnvironmentVariableW(L"SLINT_BACKEND", L"software");
+        ::_putenv_s("SLINT_BACKEND", "software");
+#else
+        ::setenv("SLINT_BACKEND", "software", 1);
+#endif
+    }
     // The GUI is what a double-click gets. `--tui` is the way back to the
     // terminal UI, which is what an SSH session or a headless box still needs.
     if (!forceTui) return photon::installer::RunGui(xplaneRoot, dryRun);
 #else
     (void)forceTui;
+    (void)forceSoftware;
 #endif
 
     return photon::installer::RunTui(xplaneRoot, dryRun);

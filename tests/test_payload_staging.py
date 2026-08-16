@@ -75,11 +75,18 @@ class OnePayloadLocationTests(unittest.TestCase):
 
     def test_nothing_still_points_at_the_repo_root_payload(self):
         """A leftover `--payload-dir payload` in a doc or script is the same bug
-        again, wearing the old path."""
+        again, wearing the old path.
+
+        ⚠ docs/ is LOCAL-ONLY since 2026-08-15 (untracked as dev environment),
+        so a missing path is skipped rather than read: on CI this test crashed
+        with FileNotFoundError — which failed the whole v0.9 tag build — while
+        passing on every dev machine, where the folder still exists."""
         offenders = []
         for path in [MAKE_RELEASE, RUN_INSTALLER,
                      REPO / "docs" / "installer.md",
                      REPO / "src" / "native" / "README.md"]:
+            if not path.is_file():
+                continue
             for n, line in enumerate(
                     path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if re.search(r"--payload-dir\s+payload\b", line):
@@ -100,6 +107,18 @@ class PluginFreshnessTests(unittest.TestCase):
         listed = m.group(1)
         self.assertIn('"src" / "native" / "src"', listed)
         self.assertIn("CMakeLists.txt", listed)
+
+    def test_the_installer_tree_is_not_a_plugin_source(self):
+        """⚠ `src/installer/` is compiled into photon-installer only, never the
+        `.xpl`, so no plugin rebuild can freshen the binary against an edit
+        there — counted, the check fired on EVERY installer change (it did, on
+        2026-08-15, the first installer-only edit after it shipped) and a check
+        that always fires gets --allow-stale-plugin typed as a reflex."""
+        m = re.search(r"PLUGIN_SOURCE_EXCLUDE = \((.*?)\)", MR, re.S)
+        self.assertIsNotNone(m, "PLUGIN_SOURCE_EXCLUDE is gone")
+        self.assertIn('"installer"', m.group(1))
+        self.assertIn("_newest_mtime(PLUGIN_SOURCE_PATHS, PLUGIN_SOURCE_EXCLUDE)",
+                      MR)
 
     def test_the_dsl_is_not_a_plugin_source(self):
         """⚠ It is a PAYLOAD input, restaged every run, and its being newer says

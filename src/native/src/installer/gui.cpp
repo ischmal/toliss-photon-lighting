@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,6 +29,8 @@
 
 #ifdef _WIN32
 #    include <windows.h>
+
+#    include <GL/gl.h>
 
 #    include "../../res/resource.h"
 #endif
@@ -114,6 +118,282 @@ void ScheduleWindowIcon(int attemptsLeft) {
         if (ApplyWindowIcon() || attemptsLeft <= 1) return;
         ScheduleWindowIcon(attemptsLeft - 1);
     });
+}
+
+// ─── the OpenGL pre-flight probe ─────────────────────────────────────────────
+// The GUI renders through Slint's winit/FemtoVG backend — OpenGL — and the
+// machines that black-window it announce themselves before any Slint code runs:
+// Remote Desktop and driverless VMs hand out Microsoft's "GDI Generic" software
+// GL at version 1.1, below FemtoVG's 2.0 floor, and a machine with GL genuinely
+// broken fails wglCreateContext outright. Probing a throwaway context costs a
+// few ms and lets the installer pick the CPU renderer BY ITSELF instead of
+// opening a black window and waiting for the user to find a README.
+//
+// ⚠ THE PROBE CAN ONLY EVER ACCUSE THE DRIVER, NEVER ITSELF. Every failure of
+// the probe's own scaffolding (class registration, window creation) answers
+// "usable" — switching a healthy machine to CPU rendering because a probe
+// window failed to open would be the softer cousin of the ScanObj rule: a
+// transient error must not become a degraded session.
+struct GlProbeResult {
+    bool usable = true;
+    std::string detail;
+};
+
+GlProbeResult ProbeOpenGl() {
+    GlProbeResult r;
+    const wchar_t* kClassName = L"PhotonGlProbe";
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClassName;
+    if (!RegisterClassW(&wc)) return r;                       // scaffolding; do not accuse
+    HWND wnd = CreateWindowExW(0, kClassName, L"", WS_OVERLAPPED, 0, 0, 32, 32,
+                               nullptr, nullptr, wc.hInstance, nullptr);
+    if (wnd == nullptr) {
+        UnregisterClassW(kClassName, wc.hInstance);
+        return r;                                             // scaffolding; do not accuse
+    }
+
+    HDC dc = GetDC(wnd);
+    HGLRC ctx = nullptr;
+    PIXELFORMATDESCRIPTOR pfd{};
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+
+    const int format = dc != nullptr ? ChoosePixelFormat(dc, &pfd) : 0;
+    if (format == 0 || !SetPixelFormat(dc, format, &pfd) ||
+        (ctx = wglCreateContext(dc)) == nullptr || !wglMakeCurrent(dc, ctx)) {
+        // ⚠ From SetPixelFormat on this IS the driver talking: a machine that
+        // cannot stand up the simplest possible GL context will not stand up
+        // FemtoVG's either — it aborts inside Slint with no window at all.
+        r.usable = false;
+        r.detail = "OpenGL context creation failed";
+    } else {
+        const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+        const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+        const std::string ver = version != nullptr ? version : "";
+        const std::string ren = renderer != nullptr ? renderer : "";
+        r.detail = "GL_VERSION=" + (ver.empty() ? "?" : ver) +
+                   " GL_RENDERER=" + (ren.empty() ? "?" : ren);
+        // ⚠ TWO RULES, BOTH FROM THE FIELD, not a general capability check:
+        //   * "GDI Generic" is Microsoft's software GL 1.1 — what Remote
+        //     Desktop and a missing vendor driver serve. FemtoVG needs 2.0+.
+        //   * major < 2 catches the same floor when the renderer string is
+        //     something else. The leading digit is the major on every driver
+        //     ("4.6.0 NVIDIA ...", "1.1.0").
+        const int major = std::atoi(ver.c_str());
+        if (ren.find("GDI Generic") != std::string::npos) {
+            r.usable = false;
+        } else if (major > 0 && major < 2) {
+            r.usable = false;
+        }
+    }
+
+    if (ctx != nullptr) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(ctx);
+    }
+    if (dc != nullptr) ReleaseDC(wnd, dc);
+    DestroyWindow(wnd);
+    UnregisterClassW(kClassName, wc.hInstance);
+    return r;
+}
+
+// ⚠ BEFORE App::create(), WHICH IS THE POINT OF NO RETURN. Slint reads
+// SLINT_BACKEND lazily at first use and the backend is fixed for the life of
+// the process — there is no in-process switch afterwards (a failed renderer is
+// a Rust panic across the FFI, which aborts; it cannot be caught from C++).
+//
+// ⚠ AN EXPLICIT CHOICE ALWAYS WINS. `--software` (main.cpp) and a hand-set
+// SLINT_BACKEND both land in the env var this checks, so the probe only ever
+// fills silence — it never overrules a user, and it never runs on the path
+// where its answer is already known.
+void MaybeForceSoftwareRendering(FileLog* log) {
+    if (std::getenv("SLINT_BACKEND") != nullptr) return;
+    const GlProbeResult probe = ProbeOpenGl();
+    if (probe.usable) return;
+    ::SetEnvironmentVariableW(L"SLINT_BACKEND", L"software");
+    ::_putenv_s("SLINT_BACKEND", "software");
+    if (log != nullptr) {
+        log->Write("OpenGL probe: " + probe.detail +
+                       " - switching to software rendering (CPU)",
+                   "WARN");
+    }
+}
+
+// ─── the black-window watchdog ───────────────────────────────────────────────
+// The probe catches GL that ANNOUNCES its brokenness. The remaining class —
+// a driver that reports a healthy GL 4.x and composites nothing (hybrid-GPU
+// bugs, overlay hooks) — is only detectable by looking at the window, so that
+// is what this does: sample the actual pixels a few seconds after show(). The
+// splash draws a bright cyan logo and white text on every healthy frame, so an
+// ALL-black capture is not a judgment call.
+//
+// ⚠ THE ONLY POSSIBLE SWITCH IS A RELAUNCH. The backend is per-process (see
+// above), so on two consecutive black frames the installer starts itself again
+// with `--software` and exits. One-shot by construction: the child carries
+// PHOTON_SW_FALLBACK=1 and `--software` sets SLINT_BACKEND, and EITHER disarms
+// the watchdog — a fallback that can cascade is a process fork bomb with a
+// user attached.
+//
+// ⚠ "COULD NOT TELL" NEVER COUNTS AS BLACK. A failed capture, a minimized
+// window, a zero-area client — each is `unknown`, retried a bounded number of
+// times and then dropped. The relaunch fires only on POSITIVE evidence,
+// twice, because its false-positive cost (a flicker and a CPU-rendered
+// session on a healthy GPU) is paid by every user it misjudges.
+constexpr int kBlackCheckFirstMs = 2000;   // first look: past show + first paints
+constexpr int kBlackCheckAgainMs = 1200;   // between strikes and unknown retries
+constexpr int kBlackCheckAttempts = 6;     // total looks before giving up
+constexpr int kBlackStrikesNeeded = 2;     // consecutive all-black captures
+constexpr char kFallbackGuardEnv[] = "PHOTON_SW_FALLBACK";
+
+enum class FrameLook { bright, black, unknown };
+
+// The window the frame draws — same identification rule as ApplyWindowIcon:
+// visible, titled, unowned, on this thread.
+HWND FindMainWindow() {
+    HWND found = nullptr;
+    EnumThreadWindows(
+        GetCurrentThreadId(),
+        [](HWND wnd, LPARAM param) -> BOOL {
+            if (GetWindow(wnd, GW_OWNER) != nullptr || !IsWindowVisible(wnd)) return TRUE;
+            if (GetWindowTextLengthW(wnd) == 0) return TRUE;
+            *reinterpret_cast<HWND*>(param) = wnd;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+FrameLook SampleWindow(HWND wnd) {
+    if (IsIconic(wnd)) return FrameLook::unknown;
+    RECT rc{};
+    if (!GetClientRect(wnd, &rc)) return FrameLook::unknown;
+    const int w = rc.right;
+    const int h = rc.bottom;
+    if (w < 8 || h < 8) return FrameLook::unknown;
+
+    HDC winDc = GetDC(wnd);
+    if (winDc == nullptr) return FrameLook::unknown;
+    HDC memDc = CreateCompatibleDC(winDc);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;   // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = memDc != nullptr
+                      ? CreateDIBSection(winDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0)
+                      : nullptr;
+
+    FrameLook look = FrameLook::unknown;
+    if (bmp != nullptr && bits != nullptr) {
+        HGDIOBJ old = SelectObject(memDc, bmp);
+        // ⚠ PW_RENDERFULLCONTENT, NOT A PLAIN BitBlt: it asks DWM for the
+        // composited surface, which is the only capture that reliably contains
+        // GL-presented content. A plain window-DC blit can return black for a
+        // perfectly healthy GL window — the false positive this whole design
+        // must not have.
+        if (PrintWindow(wnd, memDc, PW_RENDERFULLCONTENT)) {
+            const auto* px = static_cast<const std::uint32_t*>(bits);
+            const int stepX = w > 32 ? w / 32 : 1;
+            const int stepY = h > 32 ? h / 32 : 1;
+            bool bright = false;
+            for (int y = 0; y < h && !bright; y += stepY) {
+                for (int x = 0; x < w; x += stepX) {
+                    const std::uint32_t p = px[static_cast<std::size_t>(y) *
+                                               static_cast<std::size_t>(w) + x];
+                    // Any channel clear of near-black. The darkest thing the
+                    // design paints is well above this; a dead GL surface is
+                    // uniformly ~0.
+                    if (((p >> 16) & 0xFF) > 40 || ((p >> 8) & 0xFF) > 40 ||
+                        (p & 0xFF) > 40) {
+                        bright = true;
+                        break;
+                    }
+                }
+            }
+            look = bright ? FrameLook::bright : FrameLook::black;
+        }
+        SelectObject(memDc, old);
+    }
+    if (bmp != nullptr) DeleteObject(bmp);
+    if (memDc != nullptr) DeleteDC(memDc);
+    ReleaseDC(wnd, winDc);
+    return look;
+}
+
+bool RelaunchWithSoftwareRendering() {
+    wchar_t exe[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return false;
+    // The ORIGINAL command line plus the flag, so --dry-run / --xplane-root
+    // survive the hop. The guard env is set on OUR environment first and
+    // inherited, which is what makes the fallback one-shot.
+    std::wstring cmd = GetCommandLineW();
+    cmd += L" --software";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(L'\0');
+    ::SetEnvironmentVariableW(L"PHOTON_SW_FALLBACK", L"1");
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe, buf.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        nullptr, &si, &pi)) {
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+void ScheduleBlackWindowCheck(FileLog* log, int attemptsLeft, int strikes) {
+    slint::Timer::single_shot(
+        std::chrono::milliseconds(attemptsLeft == kBlackCheckAttempts
+                                      ? kBlackCheckFirstMs
+                                      : kBlackCheckAgainMs),
+        [log, attemptsLeft, strikes] {
+            HWND wnd = FindMainWindow();
+            if (wnd == nullptr) return;   // nothing to sample; give up quietly
+            switch (SampleWindow(wnd)) {
+                case FrameLook::bright:
+                    return;               // healthy — done for the session
+                case FrameLook::unknown:
+                    if (attemptsLeft > 1) {
+                        ScheduleBlackWindowCheck(log, attemptsLeft - 1, strikes);
+                    }
+                    return;
+                case FrameLook::black:
+                    break;
+            }
+            if (strikes + 1 < kBlackStrikesNeeded) {
+                if (attemptsLeft > 1) {
+                    ScheduleBlackWindowCheck(log, attemptsLeft - 1, strikes + 1);
+                }
+                return;
+            }
+            if (log != nullptr) {
+                log->Write("window painted black " +
+                               std::to_string(kBlackStrikesNeeded) +
+                               " times - relaunching with --software (CPU rendering)",
+                           "WARN");
+            }
+            if (RelaunchWithSoftwareRendering()) {
+                slint::quit_event_loop();
+            } else if (log != nullptr) {
+                log->Write("relaunch failed - run photon-installer --software or "
+                           "photon-installer-console by hand",
+                           "ERROR");
+            }
+        });
 }
 #endif  // _WIN32
 
@@ -1261,6 +1541,27 @@ void GoBack(Gui& g) {
 }  // namespace
 
 int RunGui(const std::string& xplaneRootOverride, bool dryRun) {
+    // ⚠ THE LOG EXISTS BEFORE THE UI, because the renderer decisions below are
+    // made before the UI and belong on the record — a black-window report's
+    // log is often the only readable thing the session produced.
+    auto fileLog = std::make_unique<FileLog>(kPhotonVersion, dryRun);
+
+#ifdef _WIN32
+    // The pre-flight probe, BEFORE App::create() — the backend reads
+    // SLINT_BACKEND lazily at first use, and that first use is next.
+    MaybeForceSoftwareRendering(fileLog.get());
+#endif
+
+    // Which renderer this session asked for, on the record. The default (GPU,
+    // FemtoVG/OpenGL) says nothing; a black-window report with no such line is a
+    // GL failure, and one WITH it means even the CPU path went wrong — the first
+    // question support has to answer, and the window itself may be unreadable.
+    // (`--software` in main.cpp and the probe above both set the variable
+    // through both env APIs, which is what makes getenv see it here.)
+    if (const char* backend = std::getenv("SLINT_BACKEND")) {
+        fileLog->Write(std::string("renderer requested: SLINT_BACKEND=") + backend);
+    }
+
     auto app = App::create();
     // Aggregate init: `ComponentHandle` has no default constructor, so `ui` and
     // the weak handle beside it have to be supplied here rather than assigned.
@@ -1270,7 +1571,7 @@ int RunGui(const std::string& xplaneRootOverride, bool dryRun) {
     // it compiles to "as_weak is not a member of App".
     Gui g{app, slint::ComponentWeakHandle<App>(app)};
     g.dryRun = dryRun;
-    g.fileLog = std::make_unique<FileLog>(kPhotonVersion, dryRun);
+    g.fileLog = std::move(fileLog);
 
     g.ui->set_version(slint::SharedString(std::string("Version ") + kPhotonVersion));
     g.ui->set_dry_run(dryRun);
@@ -1435,6 +1736,16 @@ int RunGui(const std::string& xplaneRootOverride, bool dryRun) {
     g.ui->show();
 #ifdef _WIN32
     ScheduleWindowIcon(kIconAttempts);
+    // ⚠ THE WATCHDOG ARMS ONLY ON THE SILENT GPU PATH. SLINT_BACKEND set means
+    // either an explicit choice (--software, a hand-set env) or the probe
+    // already switching to software — sampling a CPU-rendered window for GL
+    // failure is noise, and it is also what makes the relaunch one-shot from
+    // this side (the child runs with --software, so it never arms). The guard
+    // env is the second, independent shot-limiter.
+    if (std::getenv("SLINT_BACKEND") == nullptr &&
+        std::getenv(kFallbackGuardEnv) == nullptr) {
+        ScheduleBlackWindowCheck(g.fileLog.get(), kBlackCheckAttempts, 0);
+    }
 #else
     // Everywhere else Slint's own property is the right mechanism; on Linux it is
     // the ONLY one. See the note on `window-icon` in app.slint.

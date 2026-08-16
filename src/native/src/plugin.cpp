@@ -3445,12 +3445,35 @@ static void DestroyPhotonMenu() {   // not DestroyMenu: collides with the Win32 
 }
 
 // =========================== ToLiss detection ================================
+// ⚠ NAME FIRST, CONTENT AS THE FALLBACK — the name test alone was a field bug
+// (2026-08-15). A user renamed their aircraft folder "A320_V1p3p2", so no
+// "toliss" appeared anywhere in the path or the .acf name — and the INSTALLER,
+// which identifies aircraft by CONTENT (core/detect.cpp, deliberately, to
+// support renamed folders and sub-hangars), installed into it without a
+// murmur. This gate then never fired: no menu, no features, nothing in the
+// Plugins menu at all, which reads as "the plugin is not working" and produced
+// exactly that support report. The two halves of the project must not disagree
+// about what a ToLiss is.
+//
+// The fallback is the airframe fingerprint DetectInstall already trusts:
+// `Airframe::objName` present under the aircraft's objects/ folder. Presence
+// is enough here — CONTENT of that OBJ is DetectInstall's question (installed
+// vs. reverted), and this function only answers "is this aeroplane ours to
+// care about". A few fs::exists per AIRCRAFT LOAD, never per frame:
+// UpdateMenuVisibility is the only caller.
 static bool IsToLiss() {
     char fileName[512] = {0}, path[512] = {0};
     XPLMGetNthAircraftModel(0, fileName, path);
     std::string blob = std::string(path) + "|" + fileName;
     for (char& c : blob) c = (char)std::tolower((unsigned char)c);
-    return blob.find("toliss") != std::string::npos;
+    if (blob.find("toliss") != std::string::npos) return true;
+    if (!path[0]) return false;
+    const fs::path objects = fs::path(path).parent_path() / "objects";
+    for (const photon::Airframe& af : photon::Airframes()) {
+        std::error_code ec;
+        if (fs::is_regular_file(objects / af.objName, ec)) return true;
+    }
+    return false;
 }
 
 // ========================= install detection =================================

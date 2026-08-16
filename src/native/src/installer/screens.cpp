@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -20,6 +21,7 @@
 #include "core/fsutil.h"
 #include "core/payload.h"
 #include "core/version.h"
+#include "core/wingmod.h"
 #include "installer/log.h"
 #include "installer/platform.h"
 #include "installer/tui.h"
@@ -403,6 +405,39 @@ std::string ActionLabel(const detect::Aircraft& ac, const std::string& wing) {
     return Paren(base, from);
 }
 
+// Which wing variant to preselect for a FRESH install, from what is actually
+// drawing on this aircraft — the GUI's `SeedWing`, ported so a console user gets
+// the same default (docs/installer.md §Wing-mod detection). Same three rules:
+// it is a default the user can overrule (the menu is right there), it is clamped
+// to what the airframe offers, and the verdict is logged because a preselected
+// row explains itself to nobody.
+//
+// Synchronous, unlike the GUI's WingProbe: the check reads the `.acf` variants
+// and both wing OBJs (~13 MB), which in a click handler is a window that does not
+// repaint — but this caller renders a "checking" frame FIRST, and a terminal
+// screen that says what it is doing is allowed to take the beat.
+std::string SeedWing(const detect::Aircraft& ac) {
+    const std::vector<std::string>& wings = WingsFor(ac.airframe);
+    if (wings.size() <= 1) return "stock";
+    // Answered once per aircraft, like the GUI's `done` map: ESC from a later
+    // step re-enters this screen, and re-reading 13 MB to re-offer the same
+    // default would put the "checking" beat on every Back press.
+    static std::map<std::string, std::string> answered;
+    const auto it = answered.find(ac.path);
+    if (it != answered.end()) return it->second;
+    tui::Render(kStageConfigure,
+                {"", tui::Step("Step 3.  Checking the aircraft…"), "",
+                 std::string(C::kDim) +
+                     "Looking at which wing mod is actually installed…" + C::kReset});
+    const wingmod::Result wm = wingmod::Detect(ac.path, ac.airframe);
+    const std::string want = wm.determined ? wm.wing : std::string("stock");
+    const bool offered = std::find(wings.begin(), wings.end(), want) != wings.end();
+    const std::string seed = offered ? want : std::string("stock");
+    LogLine("action: " + wm.summary + " - preselecting " + WingLabel(seed));
+    answered[ac.path] = seed;
+    return seed;
+}
+
 std::string ScreenAction(const detect::Aircraft& ac) {
     const std::string step = "Step 3.  What would you like to do to " + ac.folder +
                              " (" + ac.name + " v" + ac.acVer + ")?";
@@ -427,10 +462,13 @@ std::string ScreenAction(const detect::Aircraft& ac) {
 
     // With Photon already installed, default the highlight to the currently-
     // installed wing variant so a reinstall lands on the obvious choice; a fresh
-    // install defaults to the first option.
+    // install defaults to what the wing-mod probe says is actually drawing —
+    // the same seed the GUI's Features screen opens on.
     int defaultIdx = 0;
-    if (!ac.photon.empty()) {
-        const std::string w = ac.wing.empty() ? "stock" : ac.wing;
+    const std::string w = !ac.photon.empty()
+                              ? (ac.wing.empty() ? std::string("stock") : ac.wing)
+                              : SeedWing(ac);
+    {
         const auto it = std::find(wings.begin(), wings.end(), w);
         if (it != wings.end()) defaultIdx = static_cast<int>(it - wings.begin());
     }
@@ -455,6 +493,14 @@ std::string ScreenAction(const detect::Aircraft& ac) {
 // releases the files); a loaded `.xpl` is memory-mapped and locked, so it is the
 // one artifact that cannot be swapped while the sim is up.
 void ScreenCheckNotRunning(const std::string& action, const std::string& xplaneRoot) {
+    // ⚠ A DRY RUN WRITES NOTHING AT ALL, so there is no locked file to collide
+    // with — and a dry run is exactly what you do WHILE the sim is open. The GUI
+    // skips the wait for the same reason (gui.cpp, WaitForXplaneToClose), and
+    // this gate used to be the one place the two front-ends disagreed.
+    if (gDryRun) {
+        LogLine("dry run - skipping the close-X-Plane wait (nothing is written)");
+        return;
+    }
     // ⚠ RENDER BEFORE THE COMPARISON. `PluginIsCurrent` reads two files
     // byte-for-byte and can take a beat on a network drive; without this the
     // previous screen sits frozen with no feedback and reads as a hang.
