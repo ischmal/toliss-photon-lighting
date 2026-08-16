@@ -46,6 +46,17 @@ struct Airframe {
     // are mutually exclusive, so order between airframes is irrelevant.
     const char* cfgModule;   // "/A319/"
     const char* cfgName;     // "A319"
+    // ⚠ CORROBORATION FOR A GENERIC FINGERPRINT, empty for a model-specific
+    // one. `ExternalLights_XP12.obj` is ToLiss's own name for EVERY newer-
+    // generation airframe's exterior lights OBJ — the A340 ships it too, so
+    // presence alone misdetected an A340 as the A330-900 and let the installer
+    // modify it with a339 payloads (field report, 2026-08-16). When set, the
+    // objName fingerprint counts only if an `.acf` in the folder stamps this
+    // `acf/_ICAO` (the four ToLiss airframes here stamp A319/A20N/A321/A339 —
+    // read from the shipped files, like the FxFamilyForIcao list). The plugin
+    // corroborates through the sim's own ICAO dataref instead — same value,
+    // same equality.
+    const char* acfIcao = "";
 };
 
 const std::vector<Airframe>& Airframes();
@@ -188,6 +199,16 @@ bool PluginPathIsUserOwned(const std::string& relPosix);
 // itself and never after following it.
 constexpr char kPanelFxFile[] = "panelfx.txt";
 constexpr char kPluginDataDirName[] = "plugindata";
+
+// ─── the plugin's prefs file ─────────────────────────────────────────────────
+// `<X-Plane>/Output/preferences/ToLissPhoton_profiles.json` — WRITTEN by the
+// plugin only. The installer READS it for exactly one thing: the "$cockpit"
+// block's cockpit-light intensity multiplier, which it re-applies to a freshly
+// staged `lights_inn.obj` so a reinstall does not silently reset the user's
+// brightness (core/patch_intensity.h). The names live here because two halves
+// that each spelled them out is how a reader and a writer drift apart.
+constexpr char kProfilesJsonName[] = "ToLissPhoton_profiles.json";
+constexpr char kPrefsCockpitKey[] = "$cockpit";
 
 // ─── the OBJ version marker ──────────────────────────────────────────────────
 // `# ToLissPhoton version: X wing: Y`, injected after the OBJ's POINT_COUNTS line.

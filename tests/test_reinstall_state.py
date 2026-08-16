@@ -194,11 +194,22 @@ class DetectTests(unittest.TestCase):
         """Airframe::objName is a FINGERPRINT (core/constants.h), so the exterior
         OBJ that is present both names the aeroplane and is the file whose
         contents answer whether we are still installed on it. One read, both
-        answers — and it is why the detector needs no ICAO."""
+        answers.
+
+        ⚠ Since 2026-08-16 the ICAO is read too — but ONLY to corroborate a row
+        whose fingerprint is generic (Airframe::acfIcao, the a339's
+        ExternalLights_XP12.obj, which an A340 also carries). It must stay a
+        guarded veto, never the identifier: only a POSITIVE mismatch may reject,
+        because DetectInstall runs once per load with no 1 Hz retry, and an
+        empty read rejecting would keep a genuine A339 dark all session."""
         body = _code(_fn("DetectInstall"))
         self.assertIn("photon::Airframes()", body)
         self.assertIn("af.objName", body)
-        self.assertNotIn("AircraftIcao()", body)
+        # the corroboration: gated on the row asking for it, and fail-open on
+        # an empty read — the same "evidence may disable, its absence may not"
+        # rule as ScanObj's kObjUnreadable.
+        self.assertIn("af.acfIcao[0] != '\\0'", body)
+        self.assertIn("!icao.empty()", body)
 
     def test_presence_and_content_are_two_separate_questions(self):
         """⚠ Folding them into one scan would make "present but unreadable"

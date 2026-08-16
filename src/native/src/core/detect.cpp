@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <set>
 
 #include "core/constants.h"
@@ -54,6 +55,51 @@ std::string UpperCopy(const std::string& s) {
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     return out;
+}
+
+// Does any `.acf` in the aircraft folder stamp `P acf/_ICAO <want>`? The
+// corroboration behind `Airframe::acfIcao` — the file's own model identity,
+// the same content-over-naming rule as the format stamp `acf::FormatVersion`
+// reads. Any variant may answer: all four of a ToLiss folder's `.acf` files
+// carry the same ICAO, and this is identification, not patching, so the
+// XP11-pair rule does not apply.
+//
+// STREAMED, not ReadFileBytes: the property block is sorted, so `acf/_ICAO`
+// sits tens of thousands of lines into a 20-50 MB file, and whole-file reads
+// of all four variants would be most of a detection scan's I/O for one field.
+// Stops at the stamp or at PROPERTIES_END.
+//
+// ⚠ `.acf` EXACTLY — both wing mods leave `*.acf.bak` and
+// `*.acf.durantula.bak` copies behind forever, and a stale copy's ICAO is
+// exactly what this must not answer from. (`EndsWith(".acf")` excludes them.)
+bool FolderHasAcfIcao(const std::string& folderUtf8, const char* want) {
+    constexpr char kIcaoProp[] = "P acf/_ICAO ";
+    const std::string wantUpper = UpperCopy(want);
+    const fs::path folder = fsutil::PathFromUtf8(folderUtf8);
+    std::error_code ec;
+    for (fs::directory_iterator it(folder, ec), end; it != end;
+         it.increment(ec)) {
+        if (ec) break;
+        const fs::path& p = it->path();
+        const std::string name = fsutil::ToLower(fsutil::PathToUtf8(p.filename()));
+        if (!fsutil::EndsWith(name, ".acf")) continue;
+        std::error_code fec;
+        if (!fs::is_regular_file(p, fec) || fec) continue;
+        std::ifstream f(p, std::ios::binary);
+        if (!f) continue;
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (fsutil::StartsWith(line, kIcaoProp)) {
+                const std::string got =
+                    UpperCopy(fsutil::Trim(line.substr(sizeof(kIcaoProp) - 1)));
+                if (got == wantUpper) return true;
+                break;   // one stamp per file; try the next variant
+            }
+            if (line == "PROPERTIES_END") break;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -336,10 +382,21 @@ std::string IdentifyAirframe(const std::string& folderUtf8) {
         }
     }
     // 3. the airframe-specific OBJ filename — intrinsic to the aircraft's files.
+    //
+    // ⚠ A GENERIC fingerprint needs the `.acf`'s own word for it. The a339's
+    // `ExternalLights_XP12.obj` is ToLiss's name for every newer airframe's
+    // exterior lights OBJ — an A340 carries it too, and presence alone
+    // misdetected an A340 as an installable A330-900 (2026-08-16). A failed
+    // corroboration falls through rather than returning empty here: a real
+    // A339 whose `.acf` files are unreadable still identifies by step 4's
+    // folder glob, while an A340 matches nothing and stays off the list.
     const fs::path objects = fsutil::PathFromUtf8(folderUtf8) / "objects";
     for (const Airframe& af : Airframes()) {
         std::error_code ec;
-        if (fs::is_regular_file(objects / af.objName, ec) && !ec) return af.key;
+        if (!fs::is_regular_file(objects / af.objName, ec) || ec) continue;
+        if (af.acfIcao[0] != '\0' && !FolderHasAcfIcao(folderUtf8, af.acfIcao))
+            continue;
+        return af.key;
     }
     // 4. the legacy folder-name glob, last resort.
     const std::string folderName =

@@ -30,8 +30,10 @@
 #include "core/detect.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
+#include "core/marker.h"
 #include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
+#include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/progress.h"
@@ -205,9 +207,14 @@ public:
                                   "# payload obj ") + af.key + " " + wing + "\n");
             }
         }
+        // One real light line rides in the stub so the intensity re-apply has
+        // a slot 8 to scale — the numbers are the dome lamp's from the real
+        // generated file.
         Write(root_ / "objs" / "interior" / kInteriorObj,
               "I\n800\nOBJ\n\nPOINT_COUNTS\t0\t0\t0\t0\n"
-              "# ToLissPhoton/interior/dome\n");
+              "# ToLissPhoton/interior/dome\n"
+              "\tLIGHT_PARAM\tairplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 "
+              "0 1.414 0 0 0 1\n");
         // ⚠ PER AIRFRAME, and the stub says WHICH — the whole hazard this layout
         // exists to remove is installing one airframe's six positions into
         // another, where every light draws and every light is in the wrong place.
@@ -421,6 +428,68 @@ TEST("detect: a folder that is none of ours identifies as nothing") {
     const fs::path dir = tmp / "Cessna 172";
     Write(dir / "objects" / "wing.obj", "I\n800\nOBJ\n");
     CHECK(detect::IdentifyAirframe(U8(dir)).empty());
+}
+
+TEST("detect: the a339 fingerprint needs the .acf's ICAO — an A340 is nobody") {
+    // ⚠ ExternalLights_XP12.obj is ToLiss's name for EVERY newer airframe's
+    // exterior lights OBJ — the A340 carries it too, and presence alone put an
+    // A340 on the installer's aircraft list as an installable A330-900 (field
+    // report, 2026-08-16). Its cfg does not save it: the module URL and the
+    // display name match no row, so the walk falls through to the fingerprint.
+    TempDir tmp;
+    const fs::path dir = tmp / "ToLissA340_V1p0p0";
+    Write(dir / "skunkcrafts_updater.cfg",
+          SkunkCfg("https://x/aircraft-repositories/A340-600/",
+                   "ToLiss A340-600", "1.0.0"));
+    Write(dir / "objects" / "ExternalLights_XP12.obj", "I\n800\nOBJ\n");
+    Write(dir / "A340-600.acf",
+          "I\r\n1200 Version\r\nACF\r\nPROPERTIES_BEGIN\r\n"
+          "P acf/_ICAO A346\r\nPROPERTIES_END\r\n");
+    CHECK(detect::IdentifyAirframe(U8(dir)).empty());
+}
+
+TEST("detect: the same fingerprint WITH the A330-900's stamp is the a339") {
+    // The corroborating half of the test above: a renamed A339 folder with no
+    // usable cfg still identifies, because its own .acf says who it is.
+    TempDir tmp;
+    const fs::path dir = tmp / "My Widebody";
+    Write(dir / "objects" / "ExternalLights_XP12.obj", "I\n800\nOBJ\n");
+    Write(dir / "A330-900.acf",
+          "I\r\n1200 Version\r\nACF\r\nPROPERTIES_BEGIN\r\n"
+          "P acf/_ICAO A339\r\nPROPERTIES_END\r\n");
+    CHECK_EQ(detect::IdentifyAirframe(U8(dir)), std::string("a339"));
+    // ⚠ and a leftover `.acf.bak` with the WRONG stamp must not poison it —
+    // both wing mods leave such copies behind forever.
+    Write(dir / "A330-900.acf.bak",
+          "I\r\n1200 Version\r\nACF\r\nPROPERTIES_BEGIN\r\n"
+          "P acf/_ICAO A346\r\nPROPERTIES_END\r\n");
+    CHECK_EQ(detect::IdentifyAirframe(U8(dir)), std::string("a339"));
+}
+
+TEST("detect: an a339 whose .acf cannot corroborate falls to the folder glob") {
+    // ⚠ The corroboration must fail OPEN for the real aircraft: a damaged A339
+    // install with no readable .acf still identifies by step 4's folder-name
+    // glob rather than vanishing from the list.
+    TempDir tmp;
+    const fs::path dir = tmp / "ToLissA339_V1p0p4";
+    Write(dir / "objects" / "ExternalLights_XP12.obj", "I\n800\nOBJ\n");
+    CHECK_EQ(detect::IdentifyAirframe(U8(dir)), std::string("a339"));
+}
+
+TEST("detect: an A340 does not appear in the aircraft list at all") {
+    // The user-visible half: DetectAircraft drops what IdentifyAirframe cannot
+    // name, and all three front-ends render that list verbatim — so this IS
+    // the "not shown as supported" contract.
+    TempDir tmp;
+    const fs::path root = tmp / "X-Plane 12";
+    std::error_code ec;
+    fs::create_directories(root / "Resources" / "plugins", ec);
+    const fs::path dir = root / "Aircraft" / "ToLissA340_V1p0p0";
+    Write(dir / "objects" / "ExternalLights_XP12.obj", "I\n800\nOBJ\n");
+    Write(dir / "A340-600.acf",
+          "I\r\n1200 Version\r\nACF\r\nPROPERTIES_BEGIN\r\n"
+          "P acf/_ICAO A346\r\nPROPERTIES_END\r\n");
+    CHECK(detect::DetectAircraft(U8(root)).empty());
 }
 
 TEST("detect: a fresh aircraft reads as not installed") {
@@ -1181,6 +1250,52 @@ TEST("interior: install writes the OBJ, the textures and the .acf spot patch") {
     // ⚠ Slot 3 was `none` in the stock file and must STAY `none` — the patch owns
     // three spots, not four.
     CHECK(Contains(reverted, "_spot_name_3d/3 none"));
+}
+
+TEST("interior: install re-applies the saved cockpit light intensity") {
+    // The multiplier lives in the plugin's prefs and in the OBJ's baked
+    // values. A reinstall stages a fresh 1x OBJ, so without this re-apply
+    // every reinstall silently resets the user's brightness — which reads as
+    // the installer having broken the setting.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+    Write(fa.root() / "Output" / "preferences" / kProfilesJsonName,
+          "{\n  \"$cockpit\": {\"optimized\": 0, \"intensity\": 2.00}\n}\n");
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    const std::string obj = Read(fa.objects() / kInteriorObj);
+    CHECK(intensity::SameFactor(intensity::FactorIn(obj), 2.0));
+    // the stub's dome lamp, slot 8 doubled (1.414 -> 2.828)
+    CHECK(Contains(obj, "airplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 0 "
+                        "2.828 0 0 0 1"));
+    // ⚠ both sentinels survive the patch: the cockpit-submenu needle and the
+    // installer's own version marker.
+    CHECK(Contains(obj, kInteriorObjNeedle));
+    CHECK(marker::Parse(obj).found);
+}
+
+TEST("interior: no saved intensity stages the payload bytes untouched") {
+    // A user who never moved the slider has no "$cockpit"."intensity" entry —
+    // and their OBJ must carry no trace of the mechanism at all.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    const std::string obj = Read(fa.objects() / kInteriorObj);
+    CHECK(!Contains(obj, intensity::kFactorPrefix));
+    CHECK(!Contains(obj, intensity::kOrigPrefix));
+    CHECK(Contains(obj, "airplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 0 "
+                        "1.414 0 0 0 1"));
 }
 
 TEST("interior: the .acf is CRLF on disk and stays CRLF through both directions") {

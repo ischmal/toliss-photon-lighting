@@ -12,6 +12,7 @@
 #include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_glow.h"
+#include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/progress.h"
@@ -643,8 +644,25 @@ std::vector<std::string> InstallInterior(const Options& opts,
         steps.push_back(std::string("Backed up original ") + kInteriorObj + " → " +
                         BackupLabel(aircraftDir, backupDir));
     }
-    const std::string text =
+    std::string text =
         marker::Inject(payload::InteriorObjText(), kPhotonVersion, "interior");
+    // The cockpit-light intensity multiplier the user set on the plugin's
+    // Settings tab, read back out of the prefs file and re-applied to the
+    // fresh OBJ — without this every reinstall silently resets the cockpit to
+    // 1x, which reads as the install having broken the setting. Applied to the
+    // in-memory text so the aircraft still sees exactly one atomic write. A
+    // user who never touched the slider has no prefs entry, SavedFactor
+    // answers 1x, and the staged bytes are untouched.
+    const double intensityFactor = intensity::SavedFactor(opts.xplaneRoot);
+    if (!intensity::AtDefault(intensityFactor)) {
+        int scaledLines = 0;
+        text = intensity::PatchText(text, intensityFactor, scaledLines);
+        log.Write("cockpit light intensity " + intensity::Label(intensityFactor) +
+                  " from plugin settings applied to " +
+                  std::to_string(scaledLines) + " light line(s)");
+        steps.push_back("Applied your cockpit light intensity setting (" +
+                        intensity::Label(intensityFactor) + ")");
+    }
     log.Write("writing " + fsutil::PathToUtf8(target) + " (" +
               std::to_string(text.size()) + " bytes)");
     if (!dryRun) WriteOrThrow(target, text);

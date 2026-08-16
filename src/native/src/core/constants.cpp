@@ -29,7 +29,10 @@ const std::vector<Airframe>& Airframes() {
         {"a321", "ToLissA321*", "A321", "lights_out321_XP12.obj",
          "ToLiss A321", "/A321/", "A321"},
         {"a339", "ToLissA339*", "A339", "ExternalLights_XP12.obj",
-         "ToLiss A330-900", "/A330-900/", "A330-900"},
+         "ToLiss A330-900", "/A330-900/", "A330-900",
+         // ⚠ The one GENERIC objName above — an A340 carries the same file, so
+         // the fingerprint alone is not this airframe. See Airframe::acfIcao.
+         "A339"},
     };
     return kAirframes;
 }

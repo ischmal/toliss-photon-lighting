@@ -61,6 +61,7 @@ set(PHOTON_CORE_SOURCES
     src/core/patch_acf.cpp
     src/core/patch_acf_screens.cpp
     src/core/patch_glow.cpp
+    src/core/patch_intensity.cpp
     src/core/patch_realwings.cpp
     src/core/config.cpp
     src/core/detect.cpp
