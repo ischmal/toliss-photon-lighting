@@ -13,7 +13,9 @@ release/
 # build snapshots, and anything else transient. Nothing here is an input to the
 # build: patch_realwings.py locates the *installed* mod inside X-Plane itself.
 .scratch/
-
+.claude/
+.vscode/
+docs/
 # Sim logs — symlinks into the live X-Plane install, for tailing.
 Log.txt
 XPPython3Log.txt
