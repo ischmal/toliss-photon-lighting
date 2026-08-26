@@ -205,8 +205,13 @@ class DisplaysMasterTests(unittest.TestCase):
     #: other direction — "Disable screen backlight illumination", the cost
     #: phrasing of the Displays tab's look phrasing. It is a pane that EDITS the
     #: setting, not a consumer of it, so the master gate is not its to apply.
+    #: ⚠ CollectReportFacts is in here because it REPORTS the stored settings —
+    #: the Help tab's support report — and the master is a line of its own beside
+    #: them. Folding the gate in would erase the difference between "the user
+    #: turned this effect off" and "the user turned everything off", which is
+    #: precisely the distinction a bug report is being read for.
     RAW_OK = {"DisplaysFromJson", "SaveProfilesFile", "SaveDisplays",
-              "BuildDisplaysTab", "BuildSettingsTab",
+              "BuildDisplaysTab", "BuildSettingsTab", "CollectReportFacts",
               "PerfLeverGet", "PerfLeverSet", "PerfStepsAB"}
 
     def test_the_helper_is_the_only_reader(self):

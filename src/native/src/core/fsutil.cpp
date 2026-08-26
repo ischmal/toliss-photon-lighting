@@ -75,6 +75,14 @@ std::string PathToUtf8(const fs::path& p) {
 #endif
 }
 
+std::string PathToUtf8Generic(const fs::path& p) {
+#ifdef _WIN32
+    return Utf8FromWide(p.generic_wstring());
+#else
+    return p.generic_string();
+#endif
+}
+
 bool ReadFileBytes(const fs::path& p, std::string& out) {
     std::error_code ec;
     return ReadFileBytes(p, out, ec);
@@ -188,7 +196,7 @@ std::vector<FileEntry> ListFilesRecursive(const fs::path& root) {
         const fs::path rel = fs::relative(it->path(), root, fe);
         if (fe) continue;
         FileEntry entry;
-        entry.rel = rel.generic_string();
+        entry.rel = PathToUtf8Generic(rel);
         entry.abs = it->path();
         out.push_back(std::move(entry));
     }

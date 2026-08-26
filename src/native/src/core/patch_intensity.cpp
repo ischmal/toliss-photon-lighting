@@ -100,6 +100,17 @@ double Clamp(double factor) {
     return factor;
 }
 
+double ClampEffective(double factor) {
+    // Same NaN-rejecting shape as Clamp, against the product's own ceiling.
+    if (!(factor >= kMin)) return kMin;
+    if (factor > kEffectiveMax) return kEffectiveMax;
+    return factor;
+}
+
+double EffectiveFactor(double userFactor, bool neo) {
+    return ClampEffective(Clamp(userFactor) * (neo ? kNeoBoost : 1.0));
+}
+
 bool AtDefault(double factor) { return SameFactor(factor, kDefault); }
 
 bool SameFactor(double a, double b) { return std::fabs(a - b) < kEpsilon; }
@@ -130,7 +141,9 @@ bool CanPatch(const std::string& text) {
 
 std::string PatchText(const std::string& text, double factor, int& scaled) {
     scaled = 0;
-    const double f = Clamp(factor);
+    // ⚠ ClampEffective, not Clamp — this is a write path, and the BSS NEO
+    // compensation legitimately puts the baked factor above the slider's kMax.
+    const double f = ClampEffective(factor);
     const bool active = !AtDefault(f);
     const std::string nl = fsutil::DetectNewline(text);
     const std::vector<std::string> lines = fsutil::SplitLines(text);
@@ -207,24 +220,80 @@ std::string PatchText(const std::string& text, double factor, int& scaled) {
     return fsutil::JoinLines(out, nl);
 }
 
-double SavedFactor(const std::string& xplaneRootUtf8) {
-    if (xplaneRootUtf8.empty()) return kDefault;
+namespace {
+
+// The "$cockpit" block out of the prefs file, or a null json when anything at
+// all is missing or unreadable. ⚠ ONE READER FOR BOTH KEYS: the factor and the
+// BSS NEO flag are read on the same code path in both halves of the project, so
+// a change to where prefs live cannot move one and leave the other behind.
+nlohmann::json CockpitBlock(const std::string& xplaneRootUtf8) {
+    if (xplaneRootUtf8.empty()) return nlohmann::json();
     const fs::path p = fsutil::PathFromUtf8(xplaneRootUtf8) / "Output" /
                        "preferences" / kProfilesJsonName;
     std::string text;
-    if (!fsutil::ReadFileBytes(p, text)) return kDefault;
+    if (!fsutil::ReadFileBytes(p, text)) return nlohmann::json();
     nlohmann::json root;
     try {
         root = nlohmann::json::parse(text);
     } catch (const nlohmann::json::exception&) {
-        return kDefault;   // corrupt reads as "never set", never as an error
+        return nlohmann::json();   // corrupt reads as "never set", never as an error
     }
-    if (!root.is_object()) return kDefault;
+    if (!root.is_object()) return nlohmann::json();
     const auto block = root.find(kPrefsCockpitKey);
-    if (block == root.end() || !block->is_object()) return kDefault;
-    const auto f = block->find(kIntensityJsonKey);
-    if (f == block->end() || !f->is_number()) return kDefault;
+    if (block == root.end() || !block->is_object()) return nlohmann::json();
+    return *block;
+}
+
+}  // namespace
+
+double SavedFactor(const std::string& xplaneRootUtf8) {
+    const nlohmann::json block = CockpitBlock(xplaneRootUtf8);
+    if (!block.is_object()) return kDefault;
+    const auto f = block.find(kIntensityJsonKey);
+    if (f == block.end() || !f->is_number()) return kDefault;
     return Clamp(f->get<double>());
+}
+
+bool SavedNeo(const std::string& xplaneRootUtf8) {
+    const nlohmann::json block = CockpitBlock(xplaneRootUtf8);
+    if (!block.is_object()) return false;
+    const auto f = block.find(kNeoJsonKey);
+    // ⚠ Booleans only. A hand-edited string or number reads as false rather than
+    // as truthy — the compensation changes what ships in the OBJ, so an
+    // ambiguous prefs file must land on "do nothing".
+    if (f == block.end() || !f->is_boolean()) return false;
+    return f->get<bool>();
+}
+
+bool SaveNeo(const std::string& xplaneRootUtf8, bool neo) {
+    if (xplaneRootUtf8.empty()) return false;
+    const fs::path p = fsutil::PathFromUtf8(xplaneRootUtf8) / "Output" /
+                       "preferences" / kProfilesJsonName;
+
+    std::string text;
+    const bool had = fsutil::ReadFileBytes(p, text);
+    // Absence already means false; see the header. Nothing to do, and nothing
+    // to create.
+    if (!had && !neo) return true;
+
+    nlohmann::json root = nlohmann::json::object();
+    if (had) {
+        try {
+            root = nlohmann::json::parse(text);
+        } catch (const nlohmann::json::exception&) {
+            // ⚠ REFUSE, do not overwrite. A corrupt prefs file may still be the
+            // only copy of the user's per-livery profiles, and rewriting it from
+            // scratch to record one boolean would destroy them.
+            return false;
+        }
+        if (!root.is_object()) return false;
+    }
+
+    nlohmann::json& block = root[kPrefsCockpitKey];
+    if (!block.is_object()) block = nlohmann::json::object();
+    block[kNeoJsonKey] = neo;
+
+    return fsutil::AtomicWriteBytes(p, root.dump(2));
 }
 
 double FactorOfFile(const fs::path& obj) {
@@ -234,7 +303,7 @@ double FactorOfFile(const fs::path& obj) {
 }
 
 Applied ApplyToFile(const fs::path& obj, double factor, std::string& detail) {
-    const double f = Clamp(factor);
+    const double f = ClampEffective(factor);
     std::string text;
     if (!fsutil::ReadFileBytes(obj, text)) {
         detail = "could not read " + fsutil::PathToUtf8(obj);

@@ -45,6 +45,35 @@ constexpr double kMin = 1.0;
 constexpr double kMax = 4.0;
 constexpr double kDefault = 1.0;
 
+// ─── the BSS NEO compensation ────────────────────────────────────────────────
+//
+// A lighting mod that raises X-Plane's spill-light cutoff culls exactly these
+// lamps; core/neomod.h has the mechanism and the evidence. The answer is to
+// build the cockpit brighter rather than to write the sim setting back — that
+// setting is a global look the user chose, and the mod rewrites most of what it
+// touches every frame anyway.
+//
+// ⚠ THIS IS A SEED AND HAS NOT BEEN MEASURED IN-SIM. docs/neo_compat_plan.md §7
+// names the experiment: sweep `spill_cutoff_level` and record where each fixture
+// disappears. Until that is done this is one number, deliberately in one place,
+// changing which requires no other edit.
+constexpr double kNeoBoost = 2.0;
+
+// ⚠ THE USER'S CEILING IS NOT THE PRODUCT'S CEILING. `kMax` bounds the SLIDER —
+// what a person may ask for. The compensation multiplies whatever they asked
+// for, so the value actually baked into the OBJ has its own, higher bound.
+// Clamping the product to `kMax` would silently cancel the compensation for
+// exactly the users who had already turned the brightness up because of it.
+constexpr double kEffectiveMax = kMax * kNeoBoost;
+
+// The prefs key for "this machine runs a mod that dims spill lights", in the
+// same "$cockpit" block as kIntensityJsonKey. ⚠ PERSISTED, unlike a purely
+// derived compensation, for two reasons that both had to be true: the installer
+// asks the question on a screen and cannot read a dataref (the sim is closed),
+// and BOTH writers of this patch must agree on the factor or they undo each
+// other on alternate loads.
+constexpr char kNeoJsonKey[] = "neo";
+
 // The two comment prefixes this patcher owns. Distinct from the installer's
 // version marker (`# ToLissPhoton version: `) by their next word, so
 // marker::Parse and FactorIn can never read each other's lines.
@@ -63,7 +92,16 @@ constexpr char kDebugNeedle[] = "ToLissPhoton/debug/";
 constexpr char kIntensityJsonKey[] = "intensity";
 
 double Clamp(double factor);
+// The bound for a factor that has already been through EffectiveFactor. Used by
+// everything that WRITES the OBJ; `Clamp` stays the bound on the user setting.
+double ClampEffective(double factor);
 bool AtDefault(double factor);
+
+// What actually gets baked, given the user's setting and whether this machine
+// runs a spill-dimming mod. ⚠ THE ONE PLACE THE TWO ARE COMBINED — the plugin
+// and the installer both call it, which is what stops them computing different
+// products and re-patching the file against each other on alternate loads.
+double EffectiveFactor(double userFactor, bool neo);
 // Factors compare through one epsilon everywhere, sized to the "%.2f" both
 // writers use, so "already applied" can never disagree between the two halves.
 bool SameFactor(double a, double b);
@@ -92,6 +130,29 @@ std::string PatchText(const std::string& text, double factor, int& scaled);
 // or the key is absent or unreadable — a user who never touched the slider has
 // no entry, and that must read as 1x, never as an error.
 double SavedFactor(const std::string& xplaneRootUtf8);
+
+// The saved BSS NEO flag from the same block, kNeoJsonKey. False when the file,
+// the block or the key is absent — a user who never answered the question has no
+// entry, and that must read as "no mod", never as an error.
+bool SavedNeo(const std::string& xplaneRootUtf8);
+
+// Persist that flag. ⚠ THE INSTALLER IS A WRITER OF THIS ONE KEY, which is
+// otherwise the plugin's file. It has to be: the answer comes from a checkbox on
+// an installer screen, the sim is closed so no dataref can be read, and BOTH
+// halves must agree on the factor or the plugin re-patches the compensation away
+// on the next aircraft load — a bug whose only symptom is the cockpit quietly
+// going dim again some time after a successful install.
+//
+// ⚠ READ-MODIFY-WRITE, NEVER A FRESH FILE. Every other key in there is a livery
+// entry or another global block; this must land as a surgical edit or an install
+// would wipe the user's saved per-livery profiles. Returns false on any read or
+// write failure — the caller logs and carries on, because failing an install over
+// a preference is the wrong trade.
+//
+// ⚠ WRITES NOTHING when the flag is false and no file exists yet: absence
+// already means false, and an installer that creates a preferences file to record
+// a default has invented state the user never set.
+bool SaveNeo(const std::string& xplaneRootUtf8, bool neo);
 
 // FactorIn of a file on disk; kDefault when unreadable.
 double FactorOfFile(const std::filesystem::path& obj);

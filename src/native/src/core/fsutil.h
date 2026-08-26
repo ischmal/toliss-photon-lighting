@@ -21,6 +21,17 @@ namespace fs = std::filesystem;
 // ─── UTF-8 <-> std::filesystem::path ─────────────────────────────────────────
 fs::path PathFromUtf8(const std::string& utf8);
 std::string PathToUtf8(const fs::path& p);
+// The POSIX spelling of a (relative) path, UTF-8 — what a manifest entry, a step
+// line or a flattened backup name is built from.
+//
+// ⚠ NEVER `generic_string()` FOR THIS. On MSVC it narrows through the ANSI code
+// page: a livery folder named with an en dash or an é came back as CP1252 bytes
+// that the next UTF-8 reader mangled (the manifest's JSON writer REJECTS them, so
+// the install failed at its last step with the livery's texture already removed),
+// and a character the page cannot spell at all — Turkish ı, Polish ł, Cyrillic,
+// CJK — THREW std::system_error out of a loop half-way through moving a user's
+// files. Found 2026-08-22 in the interior livery scan.
+std::string PathToUtf8Generic(const fs::path& p);
 
 // ─── reading ─────────────────────────────────────────────────────────────────
 // ⚠ BINARY, ALWAYS. `.acf` files are CRLF on disk and `.obj` files may be either;

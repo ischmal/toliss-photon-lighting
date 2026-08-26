@@ -90,6 +90,9 @@ export component App inherits Window {
     in property <bool> interior-available: true;
     in property <bool> wings-available: true;
     in property <int> wing: 0;
+    // Seeded from neomod::Detect on the chosen X-Plane root, then owned by the
+    // user — see screens/features.slint.
+    in property <bool> neo: false;
 
     // ─── review ──────────────────────────────────────────────────────────────
     in property <string> aircraft-folder;
@@ -101,23 +104,37 @@ export component App inherits Window {
     in property <float> progress: 0.0;
     // ⚠ A MODEL OF LINES AGAIN (2026-08-14), where it was one string. The string
     // was here so a read-only TextInput could select the whole log across lines —
-    // but a TextInput has ONE color and the log now needs three (green marker,
-    // white message, red for a line that reported something). Copying is served by
-    // `copy-log` below, which puts the lot on the clipboard in one action.
+    // but a TextInput has ONE color and the log now needs four (green marker, white
+    // message, an amber line for a warning and a red one for an error). Copying is
+    // served by `copy-log` below, which puts the lot on the clipboard in one action.
     //
     // ⚠ C++ STILL KEEPS THE LINES ITSELF and this model is built from them, so
     // there is exactly one representation and `copy-log` joins the same list the
     // screen is drawing.
     in property <[LogLine]> log-lines: [];
-    // The ERROR/WARN subset of the above, filtered by C++ from the one vector it
-    // keeps. The Run screen repeats them under a rule once the run has stopped —
+    // The ERROR/WARN subset of the above (`severity > 0`), filtered by C++ from the
+    // one vector it keeps. ⚠ BOTH LEVELS, STILL: splitting how a warning LOOKS did
+    // not split what it means for the run, and a warning the wizard stops for has to
+    // be repeated where the reader has just been parked.
+    // The Run screen repeats them under a rule once the run has stopped —
     // see screens/run.slint for why that is the same condition as "did not advance
     // itself" rather than a second opinion about it.
     in property <[LogLine]> problems: [];
-    // Whether the run ENDED BADLY. Drives the progress bar's red state and the
-    // Complete screen's glyph, both of which must agree with the C++-rendered
-    // sentences — so all three read the same `ok`.
-    in property <bool> run-failed: false;
+    // How the run ended, on ONE severity scale — ⚠ THE SAME THREE WIRE NUMBERS AS
+    // `LogLine.severity`, so 1 means "warning" everywhere in this UI:
+    //   0 = clean     nothing to read          -> the tick, and the wizard advances
+    //   1 = warnings  it completed; read them  -> the triangle, and it does not
+    //   2 = failed    it did not complete      -> the cross, and the bar goes red
+    //
+    // It drives the progress bar's red state and the Complete screen's glyph, both of
+    // which must agree with the C++-rendered sentences — so all three are derived
+    // from the one verdict in `gui.cpp` rather than each deciding for itself.
+    //
+    // ⚠ IT REPLACED A BOOL `run-failed` (2026-08-24). Two bools could spell "failed
+    // AND warned", which is not a state the glyph can draw; one number cannot.
+    // ⚠ ONLY 2 IS "FAILED". The bar's red is a verdict about whether the run
+    // finished, and a warning is expressly not that — see `RunScreen.failed`.
+    in property <int> run-outcome: 0;
     // Both headlines are RENDERED BY C++ (`RunHeadline`/`RunDoneHeadline`,
     // `CompleteHeadline`) — they name the operation and announce a dry run, neither
     // of which the UI knows. These defaults are only what the Slint preview shows.
@@ -150,6 +167,7 @@ export component App inherits Window {
     callback toggle-exterior();
     callback toggle-displays();
     callback toggle-interior();
+    callback toggle-neo();
     callback set-wing(int);
     callback modify-another();
     // ⚠ NAVIGATION, NOT A FILE. It returns to the Run screen, which is still
@@ -395,9 +413,11 @@ export component App inherits Window {
                     interior-available: root.interior-available;
                     wings-available: root.wings-available;
                     wing: root.wing;
+                    neo: root.neo;
                     toggle-exterior => { root.toggle-exterior(); }
                     toggle-displays => { root.toggle-displays(); }
                     toggle-interior => { root.toggle-interior(); }
+                    toggle-neo => { root.toggle-neo(); }
                     set-wing(w) => { root.set-wing(w); }
                 }
 
@@ -414,7 +434,10 @@ export component App inherits Window {
                     log-lines: root.log-lines;
                     problems: root.problems;
                     headline: root.run-headline;
-                    failed: root.run-failed;
+                    // ⚠ ONLY A FAILURE PAINTS THE BAR RED. A run that warned still
+                    // finished, and a red bar over a log full of amber lines would be
+                    // the loudest thing on the screen contradicting all of them.
+                    failed: root.run-outcome == 2;
                     finished: root.run-finished;
                     copy-log => { root.copy-log(); }
                 }
@@ -422,7 +445,7 @@ export component App inherits Window {
                 if root.done: CompleteScreen {
                     headline: root.complete-headline;
                     summary: root.complete-summary;
-                    failed: root.run-failed;
+                    outcome: root.run-outcome;
                     all-up-to-date: root.all-up-to-date;
                     autofocus: root.screen-owns-focus;
                     modify-another => { root.modify-another(); }

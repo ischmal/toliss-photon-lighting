@@ -31,8 +31,12 @@
 #include "core/fsutil.h"
 #include "core/manifest.h"
 #include "core/marker.h"
+#include "core/acf_attach.h"
+#include "core/image_io.h"
+#include "core/lit_recolor.h"
 #include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
+#include "core/patch_integral.h"
 #include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
@@ -358,6 +362,95 @@ std::string StockAcf(int formatVersion = 1200) {
         "P _obja/1/_v10_att_file_stl lights_inn.obj\r\n"
         "P _obja/1/_v10_att_y_acf_prt_ref 0.000000000\r\n"
         "P _obja/count 2\r\n";
+}
+
+// ─── integral-lighting fixtures ──────────────────────────────────────────────
+// ⚠ A REAL PNG, IN TOLISS'S OWN STOCK PLACARD AMBER. Both halves matter: the
+// install decodes these for real, and rgb(255,150,89) is the exact color both
+// `LooksRecolored` and the fitted curve are calibrated against — a stub of
+// arbitrary pixels would make the "is this already ours?" test answer by
+// accident rather than for the stated reason.
+void WriteFlatLit(const fs::path& p, int side, unsigned char r, unsigned char g,
+                  unsigned char b) {
+    lit::Image img;
+    img.width = side;
+    img.height = side;
+    img.pixels.assign(static_cast<std::size_t>(side) * side * 4, 0);
+    for (std::size_t i = 0; i < img.pixels.size(); i += 4) {
+        img.pixels[i] = r;
+        img.pixels[i + 1] = g;
+        img.pixels[i + 2] = b;
+        img.pixels[i + 3] = 255;
+    }
+    std::string err;
+    CHECK(image::SavePng(p, img, err));
+}
+
+void WriteStockLit(const fs::path& p, int side) {
+    WriteFlatLit(p, side, 255, 150, 89);
+}
+
+// The same atlas AFTER our incandescent recolor — rgb(255,124,0), the shipped
+// placard output. Blue at zero against red at full is what `LooksRecolored`
+// keys on, so this is "provably ours" for the same stated reason WriteStockLit
+// is provably stock.
+void WriteRecoloredLit(const fs::path& p, int side) {
+    WriteFlatLit(p, side, 255, 124, 0);
+}
+
+// An OBJ8 shaped like `lamps.obj`: header, vertex/index tables, then drawing.
+std::string BindingObj(const std::string& day, const std::string& lit) {
+    return "I\r\n800\r\nOBJ\r\n\r\nGLOBAL_cockpit_lit\r\nTEXTURE\t" + day +
+           "\r\nTEXTURE_LIT\t" + lit +
+           "\r\nPOINT_COUNTS\t3\t0\t0\t3\r\n"
+           "VT\t0 0 0\t0 1 0\t0 0\r\n"
+           "VT\t1 0 0\t0 1 0\t1 0\r\n"
+           "VT\t0 1 0\t0 1 0\t0 1\r\n"
+           "IDX10\t0 1 2 0 1 2 0 1 2 0\r\n"
+           "ATTR_light_level\t0\t1\tckpt/brt/pedistal\t1500\r\n"
+           "TRIS\t0\t3\r\n";
+}
+
+// StockAcf plus the rows that make `lamps.obj` and `knobs.obj` DRAWN.
+//
+// ⚠ SHAPED LIKE THE REAL TABLE, and the shape is what several of these tests are
+// about. On a real A320 the flight-deck objects sit together near the top
+// (knobs 10, lights_inn 11, lamps 12) and the TRANSPARENT ones are last
+// (windows 35, GlassInterior 44) — X-Plane walks `_obja` in index order, so that
+// tail is where the aircraft's own alpha sorting is decided. A fixture with no
+// glass after the cockpit could not fail when a twin is appended to the end,
+// which is exactly the bug that shipped on 2026-08-24.
+//
+// ⚠ Each row carries its own distinct datum, so a twin attached with the wrong
+// frame is visible rather than merely plausible.
+std::string IntegralAcf() {
+    return std::string(
+        "I\r\n1200 Version\r\nACF\r\n"
+        "P acf/_spot_name_3d/0 sim/cockpit2/electrical/panel_brightness_ratio[0]\r\n"
+        "P acf/_spot_name_3d/1 sim/cockpit2/electrical/panel_brightness_ratio[3]\r\n"
+        "P acf/_spot_name_3d/2 ckpt/lights/map\r\n"
+        "P acf/_spot_name_3d/3 none\r\n"
+        "P _obja/0/_v10_att_file_stl fuselage.obj\r\n"
+        "P _obja/0/_v10_att_y_acf_prt_ref 0.000000000\r\n"
+        "P _obja/1/_v10_att_file_stl knobs.obj\r\n"
+        "P _obja/1/_v10_att_y_acf_prt_ref 31.500000000\r\n"
+        "P _obja/2/_v10_att_file_stl lights_inn.obj\r\n"
+        "P _obja/2/_v10_att_y_acf_prt_ref 0.000000000\r\n"
+        "P _obja/3/_v10_att_file_stl lamps.obj\r\n"
+        "P _obja/3/_v10_att_y_acf_prt_ref 20.750000000\r\n"
+        "P _obja/4/_v10_att_file_stl GlassInterior.obj\r\n"
+        "P _obja/4/_v10_att_y_acf_prt_ref 0.000000000\r\n"
+        "P _obja/count 5\r\n");
+}
+
+// A cockpit whose placard and knob atlases are real, stock, and drawn.
+void GiveIntegralCockpit(const FakeAircraft& fa) {
+    Write(fa.folder() / "ToLissA320.acf", IntegralAcf());
+    Write(fa.objects() / "lamps.obj", BindingObj("text.png", "text_LIT.png"));
+    Write(fa.objects() / "knobs.obj", BindingObj("knobs.png", "knobs_LIT.png"));
+    WriteStockLit(fa.objects() / "text_LIT.png", 512);
+    WriteStockLit(fa.objects() / "text.png", 512);
+    WriteStockLit(fa.objects() / "knobs_LIT.png", 512);
 }
 
 actions::NullLog gLog;
@@ -1366,17 +1459,23 @@ TEST("interior: a stock texture we replaced comes back byte for byte") {
 
 TEST("interior: a texture with no stock file to replace is DELETED, not orphaned") {
     // The same third outcome on the interior axis, and the likelier way to meet it:
-    // nine of the eleven textures replace a ToLiss file, so an aircraft missing one
+    // seven of the nine textures replace a ToLiss file, so an aircraft missing one
     // (or a future ToLiss that stops shipping it) used to keep our copy forever.
     // ⚠ The two genuinely-added ones must stay a SEPARATE story — they reach
     // interior.added without consulting the disk at all.
+    //
+    // ⚠ The absent example USED TO BE `knobs_LIT.png` and cannot be any more:
+    // that file left the payload on 2026-08-24 and is now DERIVED per aircraft
+    // by the integral-lighting step, which reaches `added[]` down a different
+    // path. `walls_top_LIT.png` is an ordinary copied texture and asks the
+    // question this test means to ask.
     TempDir tmp;
     FakePayload pay(tmp / "payload");
     FakeAircraft fa(tmp.path());
     Write(fa.folder() / "ToLissA320.acf", StockAcf());
     const fs::path present = fa.objects() / "chairs_LIT.png";
     Write(present, "THE STOCK TOLISS TEXTURE");     // this one HAS a stock original
-    const fs::path absent = fa.objects() / "knobs_LIT.png";   // this one does not
+    const fs::path absent = fa.objects() / "walls_top_LIT.png";   // this one does not
 
     actions::Options o = fa.Opts("stock");
     o.interior = true;
@@ -1385,8 +1484,8 @@ TEST("interior: a texture with no stock file to replace is DELETED, not orphaned
     const manifest::Manifest m = manifest::Read(U8(fa.objects()));
     CHECK(HasEntry(m.backedUp, "chairs_LIT.png"));
     CHECK(!HasEntry(m.interior.added, "chairs_LIT.png"));
-    CHECK(HasEntry(m.interior.added, "knobs_LIT.png"));
-    CHECK(!HasEntry(m.backedUp, "knobs_LIT.png"));
+    CHECK(HasEntry(m.interior.added, "walls_top_LIT.png"));
+    CHECK(!HasEntry(m.backedUp, "walls_top_LIT.png"));
 
     actions::Uninstall(o, gLog);
     CHECK_EQ(Read(present), std::string("THE STOCK TOLISS TEXTURE"));   // restored
@@ -1413,6 +1512,132 @@ TEST("interior: a livery .dds that SHADOWS our texture is moved aside and put ba
 
     actions::Uninstall(o, gLog);
     CHECK_EQ(Read(liveryTex), std::string("LIVERY OVERRIDE"));
+}
+
+// The UTF-8 bytes of names a painter would actually use — spelled as escapes so the
+// source file's own encoding can never be what the test is testing.
+//   "Aer Lingus – EI-DEP (é ü °)"   every character inside Windows-1252
+//   "Türk Hava Yolları TC-JPU"      ı is NOT in Windows-1252
+//   "Аэрофлот"                       Cyrillic: nothing in it is
+const char* const kLiveryCp1252   = "Aer Lingus \xE2\x80\x93 EI-DEP (\xC3\xA9 \xC3\xBC \xC2\xB0)";
+const char* const kLiveryTurkish  = "T\xC3\xBCrk Hava Yollar\xC4\xB1 TC-JPU";
+const char* const kLiveryCyrillic = "\xD0\x90\xD1\x8D\xD1\x80\xD0\xBE\xD1\x84\xD0\xBB\xD0\xBE\xD1\x82";
+
+// actions.cpp's LiveryBackupName, restated: the aircraft-relative POSIX path with
+// every `/` flattened to `__`. It is private there; spelling it out here means a
+// change to the scheme shows up as a failing look-up rather than a silent one.
+std::string FlatBackupName(const std::string& relPosix) {
+    std::string out;
+    for (char c : relPosix) {
+        if (c == '/') out += "__";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+TEST("interior: livery names outside ASCII survive the round trip (Windows-1252 and beyond)") {
+    // ⚠ SHIPPED BUG, 2026-08-22. The livery scan built the manifest entry with
+    // path::generic_string(), which on MSVC narrows through the ANSI code page: an
+    // en dash or an é came back as CP1252 bytes the JSON writer REJECTED (the
+    // install failed at its LAST step, with no manifest and the livery's texture
+    // already removed), and a character the page cannot spell at all — Turkish ı,
+    // Cyrillic — THREW out of the loop half-way through. Three liveries, the three
+    // shapes that failed; every one must be backed up under its real name, recorded
+    // in UTF-8, and put back.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+    const char* const names[] = {kLiveryCp1252, kLiveryTurkish, kLiveryCyrillic};
+    std::vector<fs::path> textures;
+    for (const char* name : names) {
+        const fs::path tex = fa.folder() / "liveries" / fsutil::PathFromUtf8(name) /
+                             "objects" / "chairs_LIT.dds";
+        Write(tex, std::string("LIVERY OVERRIDE ") + name);
+        textures.push_back(tex);
+    }
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);   // used to throw out of the livery loop
+
+    const manifest::Manifest m = manifest::Read(U8(fa.objects()));
+    CHECK(m.present);
+    CHECK_EQ(m.interior.liveriesPatched.size(), std::size_t(3));
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(!Exists(textures[i]));
+        // Recorded as UTF-8, POSIX-separated — the spelling PathFromUtf8 reverses.
+        const std::string rel =
+            std::string("liveries/") + names[i] + "/objects/chairs_LIT.dds";
+        CHECK(HasEntry(m.interior.liveriesPatched, rel));
+        // And backed up under a name built from that same UTF-8, not a mangled one.
+        CHECK(Exists(fa.backupDir() / "liveries" /
+                     fsutil::PathFromUtf8(FlatBackupName(rel))));
+    }
+
+    actions::Uninstall(o, gLog);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK_EQ(Read(textures[i]), std::string("LIVERY OVERRIDE ") + names[i]);
+    }
+}
+
+TEST("interior: uninstall does not recreate a livery the user has since deleted") {
+    // ⚠ AtomicWriteBytes creates every missing parent, so restoring
+    // `liveries/<name>/objects/chairs_LIT.dds` into a livery that is gone would
+    // bring the FOLDER back holding one texture — a ghost livery X-Plane lists and
+    // ToLiss logs about, and one more entry in the livery index X-Plane keeps in the
+    // aircraft prefs. The backup is kept (a renamed livery's owner may want it), the
+    // folder's README stays to say what it is, and the step line says where.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+    const fs::path liveryDir = fa.folder() / "liveries" / "Gone Airways";
+    Write(liveryDir / "objects" / "chairs_LIT.dds", "LIVERY OVERRIDE");
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+    CHECK(!Exists(liveryDir / "objects" / "chairs_LIT.dds"));
+
+    std::error_code ec;
+    fs::remove_all(liveryDir, ec);
+    CHECK(!Exists(liveryDir));
+
+    const std::vector<std::string> steps = actions::Uninstall(o, gLog);
+    CHECK(!Exists(liveryDir));   // no ghost livery
+    CHECK(AnyStep(steps, "no longer exists"));
+    const fs::path kept =
+        fa.backupDir() / "liveries" /
+        fsutil::PathFromUtf8(FlatBackupName("liveries/Gone Airways/objects/chairs_LIT.dds"));
+    CHECK(Exists(kept));                                   // the user's file is not thrown away
+    CHECK(Exists(fa.backupDir() / backup::kReadmeName));   // and the folder says what it is
+}
+
+TEST("detect: an aircraft under a hangar named outside ASCII is found and described in UTF-8") {
+    // detect.cpp spelled `Aircraft::folder` — the hangar-relative path all three
+    // front-ends print — with generic_string() too, so a hangar or aircraft folder
+    // the ANSI code page could not spell THREW out of the scan, and the GUI had no
+    // net under DetectAircraft: the installer simply went away.
+    TempDir tmp;
+    const fs::path root = tmp / "X-Plane 12";
+    std::error_code ec;
+    fs::create_directories(root / "Resources" / "plugins", ec);
+    // ⚠ The literal is split before the `d`: a hex escape is greedy and
+    // "\xB3d" would read as one (out-of-range) escape.
+    const std::string hangar = "Hangar \xE2\x80\x93 \xC5\x81\xC3\xB3" "d\xC5\xBA";   // "Hangar – Łódź"
+    const fs::path dir =
+        root / "Aircraft" / fsutil::PathFromUtf8(hangar) / "ToLissA320_V1p3p2";
+    Write(dir / "objects" / "lights_out320_XP12.obj", FakeAircraft::kOriginalObj);
+    Write(dir / "skunkcrafts_updater.cfg",
+          SkunkCfg("http://updates.toliss.com/aircraft-repositories/A320/",
+                   "ToLiss A320", "v1.3.3"));
+
+    const std::vector<detect::Aircraft> found = detect::DetectAircraft(U8(root));
+    CHECK_EQ(found.size(), std::size_t(1));
+    CHECK_EQ(found[0].airframe, std::string("a320"));
+    CHECK_EQ(found[0].folder, hangar + "/ToLissA320_V1p3p2");
+    CHECK_EQ(found[0].path, U8(dir));
 }
 
 TEST("interior: an airframe without it is refused, not silently skipped") {
@@ -2270,4 +2495,440 @@ TEST("detect: the hyphen rule admits Linux's suffix but not a space") {
     CHECK(!detect::IsXplaneProcessName("notx-plane"));
     CHECK(!detect::IsXplaneProcessName(""));
     CHECK(!detect::IsXplaneProcessName("   \n"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// integral lighting — the whole install, end to end
+// ─────────────────────────────────────────────────────────────────────────────
+TEST("integral: an install derives both eras, gates the OBJ and attaches the twin") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    // 1. Both eras exist as real, DIFFERENT files.
+    const fs::path inc = fa.objects() / "text_LIT.png";
+    const fs::path led = fa.objects() / "text_LIT_photon_led.png";
+    CHECK(Exists(inc));
+    CHECK(Exists(led));
+    lit::Image incImg, ledImg;
+    std::string err;
+    CHECK(image::LoadPng(inc, incImg, err));
+    CHECK(image::LoadPng(led, ledImg, err));
+    // ⚠ Both moved off stock, and off EACH OTHER. A profile that resolved to its
+    // neighbour would produce two identical files and a switch that does nothing
+    // — the same lie `ProfileIsDefined` exists to prevent.
+    CHECK(lit::LooksRecolored(incImg, lit::Texture::kPlacards));
+    CHECK(lit::LooksRecolored(ledImg, lit::Texture::kPlacards));
+    CHECK(incImg.pixels != ledImg.pixels);
+
+    // 2. The stock OBJ is gated, in place, on the incandescent branch.
+    const std::string lamps = Read(fa.objects() / "lamps.obj");
+    CHECK(Contains(lamps, "ANIM_hide\t1\t1\tToLissPhoton/interior/integral"));
+    CHECK(Contains(lamps, "TEXTURE_LIT\ttext_LIT.png"));
+
+    // 3. The twin is gated the other way and bound to the other texture.
+    const std::string twin = Read(fa.objects() / "lamps_photon_led.obj");
+    CHECK(Contains(twin, "ANIM_hide\t0\t0\tToLissPhoton/interior/integral"));
+    CHECK(Contains(twin, "TEXTURE_LIT\ttext_LIT_photon_led.png"));
+
+    // 4. …and attached, with the frame copied from its OWN source row — 20.75,
+    //    the A320 datum, not `lights_inn.obj`'s 0.
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    const int idx = acf_attach::FindObj(acf, "lamps_photon_led.obj");
+    CHECK(idx >= 0);
+    CHECK(idx < acf_attach::DeclaredCount(acf));
+    const auto rows = acf_attach::AttachmentRows(acf);
+    CHECK_EQ(fsutil::Trim(rows.at(idx).at("_v10_att_y_acf_prt_ref")),
+             std::string("20.750000000"));
+    // The knobs twin borrows its own row's datum, which is a different number.
+    const int kidx = acf_attach::FindObj(acf, "knobs_photon_led.obj");
+    CHECK(kidx >= 0);
+    CHECK_EQ(fsutil::Trim(rows.at(kidx).at("_v10_att_y_acf_prt_ref")),
+             std::string("31.500000000"));
+
+    // 5. The bookkeeping: the twins are DELETED on uninstall, the originals
+    //    RESTORED.
+    const manifest::Manifest m = manifest::Read(U8(fa.objects()));
+    CHECK(HasEntry(m.interior.added, "lamps_photon_led.obj"));
+    CHECK(HasEntry(m.interior.added, "text_LIT_photon_led.png"));
+    CHECK(HasEntry(m.backedUp, "lamps.obj"));
+    CHECK(HasEntry(m.backedUp, "text_LIT.png"));
+}
+
+TEST("integral: a reinstall derives from stock again, never from our own output") {
+    // ⚠ THE COMPOUNDING TRAP, AND IT IS SILENT. The curve clips blue to zero, so
+    // a second pass over our own output looks like a no-op while freezing the
+    // result in as though it were stock. Byte equality is the only check that
+    // fails when it happens.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+    const std::string firstInc = Read(fa.objects() / "text_LIT.png");
+    const std::string firstLed = Read(fa.objects() / "text_LIT_photon_led.png");
+    const std::string firstObj = Read(fa.objects() / "lamps.obj");
+    // ⚠ Captured, not asserted against a literal: the display-glow install
+    // attaches a row of its own on this airframe, so the absolute count is that
+    // feature's business. What this test owns is that a SECOND install adds
+    // nothing.
+    const int firstCount =
+        acf_attach::DeclaredCount(Read(fa.folder() / "ToLissA320.acf"));
+
+    actions::Install(o, gLog);
+    CHECK_EQ(Read(fa.objects() / "text_LIT.png"), firstInc);
+    CHECK_EQ(Read(fa.objects() / "text_LIT_photon_led.png"), firstLed);
+    // ⚠ And the OBJ is not wrapped twice — a nested gate hides the branch
+    // forever, invisibly, in a file nobody reads.
+    CHECK_EQ(Read(fa.objects() / "lamps.obj"), firstObj);
+    const std::string lamps = Read(fa.objects() / "lamps.obj");
+    std::size_t gates = 0;
+    for (std::size_t at = lamps.find("ToLissPhoton/interior/integral");
+         at != std::string::npos;
+         at = lamps.find("ToLissPhoton/interior/integral", at + 1)) {
+        ++gates;
+    }
+    CHECK_EQ(gates, static_cast<std::size_t>(2));   // the comment line and the hide
+
+    // The attachment table does not grow either.
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    CHECK_EQ(acf_attach::DeclaredCount(acf), firstCount);
+}
+
+TEST("integral: uninstall restores the stock OBJ and texture and detaches the twin") {
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+    const std::string stockObj = Read(fa.objects() / "lamps.obj");
+    const std::string stockLit = Read(fa.objects() / "text_LIT.png");
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+    actions::Uninstall(o, gLog);
+
+    CHECK_EQ(Read(fa.objects() / "lamps.obj"), stockObj);
+    CHECK_EQ(Read(fa.objects() / "text_LIT.png"), stockLit);
+    CHECK(!Exists(fa.objects() / "lamps_photon_led.obj"));
+    CHECK(!Exists(fa.objects() / "text_LIT_photon_led.png"));
+    CHECK(!Exists(fa.objects() / "knobs_photon_led.obj"));
+
+    // ⚠ The rows go too. A row naming a file this same uninstall deleted makes
+    // X-Plane log a missing attachment on every single load.
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_led.obj"), -1);
+    CHECK_EQ(acf_attach::FindObj(acf, "knobs_photon_led.obj"), -1);
+    CHECK_EQ(acf_attach::DeclaredCount(acf), 5);
+    // …and every row that was always there is back at its ORIGINAL index. The
+    // twins were inserted mid-table and shifted these up; the detach has to shift
+    // them down again or the aircraft keeps a permanently renumbered table.
+    CHECK_EQ(acf_attach::FindObj(acf, "knobs.obj"), 1);
+    CHECK_EQ(acf_attach::FindObj(acf, "lights_inn.obj"), 2);
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps.obj"), 3);
+    CHECK_EQ(acf_attach::FindObj(acf, "GlassInterior.obj"), 4);
+}
+
+TEST("integral: a twin draws BESIDE its source, not at the end of the table") {
+    // ⚠ THE BUG THIS EXISTS FOR (2026-08-24, from a user report). The twins were
+    // appended at the end with their source's frame copied — geometrically
+    // perfect and visibly wrong, because X-Plane walks `_obja` in index order and
+    // neither `lamps.obj` nor `knobs.obj` declares `ATTR_no_blend`. At the end of
+    // the table they drew AFTER the aircraft's transparent glass instead of with
+    // the rest of the flight deck, and the placard artwork showed through the
+    // engine selector switches.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    const int knobs = acf_attach::FindObj(acf, "knobs.obj");
+    const int knobsLed = acf_attach::FindObj(acf, "knobs_photon_led.obj");
+    const int lamps = acf_attach::FindObj(acf, "lamps.obj");
+    const int lampsLed = acf_attach::FindObj(acf, "lamps_photon_led.obj");
+    const int glass = acf_attach::FindObj(acf, "GlassInterior.obj");
+
+    // 1. Each twin sits immediately after the object it twins.
+    CHECK_EQ(knobsLed, knobs + 1);
+    CHECK_EQ(lampsLed, lamps + 1);
+
+    // 2. ⚠ BOTH BRANCHES DRAW BEFORE THE GLASS. This is the assertion that fails
+    //    on an appended twin, and the one the user actually saw.
+    CHECK(lampsLed < glass);
+    CHECK(knobsLed < glass);
+
+    // 3. ⚠ AND THE PAIR'S OWN ORDER IS PRESERVED. Stock draws knobs before
+    //    lamps; two twins appended to the end came out lamps before knobs, which
+    //    silently inverted the sort between them in the LED branch alone.
+    CHECK(knobs < lamps);
+    CHECK(knobsLed < lampsLed);
+}
+
+TEST("integral: a reinstall MOVES a twin that an older build appended") {
+    // ⚠ WITHOUT THIS A REINSTALL CANNOT REPAIR THE BUG ABOVE. `InsertAfter` is
+    // idempotent on an already-attached file — it returns the text unchanged —
+    // so an aircraft carrying an end-of-table twin from the 2026-08-24 build
+    // would have had the installer report success and move nothing, which reads
+    // as "I reinstalled and it is still wrong".
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+
+    // Stand in for that build: attach the twin at the END, the old way.
+    {
+        std::string acf = Read(fa.folder() / "ToLissA320.acf");
+        int ch = 0;
+        acf = acf_attach::Attach(acf, "lamps_photon_led.obj",
+                                 acf_attach::FindObj(acf, "lamps.obj"), ch);
+        Write(fa.folder() / "ToLissA320.acf", acf);
+        // …which is exactly the broken state: after the glass.
+        CHECK(acf_attach::FindObj(acf, "lamps_photon_led.obj") >
+              acf_attach::FindObj(acf, "GlassInterior.obj"));
+    }
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    const int lamps = acf_attach::FindObj(acf, "lamps.obj");
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_led.obj"), lamps + 1);
+    CHECK(acf_attach::FindObj(acf, "lamps_photon_led.obj") <
+          acf_attach::FindObj(acf, "GlassInterior.obj"));
+    // ⚠ Moved, not duplicated — two rows naming one OBJ would draw it twice.
+    int naming = 0;
+    for (const auto& row : acf_attach::AttachmentRows(acf)) {
+        const auto it = row.second.find(acf_attach::kFileField);
+        if (it != row.second.end() &&
+            fsutil::Trim(it->second) == "lamps_photon_led.obj") {
+            ++naming;
+        }
+    }
+    CHECK_EQ(naming, 1);
+}
+
+TEST("integral: an OBJ that binds our texture but is NOT drawn is left alone") {
+    // ⚠ `lamps_Std.obj` is the real case: it binds `text_LIT.png` exactly as
+    // `lamps.obj` does, and neither XP12 `.acf` attaches it. Twinning it would
+    // add geometry to an aeroplane that was not drawing it — and gating it would
+    // be a pointless edit to a payware file.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+    const fs::path std_ = fa.objects() / "lamps_Std.obj";
+    Write(std_, BindingObj("text.png", "text_LIT.png"));
+    const std::string before = Read(std_);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    CHECK_EQ(Read(std_), before);
+    CHECK(!Exists(fa.objects() / "lamps_Std_photon_led.obj"));
+    CHECK_EQ(acf_attach::FindObj(Read(fa.folder() / "ToLissA320.acf"),
+                                 "lamps_Std_photon_led.obj"), -1);
+    // The drawn one still got its twin.
+    CHECK(Exists(fa.objects() / "lamps_photon_led.obj"));
+}
+
+TEST("integral: one refused fixture withholds the switch everywhere") {
+    // ⚠ THE TESTER'S A319, 2026-08-25. Both the placard atlas in objects/ AND
+    // its backup read as already recolored (a lost manifest once backed our own
+    // output up as stock), so the placard fixture refused — and the knobs
+    // fixture went ahead alone: gated, twinned, attached. The plugin offers the
+    // Integral row for ANY twin on disk, so the shipped result was a switch
+    // that moved the knob markings while the placards inches away held still.
+    // Gating is all-or-nothing across fixtures now.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+    WriteRecoloredLit(fa.objects() / "text_LIT.png", 512);
+    std::error_code ec;
+    fs::create_directories(fa.backupDir(), ec);
+    WriteRecoloredLit(fa.backupDir() / "text_LIT.png", 512);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    // The knobs fixture could derive — but NO fixture may be gated or twinned.
+    CHECK(!Exists(fa.objects() / "lamps_photon_led.obj"));
+    CHECK(!Exists(fa.objects() / "knobs_photon_led.obj"));
+    CHECK(!Contains(Read(fa.objects() / "lamps.obj"),
+                    "ToLissPhoton/interior/integral"));
+    CHECK(!Contains(Read(fa.objects() / "knobs.obj"),
+                    "ToLissPhoton/interior/integral"));
+    const std::string acf = Read(fa.folder() / "ToLissA320.acf");
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_led.obj"), -1);
+    CHECK_EQ(acf_attach::FindObj(acf, "knobs_photon_led.obj"), -1);
+}
+
+TEST("integral: a poisoned backup heals from a provably-stock objects/ copy") {
+    // The backup already exists and holds OUR OUTPUT (the lost-manifest
+    // poisoning above); objects/ is stock — say a ToLiss update just restored
+    // it. `BackupOnce` skips (already have one) and would leave the poison in
+    // place forever: this install works, but the NEXT one finds our output in
+    // objects/, falls back to the poisoned backup, and refuses. The refresh is
+    // what makes one clean re-sync heal the aircraft durably.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+    const std::string stockBytes = Read(fa.objects() / "text_LIT.png");
+    std::error_code ec;
+    fs::create_directories(fa.backupDir(), ec);
+    WriteRecoloredLit(fa.backupDir() / "text_LIT.png", 512);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    // The install went ahead in full…
+    CHECK(Exists(fa.objects() / "lamps_photon_led.obj"));
+    // …and the backup now holds the stock bytes objects/ carried.
+    CHECK_EQ(Read(fa.backupDir() / "text_LIT.png"), stockBytes);
+
+    // The reinstall that used to hit the refusal now has a stock source.
+    actions::Install(o, gLog);
+    CHECK(Exists(fa.objects() / "text_LIT_photon_led.png"));
+    lit::Image led;
+    std::string err;
+    CHECK(image::LoadPng(fa.objects() / "text_LIT_photon_led.png", led, err));
+    CHECK(lit::LooksRecolored(led, lit::Texture::kPlacards));
+}
+
+TEST("integral: a gated OBJ backup heals from an un-gated objects/ copy") {
+    // The OBJ twin of the texture case above: a backup that already carries the
+    // gate is not a stock file, and while objects/ holds a provably un-gated
+    // copy it is the better backup.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    GiveIntegralCockpit(fa);
+    const std::string stockObj = Read(fa.objects() / "lamps.obj");
+    std::string gated, gerr;
+    CHECK(integral::PatchText(stockObj, integral::Era::kIncandescent, "",
+                              "0.0.0", gated, gerr));
+    std::error_code ec;
+    fs::create_directories(fa.backupDir(), ec);
+    Write(fa.backupDir() / "lamps.obj", gated);
+
+    actions::Options o = fa.Opts("stock");
+    o.interior = true;
+    actions::Install(o, gLog);
+
+    CHECK_EQ(Read(fa.backupDir() / "lamps.obj"), stockObj);
+}
+
+// ─── the BSS NEO compensation, end to end ────────────────────────────────────
+
+TEST("interior: --neo brightens the staged cockpit OBJ above the user's setting") {
+    // The compensation is a multiplier on the intensity, baked into slot 8 of
+    // every light line. See core/neomod.h for why, core/patch_intensity.h for
+    // how, and docs/neo_compat_plan.md for the evidence.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+    Write(fa.root() / "Output" / "preferences" / kProfilesJsonName,
+          "{\n  \"$cockpit\": {\"optimized\": 0, \"intensity\": 2.00}\n}\n");
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    o.neo = true;
+    actions::Install(o, gLog);
+
+    const double expected = intensity::EffectiveFactor(2.0, true);
+    const std::string obj = Read(fa.objects() / kInteriorObj);
+    CHECK(intensity::SameFactor(intensity::FactorIn(obj), expected));
+    // and it is genuinely brighter than the setting alone
+    CHECK(expected > 2.0);
+    // the sentinels still survive the bigger factor
+    CHECK(Contains(obj, kInteriorObjNeedle));
+    CHECK(marker::Parse(obj).found);
+}
+
+TEST("interior: --neo is PERSISTED, or the plugin undoes it on the next load") {
+    // ⚠ THE BUG THIS EXISTS TO PREVENT. The plugin recomputes the same product on
+    // every aircraft load and rewrites the OBJ when it disagrees. If the
+    // installer baked a boost the plugin could not know about, the very next load
+    // would quietly patch it back out and the cockpit would go dim again some
+    // time after a successful install — with nothing to connect the two events.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    o.neo = true;
+    actions::Install(o, gLog);
+
+    const std::string root = fsutil::PathToUtf8(fa.root());
+    CHECK(intensity::SavedNeo(root));
+    // The factor the plugin would compute on load equals the one on disk.
+    const double asPluginSeesIt =
+        intensity::EffectiveFactor(intensity::SavedFactor(root),
+                                   intensity::SavedNeo(root));
+    CHECK(intensity::SameFactor(
+        intensity::FactorIn(Read(fa.objects() / kInteriorObj)), asPluginSeesIt));
+}
+
+TEST("interior: a DRY RUN never writes the NEO flag to the user's preferences") {
+    // ⚠ The one write in InstallInterior that lands OUTSIDE the aircraft folder,
+    // and therefore the easy one to forget: nothing about a dry run on an
+    // aeroplane suggests a file two directories away in Output/preferences.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    o.neo = true;
+    o.dryRun = true;
+    actions::Install(o, gLog);
+
+    CHECK(!intensity::SavedNeo(fsutil::PathToUtf8(fa.root())));
+    CHECK(!fs::exists(fa.root() / "Output" / "preferences" / kProfilesJsonName));
+}
+
+TEST("interior: installing WITHOUT --neo clears a previously saved flag") {
+    // Unticking the box has to mean something. Without this the flag would be
+    // write-once and a user who removed the lighting mod could never get their
+    // authored cockpit back from the installer.
+    TempDir tmp;
+    FakePayload pay(tmp / "payload");
+    FakeAircraft fa(tmp.path());
+    Write(fa.folder() / "ToLissA320.acf", StockAcf());
+    const std::string root = fsutil::PathToUtf8(fa.root());
+    CHECK(intensity::SaveNeo(root, true));
+
+    actions::Options o = fa.Opts();
+    o.interior = true;
+    o.neo = false;
+    actions::Install(o, gLog);
+
+    CHECK(!intensity::SavedNeo(root));
+    // and the OBJ is back to the authored brightness, carrying no trace
+    const std::string obj = Read(fa.objects() / kInteriorObj);
+    CHECK(!Contains(obj, intensity::kFactorPrefix));
+    CHECK(Contains(obj, "airplane_panel_sp -0.472 1.09 -3.35 1 0.37 0.16 0 "
+                        "1.414 0 0 0 1"));
 }

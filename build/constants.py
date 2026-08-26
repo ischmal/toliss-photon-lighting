@@ -60,15 +60,25 @@ INTERIOR_OBJ = "lights_inn.obj"
 INTERIOR_AIRFRAMES = ("a319", "a320", "a321")
 
 # Gus's canonical texture set, staged into the bundle by make_release.py.
+#
+# ⚠ `text_LIT.png` AND `knobs_LIT.png` LEFT THIS LIST ON 2026-08-24 and must not
+# come back. They are no longer SHIPPED at all: the installer DERIVES them, once
+# per era, from whatever stock file the aircraft actually has
+# (core/lit_recolor + core/patch_integral), which is what lets the user switch
+# Incandescent/LED in the sim and what stopped the A321 wearing the A319/A320
+# trim-scale artwork. Putting them back here would stage two 8 MB files the
+# installer never reads and grow every bundle by 24 MB.
+#
+# ⚠ Pinned against core/constants.cpp by tests/test_version.py, so a change on
+# either side without the other fails the suite rather than shipping a bundle
+# missing a texture.
 INTERIOR_TEXTURES = (
     "chairs_LIT.png",
     "kitchens_LIT.png",
     "knobs.png",
-    "knobs_LIT.png",
     "panels_overhead_LIT.png",
     "pedals_details_1.png",
     "pedals_details_2.png",
-    "text_LIT.png",
     "walls_bottom_LIT.png",
     "walls_outer_LIT.png",
     "walls_top_LIT.png",

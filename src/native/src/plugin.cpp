@@ -56,6 +56,7 @@
 // ⚠ photoncore links NO XPLM and knows nothing about X-Plane. The dependency runs
 // one way only: plugin.cpp calls into core, never the reverse.
 #include "core/constants.h"
+#include "core/fsutil.h"
 #include "core/version.h"
 
 // The cockpit-light intensity multiplier's patcher. Shared with the installer,
@@ -67,6 +68,21 @@
 // get one was tried and rejected (it changes the look, and it buys a per-frame
 // callback per light for a value that changes once a month).
 #include "core/patch_intensity.h"
+
+// Switchable integral lighting. ⚠ ALL THIS SIDE WANTS FROM IT IS THE DATAREF
+// NAME AND THE FILE SUFFIX — the gating, the recolor and the `.acf` attachment
+// are all the installer's, and this plugin never writes any of them. It is
+// included rather than the two strings being spelled here for the reason every
+// shared constant in this file is: a reader and a writer that each own their own
+// literal is exactly how the OBJ's gate and the plugin's dataref would come to
+// disagree, and that failure is silent — the branch simply never draws.
+#include "core/patch_integral.h"
+
+// The support report the Help tab saves: which log files to collect and the XML
+// they go into. Core rather than here because the collection rules (X-Plane's
+// rotated Log.N.txt, the newest installer log PER AIRFRAME) are facts about the
+// installer's own output, and because they are worth testing without a simulator.
+#include "core/support.h"
 
 // Every window in this plugin is Dear ImGui, shipping ones included, so the
 // backend comes in unconditionally.
@@ -107,6 +123,22 @@
 
 namespace fs = std::filesystem;
 
+
+// ─── paths that come from X-Plane ────────────────────────────────────────────
+// X-Plane hands every path to a plugin as UTF-8 (XPLM_USE_NATIVE_PATHS, enabled in
+// XPluginStart), and XPLMUtilities.h says outright that Windows plugins must turn
+// that into UTF-16 themselves. `fs::path(const char*)` does NOT: on MSVC it reads
+// the bytes through the ANSI code page, so an X-Plane root or aircraft folder with
+// a character outside that page (`C:\Users\Jörg\…`, a renamed `ToLiss A320 – neo`)
+// resolved to a path that does not exist — no airframe key, "cockpit mod NOT
+// installed", a profiles file that never saved (2026-08-22). One conversion, at
+// the one boundary where X-Plane's strings enter, and its inverse for every log
+// line: `path::string()` on MSVC THROWS for a character the page cannot spell, and
+// a throw inside a flight-loop or menu callback takes the sim down.
+static fs::path PathFromXplm(const char* utf8) {
+    return photon::fsutil::PathFromUtf8(utf8 ? std::string(utf8) : std::string());
+}
+static std::string PathStr(const fs::path& p) { return photon::fsutil::PathToUtf8(p); }
 // ================================ constants ==================================
 static const int NCAT = 9;
 
@@ -169,7 +201,12 @@ static ExteriorSettings gExterior;
 // exception (grouped by fixture role). panel[1],[2] is FLOOD LT MAIN PNL, not
 // the map lights; that pair shipped the wrong way round once, and the `mainpnl`
 // assignment still rests on a single in-sim observation. See CLAUDE.md.
-static const int NINT = 5;
+// ⚠ SIX SINCE 2026-08-24, AND THE SIXTH IS THE FIRST TWO-VALUED ONE THAT HAS
+// EVER SHIPPED. `integral` is the backlit placards and knob markings, and it has
+// two looks where the other five have three, because a filament lamp behind a
+// placard does not read as two eras — see `values` below, which has carried this
+// case since the dome briefly used it in 2026.
+static const int NINT = 6;
 struct IntCategory {
     const char* key;
     const char* dataref;
@@ -188,7 +225,30 @@ static const IntCategory kIntCategories[NINT] = {
      {"Old Halogen", "New Halogen", "LED"}},
     {"console",  "ToLissPhoton/interior/console",  "Console Lights",    3,
      {"Old Halogen", "New Halogen", "LED"}},
+    // ⚠ NOT A LAMP — the backlit ARTWORK. Every row above groups fixtures by the
+    // rheostat that dims them; this one groups by texture, because what it
+    // switches is which `text_LIT.png` / `knobs_LIT.png` the cockpit OBJs are
+    // bound to (core/patch_integral). That makes it the one row whose look lives
+    // in a FILE the installer computed rather than in a light line.
+    //
+    // ⚠ TWO VALUES, AND "INCANDESCENT" RATHER THAN "HALOGEN" BECAUSE OF IT. The
+    // value space folds both halogen eras onto 0, so a label reading "Halogen"
+    // beside rows offering "Old Halogen" and "New Halogen" would read as a third
+    // and contradictory answer to the same question. Incandescent is the honest
+    // superset: a halogen lamp is an incandescent one, so the word says "the
+    // filament era" without claiming which half of it.
+    //
+    // ⚠ `IntValueForProfile` ALREADY DOES THE FOLD — both halogen profiles map to
+    // 0 and LED to 1 — which is exactly the default asked for and needs no
+    // special case here. That machinery has been live and unused since the dome
+    // stopped being two-valued on 2026-08-03; this is its first real user.
+    {"integral", photon::integral::kDataRef,       "Integral Lights",   2,
+     {"Incandescent", "LED", nullptr}},
 };
+
+// Index of the row above, for the availability gate. ⚠ Named rather than spelled
+// as 5 at the two sites that need it, for the same reason kIntDomeIndex is.
+static const int kIntIntegralIndex = 5;
 // ─── the reduced-light-count cockpit ─────────────────────────────────────────
 // A SIXTH interior dataref, and deliberately not a category: it selects between
 // two ways of drawing the same look, not between two looks.
@@ -221,8 +281,41 @@ struct CockpitSettings {
     // and "my cockpit is too dim" is a statement about this machine's setup
     // (environment mods, monitor), not about one paint scheme.
     float intensity = 1.0f;
+    // Does this machine run a lighting mod that raises X-Plane's spill-light
+    // cutoff (BSS NEO and friends), so the cockpit has to be built brighter to
+    // show through it? ⚠ NOT A LOOK — it is a statement about the machine, like
+    // its two neighbors, which is why it is global and lives here rather than in
+    // a per-livery entry. core/neomod.h has the mechanism; the compensation is
+    // intensity::EffectiveFactor, and BOTH halves of the project must compute it
+    // the same way or they patch the OBJ against each other on alternate loads.
+    bool neo = false;
 };
 static CockpitSettings gCockpit;
+
+// What the 1 Hz probe last saw on `sim/private/controls/lights/spill_cutoff_level`,
+// and whether that is high enough to be culling our lamps. ⚠ ADVISORY ONLY — it
+// drives a line of text, never the patch. The patch follows `gCockpit.neo`, which
+// is the user's answer, because the installer settled that question on a screen
+// and a runtime probe that quietly disagreed would rewrite the cockpit behind them.
+static float gSpillCutoffSeen = -1.0f;
+static bool  gSpillCutoffHigh = false;
+
+// Above this, the probe calls the cutoff "high enough to dim the cockpit".
+//
+// ⚠ A SEED, and deliberately NOT X-Plane's stock default — that value is
+// version-dependent and this repo has not measured it (docs/neo_compat_plan.md
+// §7). The mod that prompted all this sets 0.09.
+//
+// ⚠ BIASED HIGH ON PURPOSE, because the two mistakes cost wildly different
+// amounts. Too high: no hint — and the installer's content scan still names the
+// mod on its own, the checkbox still works, nothing is lost but a nudge. Too
+// low — anywhere at or below the UNMEASURED stock value — and every clean
+// install shows "a spill-dimming add-on appears to be active, tick the box",
+// i.e. Photon itself talks users into doubling a cockpit nothing is dimming:
+// the exact harm this feature exists to end, now self-inflicted at scale. So
+// this sits just under the one value a mod is KNOWN to write, not at half of
+// it, until the §7 sweep replaces the guess with a measurement.
+static const float kSpillCutoffConcern = 0.07f;
 
 // What the OBJ the sim ACTUALLY LOADED carries, captured by DetectInstall
 // before the on-load re-apply brings the file up to date. The Settings tab
@@ -1307,6 +1400,22 @@ static bool gInteriorInstalled = false;
 // saying how.
 static bool gInteriorSupported = false;
 
+// Whether THIS aircraft carries the switchable integral lighting — the gated
+// cockpit OBJs and, crucially, their LED twins.
+//
+// ⚠ DETECTED FROM THE TWIN'S PRESENCE, NOT FROM THE GATE IN `lamps.obj`, and the
+// difference is the half-installed aircraft. A gated `lamps.obj` whose twin is
+// missing or unattached draws NOTHING at all in the LED branch: the row would be
+// offering a look that turns the placards off. The twin is what has to exist for
+// the choice to be real, so it is what detection asks about.
+//
+// ⚠ An install from before this feature has neither, and the row is HIDDEN
+// there rather than shown inert — unlike the Cockpit TAB, which is shown
+// disabled because a whole page has room to name the installer option that fixes
+// it. One row in a grid of five has no such room, and a dead sixth row reads as
+// a look that is broken rather than as one that is not installed.
+static bool gIntegralInstalled = false;
+
 // ⚠ MAY PHOTON TOUCH THIS AIRCRAFT? The one question every per-frame entry point
 // asks, and it is a function rather than a test spelled out at each site because
 // it is now TWO flags and a site that asks only one of them fails silently in
@@ -1905,7 +2014,7 @@ static std::string CurrentLiveryKey() {
 static fs::path ProfilesFilePath() {
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_profiles.json";
+    return PathFromXplm(root) / "Output" / "preferences" / "ToLissPhoton_profiles.json";
 }
 
 // migrate one parsed value into an Entry; returns false to drop it (== Auto)
@@ -1951,6 +2060,15 @@ static bool EntryFromJson(const json::Value& v, Entry& out) {
             // cockpit looking exactly as the user left it; defaulting to 0 would
             // silently reset their MAIN PNL flood to old halogen.
             if (!haveMainPnl) out.intCats[kIntMainPnlIndex] = out.intCats[kIntMapIndex];
+            // ⚠ `integral` NEEDS NO SUCH MIGRATION, and the difference from
+            // `mainpnl` is worth stating so nobody adds one. `mainpnl` was SPLIT
+            // out of an existing category, so its value already existed under
+            // another name and defaulting it to 0 would have silently reset a
+            // choice the user had made. `integral` is genuinely new: before it
+            // existed the placards were always Gus's incandescent look, so 0 is
+            // not a fallback, it is what this aircraft has actually been showing.
+            // Nor is the SCHEMA bumped — that marks a value space CHANGING, and
+            // adding a category changes none.
             // MIGRATION schema 2 -> 3, the dome going back to ternary: on the v2
             // scale 0 was fluorescent and 1 was LED, so a stored 1 read on the
             // ternary scale would come back as NEW HALOGEN. Only v2 moves — v1 is
@@ -2036,6 +2154,11 @@ static void CockpitFromJson(const json::Value& v) {
     // `i` would truncate 2.5x to 2x (see the gain note in DisplaysFromJson).
     if (f && f->type == json::Value::Int)
         gCockpit.intensity = ClampIntensity((float)f->d);
+    // ⚠ THE SAME KEY THE INSTALLER WRITES (intensity::kNeoJsonKey), because the
+    // installer is the usual author of this one — it asks on a screen, and the
+    // sim is closed at the time so nothing there could have probed for it.
+    const json::Value* n = v.find(photon::intensity::kNeoJsonKey);
+    if (n && n->type == json::Value::Int) gCockpit.neo = n->i != 0;
 }
 
 // The third global block: the waveform override (see ExteriorSettings). Its own
@@ -2099,12 +2222,23 @@ static void SaveProfilesFile() {
         // means default" is only safe for a setting whose default is a state the
         // user can also choose on purpose, and a switch has no such reading.
         {
-            char buf[128];
+            // ⚠ `neo` IS WRITTEN AS A REAL JSON BOOLEAN, not as the 0/1 its
+            // neighbor `optimized` uses, and the difference is load-bearing:
+            // the INSTALLER reads this key back through nlohmann and requires
+            // `is_boolean()`, so a numeric 1 here would read as "no mod" over
+            // there. The two halves would then bake different factors and
+            // re-patch the cockpit against each other on alternate loads. Our
+            // own parser accepts both spellings (it maps true/false onto Int),
+            // which is what lets this side be the strict one.
+            char buf[192];
             std::snprintf(buf, sizeof(buf),
-                          ",\n  \"%s\": {\"optimized\": %d, \"%s\": %.2f}",
+                          ",\n  \"%s\": {\"optimized\": %d, \"%s\": %.2f,"
+                          " \"%s\": %s}",
                           kCockpitKey, gCockpit.optimized ? 1 : 0,
                           photon::intensity::kIntensityJsonKey,
-                          gCockpit.intensity);
+                          gCockpit.intensity,
+                          photon::intensity::kNeoJsonKey,
+                          gCockpit.neo ? "true" : "false");
             f << buf;
         }
         // And the third. Always written, same argument again: "absent means
@@ -2273,7 +2407,7 @@ static fs::path LoadedInteriorObjPath() {
     char fileName[512] = {0}, path[512] = {0};
     XPLMGetNthAircraftModel(0, fileName, path);
     if (!path[0]) return fs::path();
-    return fs::path(path).parent_path() / "objects" / kInteriorObjName;
+    return PathFromXplm(path).parent_path() / "objects" / kInteriorObjName;
 }
 
 // Bake gCockpit.intensity into the loaded aircraft's lights_inn.obj. Called
@@ -2291,8 +2425,15 @@ static void ApplyInteriorIntensity(const char* why) {
     const fs::path obj = LoadedInteriorObjPath();
     if (obj.empty()) return;
     std::string detail;
+    // ⚠ EffectiveFactor, NOT the raw setting — this is the plugin half of the
+    // agreement described in core/patch_intensity.h. If this passed the bare
+    // slider value while the installer baked the compensated one, every aircraft
+    // load would "correct" the file back down, and the cockpit would go dim again
+    // some time after a successful install with nothing to connect the two.
     const photon::intensity::Applied r = photon::intensity::ApplyToFile(
-        obj, (double)gCockpit.intensity, detail);
+        obj,
+        photon::intensity::EffectiveFactor((double)gCockpit.intensity, gCockpit.neo),
+        detail);
     if (r == photon::intensity::Applied::kAlready) return;
     Log(std::string("cockpit light intensity (") + why + "): " + detail);
 }
@@ -2305,6 +2446,19 @@ static void CommitCockpitIntensity() {
     gCockpit.intensity = ClampIntensity(gCockpit.intensity);
     SaveProfilesFile();
     ApplyInteriorIntensity("setting changed");
+}
+
+// The BSS NEO compensation switch. Same shape as CommitCockpitIntensity because
+// it changes the same baked number — one flag, saved, then the file rewritten.
+// ⚠ IT MUST REWRITE THE OBJ, not merely save: the flag is a multiplier on the
+// intensity, so a version of this that only persisted would leave the cockpit
+// unchanged until the user happened to move the slider afterwards.
+static void SetCockpitNeo(bool on) {
+    if (gCockpit.neo == on) return;
+    gCockpit.neo = on;
+    SaveProfilesFile();
+    ApplyInteriorIntensity(on ? "BSS NEO compensation on"
+                              : "BSS NEO compensation off");
 }
 
 // The waveform override, same shape as the two above: one flag, no per-livery
@@ -2581,7 +2735,7 @@ static const int kMaxCols = 3;
 static const int kMaxBtns = kMaxCols;   // a row can never have more buttons than columns
 
 // Which tab the window opens on. The menu's "Custom..." / "Displays..." /
-// "Reinstall required..." / "About..." items all open the SAME window, so each
+// "Reinstall required..." / "Settings..." items all open the SAME window, so each
 // has to be able to say where.
 //
 // ⚠ THE ORDER IS THE ORDER THE TABS ARE SUBMITTED IN, and that is wire rather
@@ -2599,11 +2753,17 @@ static const int kMaxBtns = kMaxCols;   // a row can never have more buttons tha
 // may drive — as against the three tabs before it, which choose how a light
 // LOOKS. It sits last of the four for that reason, and before About because About
 // is not a setting at all.
+//
+// kTabHelp is LAST, after About, and is the other tab that is always present. It
+// is where a user goes when the thing is not working, so it must be reachable on
+// a reverted install — and it is deliberately not first: a support page at the
+// head of the bar is what an add-on that expects to be broken looks like.
 enum { kTabError = 0, kTabExterior, kTabCockpit, kTabDisplays, kTabSettings,
-       kTabAbout, kTabCount };
+       kTabAbout, kTabHelp, kTabCount };
 // -1 = "leave whichever tab is showing alone", which is what an already-open
 // window gets when the user clicks the menu item for the tab they are on.
 static int gWantTab = -1;
+
 
 // One profile axis. No UiWindow member any more — there is one window, and this
 // describes a TAB in it.
@@ -2639,6 +2799,20 @@ static int RowButtons(const ConfigAxis& w, int row, RowButton out[kMaxBtns]) {
 
 static const char* RowLabel(const ConfigAxis& w, int row) {
     return w.interior ? kIntCategories[row].label : kCategories[row].label;
+}
+
+// Is this row worth showing on THIS aircraft? Only one row has ever answered no:
+// `integral` needs the LED twin OBJs, which an install from before 2026-08-24
+// did not write.
+//
+// ⚠ HIDDEN, NOT DISABLED — see gIntegralInstalled. And ⚠ the value behind a
+// hidden row is still maintained: the profile writes all six every time, so a
+// user who reinstalls gets the row back already carrying the era their profile
+// implies, rather than a stale 0 from the last time it was visible.
+static bool RowVisible(const ConfigAxis& w, int row) {
+    if (!w.interior) return true;
+    if (row == kIntIntegralIndex) return gIntegralInstalled;
+    return true;
 }
 
 static int RowCurrentValue(const ConfigAxis& w, int row) {
@@ -2749,6 +2923,7 @@ static void BuildCategoryGrid(const ConfigAxis& w, bool inert) {
     for (int c = 0; c < w.cols; ++c) ImGui::TableSetupColumn("");
 
     for (int row = 0; row < w.rows; ++row) {
+        if (!RowVisible(w, row)) continue;
         ImGui::PushID(row);
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
@@ -2787,9 +2962,6 @@ static void BuildCategoryGrid(const ConfigAxis& w, bool inert) {
                 SetCategoryValue(w, row, btn[i].value);
             // Popped before the tooltip below, which wants ordinary text.
             if (!lit) ImGui::PopStyleColor();
-            if (btn[i].colFirst != btn[i].colLast && ImGui::IsItemHovered())
-                UiTooltip("One look covering more than one era - this fitting "
-                          "does not distinguish them.");
             ImGui::PopID();
         }
         ImGui::PopID();
@@ -2798,6 +2970,11 @@ static void BuildCategoryGrid(const ConfigAxis& w, bool inert) {
 }
 
 static void BuildConfigTab(const ConfigAxis& w) {
+    // ⚠ SCOPED BY AXIS. Both tabs are this one function, so a widget it submits
+    // under a literal label — the "Adjust brightness..." button at the bottom —
+    // would carry the SAME ImGui id on the Exterior tab and the Cockpit one. See
+    // tests/test_ui.py, which is what caught this the moment that button landed.
+    ImGui::PushID(w.interior ? "cockpit" : "exterior");
     // ⚠ THE COCKPIT TAB IS ALSO BUILT WHERE THE MOD IS NOT INSTALLED — see the
     // block comment above the tab enum. Everything below is then submitted
     // disabled, under a line saying why and what to do about it. The exterior
@@ -2831,7 +3008,25 @@ static void BuildConfigTab(const ConfigAxis& w) {
     // the flash?") — and both are on the Settings tab now, with the rest of the
     // switches that are about the plugin rather than about a look. A control that
     // does not answer "which era?" has no home on a page that asks only that.
+    //
+    // ⚠ A SENTENCE, NOT A CONTROL — which is the whole of why it does not break
+    // the rule above. It stores nothing, switches nothing and goes nowhere; it
+    // names the page that owns the setting and stops. (It WAS a button that
+    // jumped to that tab, briefly, on 2026-08-24. A button is a control, and one
+    // sitting under a grid of era choices reads as a sixth thing to choose.)
+    //
+    // The rule above is what keeps brightness off this page at all — it is
+    // global, a statement about the machine rather than a per-livery era choice
+    // — and its cost was that the question this page raises most often ("this
+    // look is too dark") had no answer written anywhere on it.
+    if (w.interior && gInteriorInstalled) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        UiHint("Cockpit light brightness can be adjusted in the Settings tab.");
+    }
     ImGui::EndDisabled();
+    ImGui::PopID();
 }
 
 // ---- the Displays tab -------------------------------------------------------
@@ -3049,30 +3244,76 @@ static void BuildSettingsTab() {
         // Shown exactly while what the sim RENDERS (captured at load) differs
         // from the setting — not while the file differs, which it stops doing
         // the moment the commit rewrites it.
-        if (!photon::intensity::SameFactor((double)gIntensityLoadedFactor,
-                                           (double)gCockpit.intensity))
+        if (!photon::intensity::SameFactor(
+                (double)gIntensityLoadedFactor,
+                photon::intensity::EffectiveFactor((double)gCockpit.intensity,
+                                                   gCockpit.neo)))
             UiHint("Must restart X-Plane to see changes.");
+
+        // The BSS NEO compensation. ⚠ IT SITS UNDER THE SLIDER IT MULTIPLIES,
+        // not beside the Performance switches: it is the same quantity said a
+        // second way, and a user who has turned the brightness up because of
+        // this mod needs to see the two together to understand why ticking it
+        // makes the cockpit brighter again.
+        //
+        // ⚠ NOT AUTO-TICKED FROM THE PROBE. The installer asks this on a screen
+        // and the answer is saved; a runtime probe that flipped a persisted
+        // setting would change the user's aeroplane without them asking, and
+        // would fight the checkbox they had deliberately cleared. The probe's
+        // job is the HINT below — say what was seen, let them decide.
+        bool neo = gCockpit.neo;
+        if (ImGui::Checkbox("Compensate for BSS NEO / spill-dimming mods", &neo))
+            SetCockpitNeo(neo);
+        UiHelpMarker(
+            "Some global lighting add-ons raise X-Plane's spill-light cutoff, "
+            "which makes this cockpit's lamps look faint however high you set "
+            "the brightness above. This rebuilds them brighter to compensate. "
+            "Leave it off if you do not run such an add-on.");
+        // ⚠ Only when the probe DISAGREES with the setting, in either direction.
+        // A hint that merely restated a correct setting would be noise on every
+        // frame of every session that had this right.
+        if (gSpillCutoffHigh && !gCockpit.neo) {
+            UiHint("A spill-dimming lighting add-on appears to be active on this "
+                   "install. Ticking the box above should restore the cockpit.");
+        } else if (!gSpillCutoffHigh && gCockpit.neo && gSpillCutoffSeen >= 0.0f) {
+            UiHint("No spill-dimming add-on was detected on this install. If the "
+                   "cockpit looks too bright, untick the box above.");
+        }
     }
 
-    // COLLAPSED by default and under its own header. Everything above answers
-    // "what may this cost?", which is a question with an obvious right answer for
-    // most people; this one answers "how much may the plugin change?", which is
-    // not, and open by default it would be the first thing read.
+    // ⚠ AN ORDINARY SECTION, NOT A CollapsingHeader (2026-08-24). It was collapsed
+    // by default on the reading that "how much may the plugin change?" is not a
+    // question with an obvious right answer, so it should not be the first thing
+    // read. What that actually bought was a page whose last section was invisible
+    // until clicked — and both things under it are things a user comes to this tab
+    // to find: the override you turn off to troubleshoot, and the reload you press
+    // afterwards. A heading that has to be discovered is the wrong place for
+    // either. Everything above still answers "what may this cost?"; this answers
+    // "how much may the plugin change?", and the SeparatorText is the whole of the
+    // distinction that needs drawing.
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Advanced")) {
-        ImGui::Spacing();
-        bool waveform = gExterior.waveform;
-        if (ImGui::Checkbox("Allow ToLiss Photon to control strobe/beacon timing",
-                            &waveform))
-            SetWaveformOverride(waveform);
-        UiHelpMarker(
-            "This plugin overrides certain datarefs to modify the flash behavior "
-            "of strobes and beacons. You can disable this for troubleshooting or "
-            "if undesired.\n"
-            "The colors chosen on the Exterior tab still apply either way - the "
-            "colors come from the aircraft's objects and the timing from this "
-            "plugin.");
-    }
+    ImGui::SeparatorText("Advanced");
+    ImGui::Spacing();
+    bool waveform = gExterior.waveform;
+    if (ImGui::Checkbox("Allow ToLiss Photon to control strobe/beacon timing",
+                        &waveform))
+        SetWaveformOverride(waveform);
+    UiHelpMarker(
+        "This plugin overrides certain datarefs to modify the flash behavior "
+        "of strobes and beacons. You can disable this for troubleshooting or "
+        "if undesired.");
+
+    // ⚠ A SENTENCE, AND IT POINTS AT X-PLANE'S OWN RELOAD RATHER THAN AT ONE OF
+    // OURS — which is a crash fix twice over (2026-08-24). This was a
+    // "Reload aircraft..." button, then a Photon menu row, and BOTH crashed the
+    // simulator. Photon cannot issue `sim/operation/reload_aircraft` from any
+    // context it has, because the whole synchronous aircraft teardown then runs
+    // on OUR stack and X-Plane refuses the aircraft plugins' own callback cleanup
+    // as coming from "a different plugin" — leaking a live callback record into a
+    // module it then unloads. See the write-up above IssueAircraftReload.
+    ImGui::Spacing();
+    UiHint("Changes here take effect the next time this aircraft is loaded. "
+           "Reload it from X-Plane's Developer menu, or restart the simulator.");
     ImGui::PopID();
 }
 
@@ -3223,6 +3464,185 @@ static void BuildErrorTab() {
     ImGui::PopTextWrapPos();
 }
 
+// ================================ Help tab ===================================
+// The page a user reaches when it is not working, and it has exactly two jobs:
+// send them to the one place a report is read, and put everything such a report
+// needs into ONE file they can attach to it.
+//
+// ⚠ THE SAVE BUTTON IS THE WHOLE POINT OF THE TAB. "Please attach your Log.txt"
+// is already a round trip; "attach Log.txt, the three rotated Log.N.txt beside
+// it, and the installer log for whichever aircraft you installed onto - which is
+// in your OS temp folder under a name with a timestamp in it" is a round trip
+// that does not come back. The plugin knows where every one of those lives, so it
+// collects them itself. See core/support.h for the collection rules.
+
+// Where the last save went, for the line under the button. Set together and at
+// most one is ever non-empty, so the pane never has to ask which state it is in.
+static std::string gReportPath;
+static std::string gReportError;
+
+// The plugin state a maintainer would otherwise have to ask for, one question at
+// a time. It costs nothing to be generous here: the whole file exists so that a
+// first reply can be an answer rather than a questionnaire.
+static std::vector<photon::support::ReportFact> CollectReportFacts() {
+    using photon::support::ReportFact;
+    std::vector<ReportFact> f;
+    auto add = [&f](const char* name, const std::string& value) {
+        f.push_back(ReportFact{name, value});
+    };
+    auto yn = [](bool b) { return std::string(b ? "yes" : "no"); };
+    auto num = [](float v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", (double)v);
+        return std::string(buf);
+    };
+
+    add("Photon version", kPhotonVersion);
+#if defined(_WIN32)
+    add("Platform", "win32");
+#elif defined(__APPLE__)
+    add("Platform", "macOS");
+#else
+    add("Platform", "Linux");
+#endif
+#if defined(PHOTON_DEV)
+    // ⚠ Worth a line of its own. A dev build has the panel probe and the light
+    // editor in it, and "the PFD is magenta" from one of those is a completely
+    // different report than the same words from a release.
+    add("Build", "PHOTON_DEV (not a release build)");
+#endif
+    if (XPLMDataRef ver = XPLMFindDataRef("sim/version/xplane_internal_version"))
+        add("X-Plane build", std::to_string(XPLMGetDatai(ver)));
+
+    char root[512] = {0};
+    XPLMGetSystemPath(root);
+    add("X-Plane folder", root);
+
+    char fileName[512] = {0}, acfPath[512] = {0};
+    XPLMGetNthAircraftModel(0, fileName, acfPath);
+    add("Aircraft", acfPath[0] ? acfPath : "(none)");
+    add("Aircraft ICAO", AircraftIcao());
+    add("Livery", CurrentLiveryKey());
+
+    add("Recognized as ToLiss", yn(gIsToLiss));
+    add("Airframe", gAirframeKey.empty() ? std::string("(unrecognized)") : gAirframeKey);
+    // The flag that decides whether anything at all runs - see PhotonRuns(). The
+    // report whose real answer is "your install was reverted" is the commonest
+    // one there is, and this is the line that says so without a conversation.
+    add("Install reverted (needs reinstall)", yn(gInstallStale));
+    add("Cockpit mod supported here", yn(gInteriorSupported));
+    add("Cockpit mod installed", yn(gInteriorInstalled));
+
+    add("Exterior profile", ProfileName(false, gProfile));
+    add("Exterior auto resolves to", ProfileName(false, gAutoExtResolved));
+    add("Cockpit profile", ProfileName(true, gIntProfile));
+    add("Cockpit auto resolves to", ProfileName(true, gAutoIntResolved));
+
+    add("Display effects (master)", yn(gDisplays.enabled));
+    add("Screen backlight", yn(gDisplays.spill) + " x" + num(gDisplays.spillGain));
+    add("Screen effects", yn(gDisplays.screenFx) + " x" + num(gDisplays.screenFxGain));
+    add("Other readout effects", yn(gDisplays.otherFx));
+
+    add("Strobe/beacon timing override", yn(gExterior.waveform));
+    add("Simplified panel floods", yn(gCockpit.optimized));
+    add("Cockpit brightness (setting)", num(gCockpit.intensity) + "x");
+    // ⚠ NOT the same number as the line above whenever the aircraft has not been
+    // reloaded since the slider moved - and that difference IS the bug report ("I
+    // turned it up and nothing happened"). See gIntensityLoadedFactor.
+    add("Cockpit brightness (as loaded)", num(gIntensityLoadedFactor) + "x");
+    return f;
+}
+
+// Build the report and write it. Runs straight from the button: it is bounded
+// (core/support.h excerpts an over-long log by SEEKING to its two ends rather
+// than reading it), deliberate, and rare.
+//
+// ⚠ IT GOES BESIDE Log.txt, IN THE X-PLANE FOLDER. That is the one directory
+// every X-Plane user has already been told how to find, because every support
+// thread in the hobby opens by asking for the file that lives there. The temp
+// folder is a fallback and not the default for the same reason: a path nobody can
+// navigate to is a report nobody attaches.
+static void SaveSupportReport() {
+    gReportPath.clear();
+    gReportError.clear();
+
+    char root[512] = {0};
+    XPLMGetSystemPath(root);
+    const std::string rootUtf8 = root;
+
+    std::vector<photon::support::LogFile> logs =
+        photon::support::XPlaneLogs(rootUtf8, 3);
+    const std::vector<photon::support::LogFile> installs =
+        photon::support::InstallerLogs(photon::support::TempDir());
+    logs.insert(logs.end(), installs.begin(), installs.end());
+
+    const std::string xml =
+        photon::support::BuildReportXml(CollectReportFacts(), logs);
+
+    std::string err;
+    gReportPath = photon::support::WriteReport(rootUtf8, xml, err);
+    if (gReportPath.empty()) {
+        // The X-Plane folder is normally writable - the sim writes Log.txt into
+        // it on every launch - but a locked-down install exists, and a report
+        // that saved SOMEWHERE beats one that refused.
+        std::string tempErr;
+        gReportPath =
+            photon::support::WriteReport(photon::support::TempDir(), xml, tempErr);
+    }
+    if (gReportPath.empty()) {
+        gReportError = err.empty() ? std::string("could not write the report") : err;
+        Log("support report FAILED: " + gReportError);
+        return;
+    }
+    Log("support report written: " + gReportPath + " (" +
+        std::to_string(logs.size()) + " log file(s), " +
+        std::to_string(xml.size()) + " bytes)");
+}
+
+static void BuildHelpTab() {
+    ImGui::PushID("help");
+    ImGui::Spacing();
+    UiParagraph("Experiencing problems? Get support by leaving a comment on the "
+                "plugin's release page.");
+    ImGui::Spacing();
+    // Same 280 px as the About tab's links and the Error tab's button, for the
+    // same reason: this window is narrow enough to sit beside a cockpit view, and
+    // a button sized to its own label sets a minimum width of its own.
+    if (ImGui::Button("Open the X-Plane.org page...", ImVec2(280.0f, 0.0f)))
+        OpenUrl(kOrgUrl);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    // ⚠ NAMES THE BUTTON, so it is edited whenever the button's label is. An
+    // instruction that says "click Save Log" under a button that says something
+    // else is read as a page describing a version the user does not have.
+    UiParagraph("When reporting an issue, please click the Generate Log File "
+                "button below and include the file with your comment.");
+    ImGui::Spacing();
+    if (ImGui::Button("Generate Log File", ImVec2(280.0f, 0.0f)))
+        SaveSupportReport();
+    UiItemTooltip("Collects X-Plane's log for this session and the three before "
+                  "it, plus the most recent installer log for each ToLiss "
+                  "aircraft, into one file you can attach to your report.");
+
+    // The path IS the result - a file the user cannot find is a file they cannot
+    // attach - so it is shown in full and wrapped rather than shortened.
+    if (!gReportPath.empty()) {
+        ImGui::Spacing();
+        UiParagraph("Saved. Please attach this file to your comment:");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(gReportPath.c_str());
+        ImGui::PopTextWrapPos();
+    } else if (!gReportError.empty()) {
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::Text("The report could not be saved: %s", gReportError.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::PopID();
+}
+
 // ---- the window -------------------------------------------------------------
 // A tab is opened programmatically by setting gWantTab and letting the frame that
 // follows pass ImGuiTabItemFlags_SetSelected. There is no SetSelectedTab call to
@@ -3285,9 +3705,18 @@ static void BuildMainUi() {
             ImGui::EndTabItem();
         }
     }
-    // The one tab that is always here, in both shapes.
+    // The two tabs that are always here, in both shapes. Help is last in the bar
+    // and last in the enum, and those two orders are the same fact — see there.
     if (ImGui::BeginTabItem("About", nullptr, TabFlags(kTabAbout))) {
         if (UiBeginPanel("##pane")) BuildAboutTab();
+        UiEndPanel();
+        ImGui::EndTabItem();
+    }
+    // ⚠ ALSO ON A REVERTED INSTALL, beside the Error tab. That is the state a
+    // user is most likely to be reporting from, and the support report it saves
+    // is the one thing that can explain how they got there.
+    if (ImGui::BeginTabItem("Help", nullptr, TabFlags(kTabHelp))) {
+        if (UiBeginPanel("##pane")) BuildHelpTab();
         UiEndPanel();
         ImGui::EndTabItem();
     }
@@ -3376,7 +3805,7 @@ static void InteriorMenuHandler(void*, void* itemRef) {
     SelectIntProfile(kIntProfileItems[i].value);
 }
 
-// The top level's clickable items — Displays... and About..., or "Reinstall
+// The top level's clickable items — Displays... and Settings..., or "Reinstall
 // required..." and About... in the stale menu — all open the one settings window,
 // on their own tab. The refcon carries the tab index directly; there is no
 // submenu here to index into, so nothing else needs it.
@@ -3426,13 +3855,14 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     //                         |            Custom...
     //                         > Displays...
     //                         ─────────
-    //                         > About...
+    //                         > Settings...
     //
     // The three AXES sit together — Exterior, Cockpit and Displays are the same
     // kind of thing, and the separator belongs under them rather than between
-    // them. About is what is left over. (A dev build appends its own separator
-    // and Dev submenu below About; the shipping build ends at About, which is
-    // why that separator lives in AppendDebugMenu and not here.)
+    // them. Settings is what is left over: it is the one page in the window with
+    // controls on it that no axis owns. (A dev build appends its own separator
+    // and Dev submenu below it; the shipping build ends here, which is why that
+    // separator lives in AppendDebugMenu and not in this function.)
     //
     // The separator under Auto sets it apart as the only ADAPTIVE choice: it
     // picks an era from the airframe rather than naming one, so it isn't a peer
@@ -3458,6 +3888,8 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     // longer show or opens a page of controls the plugin has just switched off.
     // One row saying so — pointing at the Error tab, which is the only place the
     // reason is written down — plus About is the whole of what is still true.
+    // (The window still carries its Help tab in this state; that is where the
+    // support report is saved from, and this is the state most worth reporting.)
     //
     // ⚠ gMenuHasInterior is stated FALSE rather than left over: it is compared
     // against gInteriorInstalled on every aircraft load to decide whether the
@@ -3471,6 +3903,10 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
         XPLMAppendMenuItem(gMenuID, "Reinstall required...",
                            (void*)(intptr_t)kTabError, 0);
         XPLMAppendMenuSeparator(gMenuID);
+        // ⚠ ABOUT HERE, NOT SETTINGS — the one place the two menus differ in that
+        // row, and deliberately. The ordinary menu swapped About for Settings
+        // (see below), but a reverted install HAS no Settings tab: it goes dark
+        // with the axis tabs, because nothing it switches is being driven.
         XPLMAppendMenuItem(gMenuID, "About...", (void*)(intptr_t)kTabAbout, 0);
         // Dev builds still get their submenu — the tooling is not what the
         // aircraft update broke, and a tuning session on a reverted install is a
@@ -3515,9 +3951,17 @@ static void CreatePhotonMenu() {   // not CreateMenu: collides with the Win32 AP
     }
 
     // Both go to MenuHandler, whose refcon IS the tab index.
+    //
+    // ⚠ THE ROW UNDER THE DIVIDER IS SETTINGS, NOT ABOUT (2026-08-24). About is a
+    // page nobody needs twice — a version number and a credits list — and it was
+    // holding the only menu row that is not one of the three axes, while the tab
+    // that actually has switches on it had no way in at all: you reached Settings
+    // by opening the window on some other errand and noticing the tab. The two
+    // swapped. About is still one click away, as the tab beside it.
     XPLMAppendMenuItem(gMenuID, "Displays...", (void*)(intptr_t)kTabDisplays, 0);
     XPLMAppendMenuSeparator(gMenuID);
-    XPLMAppendMenuItem(gMenuID, "About...",    (void*)(intptr_t)kTabAbout, 0);
+    XPLMAppendMenuItem(gMenuID, "Settings...", (void*)(intptr_t)kTabSettings, 0);
+
 
     // Dev builds only — a no-op in the shipping .xpl, so there is no Dev row to
     // hide or gray out. Same rule that keeps the magenta out of a release. It
@@ -3579,7 +4023,7 @@ static bool IsToLiss() {
     for (char& c : blob) c = (char)std::tolower((unsigned char)c);
     if (blob.find("toliss") != std::string::npos) return true;
     if (!path[0]) return false;
-    const fs::path objects = fs::path(path).parent_path() / "objects";
+    const fs::path objects = PathFromXplm(path).parent_path() / "objects";
     for (const photon::Airframe& af : photon::Airframes()) {
         std::error_code ec;
         if (fs::is_regular_file(objects / af.objName, ec)) return true;
@@ -3613,6 +4057,36 @@ static ObjScan ScanObj(const fs::path& obj, const char* needle) {
     return text.find(needle) != std::string::npos ? kObjModded : kObjStock;
 }
 
+// Is the LED half of the integral-lighting switch actually here? See
+// gIntegralInstalled for why the TWIN is the thing asked about.
+//
+// ⚠ A DIRECTORY LISTING, NOT A CONTENT SCAN, and that is the exception rather
+// than a lapse: everywhere else identification is by content because the files
+// belong to ToLiss and their names are their convention. These files are OURS —
+// `integral::kLedSuffix` is a name this codebase invents and writes — so the
+// name IS the content test. Reading 26 MB of `knobs_photon_led.obj` to learn
+// what its filename already says would cost a second of every aircraft load.
+//
+// ⚠ UTF-8, never `filename().string()`: the folder holds whatever ToLiss and
+// every other mod put there, and a name the active code page cannot spell throws
+// out of the middle of the walk (fsutil::PathToUtf8 carries the write-up).
+static bool DetectIntegral(const fs::path& objects) {
+    std::error_code ec;
+    if (!fs::is_directory(objects, ec) || ec) return false;
+    const std::string suffix =
+        std::string(photon::integral::kLedSuffix) + ".obj";
+    for (const auto& entry : fs::directory_iterator(objects, ec)) {
+        if (ec) break;
+        const std::string name =
+            photon::fsutil::PathToUtf8(entry.path().filename());
+        if (name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Everything the plugin needs to know about the install on THIS aircraft, from
 // one walk of its objects/ folder. Re-detected per aircraft load, never per
 // frame. XPLM_USE_NATIVE_PATHS is enabled in XPluginStart, so the model path is a
@@ -3633,10 +4107,11 @@ static void DetectInstall() {
     gAirframeKey.clear();
     gInteriorInstalled = false;
     gInteriorSupported = false;
+    gIntegralInstalled = false;
     gInstallStale      = false;
     // No path, no claim. Every flag stays at the value that changes nothing.
     if (!path[0]) { Log("install check skipped - no aircraft path"); return; }
-    const fs::path objects = fs::path(path).parent_path() / "objects";
+    const fs::path objects = PathFromXplm(path).parent_path() / "objects";
 
     ObjScan ext = kObjUnreadable;
     const std::string icao = AircraftIcao();
@@ -3688,6 +4163,7 @@ static void DetectInstall() {
     // wrong way.
     gInteriorInstalled = ScanObj(objects / kInteriorObjName, kInteriorObjNeedle)
                        == kObjModded;
+    gIntegralInstalled = DetectIntegral(objects);
     // What the sim just LOADED is what it renders until the next reload —
     // captured here, before the on-load re-apply in UpdateMenuVisibility
     // brings the file itself up to date. The Settings tab's "takes effect
@@ -3708,6 +4184,14 @@ static void DetectInstall() {
     Log(gInteriorInstalled ? "cockpit mod detected (lights_inn.obj binds our datarefs)"
         : gInteriorSupported ? "cockpit mod NOT installed - Cockpit tab shown disabled"
                              : "cockpit mod not available for this airframe");
+    // ⚠ Logged separately, and on its own line, because it is a SEPARATE answer:
+    // an install from before 2026-08-24 has the cockpit mod and no integral
+    // twins, and folding the two would make "Integral Lights row missing" read
+    // as "the cockpit mod is missing" in every report that follows.
+    Log(gIntegralInstalled
+            ? "switchable integral lighting detected (LED twin objects present)"
+            : "switchable integral lighting NOT installed - Integral Lights row "
+              "hidden (reinstall to add it)");
 }
 
 // Defined far below, with the panel-FX drivers, and called from the aircraft-load
@@ -4127,6 +4611,61 @@ static void StopEngine() {
 }
 
 // ====================== Auto re-resolution (1 Hz) ============================
+// Is something on this machine culling our cockpit spill lights?
+//
+// ⚠ SAMPLED ON THE 1 Hz LOOP, NEVER ONCE AT XPluginStart. The mods that do this
+// are FlyWithLua scripts, and they write the value at SCRIPT LOAD — whose order
+// against our start is not guaranteed. A single early read returns the pre-mod
+// value and the whole check silently reports nothing, for the whole session.
+//
+// ⚠ AND IT IS A VALUE, NOT A HANDLE, so this differs from the four retries above
+// in a way worth stating: `sim/private/*` always resolves, so there is nothing to
+// guard on "did we get one yet" — the handle was never the problem, the timing of
+// what it points at was. Unconditional, like ResolveFxFamily.
+//
+// ⚠ ADVISORY ONLY. It drives a line of text on the Settings tab and one in the
+// log; it never touches the OBJ. The compensation follows the user's saved
+// answer (`gCockpit.neo`), which the installer wrote from a screen they clicked
+// through — a probe that quietly rewrote the cockpit on disagreeing with that
+// would be the add-on changing their aeroplane behind them.
+//
+// ⚠ NO STOCK DEFAULT IS ENCODED HERE, deliberately: it is version-dependent and
+// unverified (docs/neo_compat_plan.md §7). The question asked is the physical one
+// — "is the cutoff high enough to eat lamps this dim" — against our own dimmest
+// fixture, which is a number this repo owns.
+static void ProbeSpillCutoff() {
+    double v = 0.0;
+    if (!ReadDataRefDouble("sim/private/controls/lights/spill_cutoff_level", v)) {
+        return;   // unreadable: keep the last answer, never invent a clean one
+    }
+    const float seen = (float)v;
+    // ⚠ The threshold is a SEED and is compared against nothing in the sim: it is
+    // simply "high enough that Gus's dimmest wide lamp is at risk". Retuning it is
+    // the same experiment that sets intensity::kNeoBoost.
+    const bool high = seen >= kSpillCutoffConcern;
+    if (high == gSpillCutoffHigh &&
+        (gSpillCutoffSeen >= 0.0f && std::fabs(seen - gSpillCutoffSeen) < 1e-4f)) {
+        return;   // unchanged — this runs every second, so log only on a change
+    }
+    const bool first = gSpillCutoffSeen < 0.0f;
+    gSpillCutoffSeen = seen;
+    gSpillCutoffHigh = high;
+    if (high) {
+        char buf[224];
+        std::snprintf(buf, sizeof(buf),
+                      "spill-light cutoff is %.3f - high enough to dim the cockpit "
+                      "lamps. Cockpit brightness compensation is %s.",
+                      seen, gCockpit.neo ? "ON" : "OFF (Settings tab)");
+        Log(buf);
+    } else if (!first) {
+        // Only worth a line when it CHANGED back; saying "normal" on every clean
+        // start would put a line about a mod in every user's log.
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "spill-light cutoff is %.3f (normal)", seen);
+        Log(buf);
+    }
+}
+
 static float AutoLoop(float, float, int, void*) {
     // Same gate as the engine, and for the same reason: every retry below binds
     // a ToLiss handle. ⚠ Its corollary is that NOTHING here runs on another
@@ -4171,6 +4710,7 @@ static float AutoLoop(float, float, int, void*) {
     // must change when the aircraft does. It is also cheap enough not to need the
     // guard — one string dataref read, and ResolveFxFamily logs only on a change.
     ResolveFxFamily();
+    ProbeSpillCutoff();
     // What Auto WOULD pick, resolved whichever profile is selected, so the
     // settings window's "Auto (Hybrid LED)" label is right even while the axis is
     // on Classic. Cached rather than resolved from the UI: ResolveAutoProfile
@@ -4218,7 +4758,7 @@ static void RemoveSupersededFiles() {
     char root[512] = {0};
     XPLMGetSystemPath(root);
     if (!root[0]) return;
-    fs::path plugins = fs::path(root) / "Resources" / "plugins";
+    fs::path plugins = PathFromXplm(root) / "Resources" / "plugins";
 
     // 1) retired FlyWithLua scripts
     fs::path fwl = plugins / "FlyWithLua";
@@ -4228,8 +4768,8 @@ static void RemoveSupersededFiles() {
             fs::path path = dir / name;
             std::error_code ec;
             if (fs::is_regular_file(path, ec)) {
-                if (fs::remove(path, ec) && !ec) Log("removed legacy FlyWithLua script: " + path.string());
-                else if (ec) Log("could NOT remove legacy script " + path.string());
+                if (fs::remove(path, ec) && !ec) Log("removed legacy FlyWithLua script: " + PathStr(path));
+                else if (ec) Log("could NOT remove legacy script " + PathStr(path));
             }
         }
     }
@@ -4239,8 +4779,8 @@ static void RemoveSupersededFiles() {
     fs::path pyPlugin = pyDir / kRetiredPythonPlugin;
     std::error_code ec;
     if (fs::is_regular_file(pyPlugin, ec)) {
-        if (fs::remove(pyPlugin, ec) && !ec) Log("removed retired Python plugin: " + pyPlugin.string());
-        else if (ec) Log("could NOT remove retired Python plugin " + pyPlugin.string());
+        if (fs::remove(pyPlugin, ec) && !ec) Log("removed retired Python plugin: " + PathStr(pyPlugin));
+        else if (ec) Log("could NOT remove retired Python plugin " + PathStr(pyPlugin));
     }
     // __pycache__ holds e.g. PI_ToLissPhoton.cpython-313.pyc; remove only THIS plugin's
     // cached bytecode (prefix "PI_ToLissPhoton.") so other Python plugins' caches — e.g.
@@ -4252,9 +4792,9 @@ static void RemoveSupersededFiles() {
     if (fs::is_directory(pycache, dec)) {
         for (fs::directory_iterator it(pycache, dec), end; !dec && it != end; it.increment(dec)) {
             const fs::path& p = it->path();
-            if (p.filename().string().rfind(prefix, 0) == 0 && p.extension() == ".pyc") {
+            if (PathStr(p.filename()).rfind(prefix, 0) == 0 && p.extension() == ".pyc") {
                 std::error_code rmec;
-                if (fs::remove(p, rmec) && !rmec) Log("removed stale bytecode: " + p.string());
+                if (fs::remove(p, rmec) && !rmec) Log("removed stale bytecode: " + PathStr(p));
             }
         }
     }
@@ -5552,7 +6092,7 @@ static void PopBlendFunc() {
 
 #if PHOTON_DEV
 // The probe's Multiply draw method. The compositor does not use this — it sets a
-// func per LAYER through SetFxBlend, of which multiply is one of eight.
+// func per LAYER through SetFxBlend, of which multiply is one of nine.
 static void PushMultiplyBlend() {
     PushBlendFunc();
     glBlendFunc(GL_DST_COLOR, GL_ZERO);
@@ -5660,7 +6200,7 @@ static const fs::path& PhotonPluginDir() {
 
     char name[512] = {0}, path[512] = {0}, sig[512] = {0}, desc[512] = {0};
     XPLMGetPluginInfo(XPLMGetMyID(), name, path, sig, desc);
-    const fs::path xpl(path);
+    const fs::path xpl = PathFromXplm(path);
     // .../ToLissPhoton/<arch>/ToLissPhoton.xpl -> .../ToLissPhoton/
     if (xpl.has_parent_path() && xpl.parent_path().has_parent_path()) {
         dir = xpl.parent_path().parent_path();
@@ -5669,7 +6209,7 @@ static const fs::path& PhotonPluginDir() {
 
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    dir = fs::path(root) / "Resources" / "plugins" / "ToLissPhoton";
+    dir = PathFromXplm(root) / "Resources" / "plugins" / "ToLissPhoton";
     return dir;
 }
 
@@ -5680,7 +6220,7 @@ static const fs::path& FxOverlayDir() {
 }
 
 static bool FxIsImageName(const fs::path& p) {
-    std::string ext = p.extension().string();
+    std::string ext = PathStr(p.extension());
     for (size_t i = 0; i < ext.size(); ++i) ext[i] = (char)std::tolower((unsigned char)ext[i]);
     return ext == ".png" || ext == ".jpg" || ext == ".jpeg"
         || ext == ".bmp" || ext == ".tga";
@@ -5727,7 +6267,7 @@ static void ScanFxTextures() {
         if (ec) break;
         if (!it->is_regular_file(ec) || !FxIsImageName(it->path())) continue;
         FxTexture t;
-        t.name = it->path().filename().string();
+        t.name = PathStr(it->path().filename());
         for (size_t i = 0; i < gFxTextures.size(); ++i)      // keep what is uploaded
             if (gFxTextures[i].name == t.name) { t = gFxTextures[i]; break; }
         const FxStamp now = FxStampOf(it->path());
@@ -5749,7 +6289,7 @@ static void ScanFxTextures() {
     gFxTexturesScanned = true;
     gFxMissingWarned   = false;
     Log("panel fx: " + std::to_string(gFxTextures.size()) + " overlay image(s) in "
-        + dir.string()
+        + PathStr(dir)
         + (changed ? " - " + std::to_string(changed) + " changed on disk, reloading"
                    : ""));
 }
@@ -5788,7 +6328,7 @@ static FxTexture* FxTextureByName(const std::string& name) {
 // alpha 0 has to contribute nothing to EITHER — and a straight-alpha PNG happily
 // stores bright rgb under a zero alpha, which would then be added or multiplied
 // in at full strength. Premultiplying on upload is the one place that can be
-// fixed once for all eight modes.
+// fixed once for all nine modes.
 //
 // ⚠ Must run with a GL context current, i.e. from a draw callback. Both callers
 // are draw callbacks (the panel pass and the ImGui window), so this is lazy on
@@ -5809,7 +6349,7 @@ static bool UploadFxTexture(FxTexture& t) {
     const FxStamp before = FxStampOf(file);
     t.stamp = before;
     std::ifstream in(file, std::ios::binary);
-    if (!in) { Log("panel fx: cannot open overlay " + file.string()); return false; }
+    if (!in) { Log("panel fx: cannot open overlay " + PathStr(file)); return false; }
     std::string bytes((std::istreambuf_iterator<char>(in)),
                        std::istreambuf_iterator<char>());
     if (bytes.empty()) { Log("panel fx: overlay is empty - " + t.name); return false; }
@@ -5893,11 +6433,13 @@ static void EnsureFxWhiteTexture() {
 enum {
     kFxMultiply = 0, kFxAdd, kFxScreen, kFxNormal,
     kFxSubtract, kFxBurn, kFxDarken, kFxLighten,
+    kFxBoost,
     kFxBlendCount
 };
 static const char* kFxBlendName[kFxBlendCount] = {
     "Multiply", "Add", "Screen", "Normal",
     "Subtract", "Burn", "Darken", "Lighten",
+    "Boost",
 };
 static const char* kFxBlendHelp[kFxBlendCount] = {
     "dst x src. Darkens only. Black masks itself, so a whole-rect multiply "
@@ -5913,6 +6455,9 @@ static const char* kFxBlendHelp[kFxBlendCount] = {
     "and leaves anything already darker alone. Clamps a blown-out white.",
     "max(src, dst) per channel. A FLOOR — sets a minimum glow without touching "
     "anything already brighter. The counterpart to Darken.",
+    "dst x (1 + src). A GAIN, 1x at black up to 2x at white per channel. The one "
+    "brightener whose output is proportional to what is already there, so black "
+    "stays black: scale digits up after a Subtract has zeroed the background.",
 };
 
 // ⚠ Two modes CANNOT carry an image, and it is a property of fixed-function GL
@@ -7536,7 +8081,7 @@ static const int kFxPass = 2;
 // by mode. Both halves of that are still true — but a good third of the calls ask
 // for the state that is already set, and those are removable without moving a
 // single layer. The equation and the func are tracked SEPARATELY because they
-// change on different layers: five of the eight modes are plain GL_FUNC_ADD, and
+// change on different layers: five of the nine modes are plain GL_FUNC_ADD, and
 // Add/Burn/Subtract all want (GL_ONE, GL_ONE). On the shipped 24 layers that is
 // ~19 of 48 calls that never reach the bridge.
 //
@@ -7599,7 +8144,7 @@ static bool SetFxBlend(GLenum src, GLenum dst, GLenum eq) {
 // like a wrong number — it looks like the opacity slider doing the opposite of
 // what it says.
 //
-// Six of the eight carry it the same way: the quad emits color x opacity, and
+// Seven of the nine carry it the same way: the quad emits color x opacity, and
 // the identity is black, so opacity scales plainly. That includes MULTIPLY,
 // which pays for it in the blend func instead of in the color —
 //
@@ -7723,6 +8268,19 @@ static FxQuadColor FxQuadColorFor(int blend, const float color[3], float o) {
             r *= o; g *= o; b *= o;
             a = 0.0f;
             src = GL_ONE; dst = GL_ZERO; eq = GL_MAX;
+            break;
+        case kFxBoost:
+            // dst x C + dst = dst x (1 + C): a per-channel gain, 1x at black up
+            // to 2x at white. Multiply's factor runs 0..1 and can only darken;
+            // this is the other half of DST_COLOR's range, and the one way a
+            // fixed-function brightener leaves black alone — which is the whole
+            // point: it scales a Subtract layer's residue without lifting the
+            // background that layer zeroed. Identity is black and opacity scales
+            // plainly. An image works the ordinary way (premultiplied texel x
+            // C x o, so a transparent texel contributes gain 0 = no-op).
+            r *= o; g *= o; b *= o;
+            a = 0.0f;
+            src = GL_DST_COLOR; dst = GL_ONE;
             break;
         default:                           // kFxNormal
             // Premultiplied: the texture already carries color x alpha, so the
@@ -9377,16 +9935,16 @@ static bool DbgReadManifest(const fs::path& p, const char* label, bool readOnly)
     std::error_code ec;
     if (!fs::exists(p, ec)) return false;
     std::ifstream f(p, std::ios::binary);
-    if (!f) { Log("light editor: manifest unreadable: " + p.string()); return false; }
+    if (!f) { Log("light editor: manifest unreadable: " + PathStr(p)); return false; }
     std::stringstream ss; ss << f.rdbuf();
     json::Value root;
     json::Parser parser(ss.str());
     if (!parser.value(root) || root.type != json::Value::Obj) {
-        Log("light editor: could not parse " + p.string());
+        Log("light editor: could not parse " + PathStr(p));
         return false;
     }
     if (!gDbgManifest.empty()) gDbgManifest += " + ";
-    gDbgManifest += p.filename().string();
+    gDbgManifest += PathStr(p.filename());
     if (!gDbgTarget.empty()) gDbgTarget += "+";
     gDbgTarget += label;
 
@@ -9493,7 +10051,7 @@ static void DbgLoadManifest() {
     char fileName[512] = {0}, path[512] = {0};
     XPLMGetNthAircraftModel(0, fileName, path);
     if (!path[0]) { gDbgNote = "no aircraft loaded"; return; }
-    const fs::path objs = fs::path(path).parent_path() / "objects";
+    const fs::path objs = PathFromXplm(path).parent_path() / "objects";
 
     struct Candidate { const char* label; const char* debugFile; const char* infoFile; };
     static const Candidate kCandidates[] = {
@@ -9825,7 +10383,7 @@ static void BuildDbgRectOpts() {
 static fs::path PanelDebugFilePath() {
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_paneldebug.txt";
+    return PathFromXplm(root) / "Output" / "preferences" / "ToLissPhoton_paneldebug.txt";
 }
 
 static void SavePanelDebug() {
@@ -9865,7 +10423,7 @@ static void LoadPanelDebug() {
             std::getline(f, rest);       // unknown key: skip its line, keep parsing
         }
     }
-    Log("panel debug: restored settings from " + PanelDebugFilePath().string()
+    Log("panel debug: restored settings from " + PathStr(PanelDebugFilePath())
         + " — the probe may already be drawing");
 }
 
@@ -10575,7 +11133,7 @@ static void DeserializeFxStacks(const std::string& text, int* dropped) {
 // quietly ending the round trip after exactly one save.
 static void SavePanelFx() {
     std::ofstream f(PanelFxFilePath(), std::ios::binary);
-    if (!f) { Log("panel fx: could not write " + PanelFxFilePath().string()); return; }
+    if (!f) { Log("panel fx: could not write " + PathStr(PanelFxFilePath())); return; }
     f << "# ToLiss Photon panel FX layers - generated, safe to delete.\n";
     f << "# target <name>\n";
     f << "# bright <dataref> <index> <lo> <hi> <floor>   (optional, per target)\n";
@@ -10625,7 +11183,7 @@ static void LoadPanelFx() {
         // On a shipping build this means the installer's copy is missing, which
         // is worth a line: every Displays effect will be inert and there is
         // nothing in the cockpit to see. In a dev build it is just first run.
-        Log("panel fx: no layer definition at " + PanelFxFilePath().string()
+        Log("panel fx: no layer definition at " + PathStr(PanelFxFilePath())
             + " - the panel effects have nothing to draw");
         return;
     }
@@ -10635,7 +11193,7 @@ static void LoadPanelFx() {
     DeserializeFxStacks(ss.str(), &dropped);
     Log("panel fx: restored " + std::to_string(gFxStacks.size()) + " stack(s)"
         + (dropped ? " (" + std::to_string(dropped) + " dropped)" : "")
-        + " from " + PanelFxFilePath().string()
+        + " from " + PathStr(PanelFxFilePath())
         + (gFxEnabled ? " - ENABLED" : " - disabled"));
 
     // ⚠ The overlay folder is scanned HERE, not on first draw. It walks a
@@ -10657,7 +11215,7 @@ static void LoadPanelFx() {
 static fs::path PanelFxJournalPath() {
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_panelfx_history.txt";
+    return PathFromXplm(root) / "Output" / "preferences" / "ToLissPhoton_panelfx_history.txt";
 }
 
 // Two different recoveries, because two different things go wrong.
@@ -11053,12 +11611,16 @@ static void BuildFxLayerImageRow(FxLayer& layer, bool* dirty, std::string* what)
 
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
-        if (ImGui::SliderFloat("tile", &layer.tile, 0.25f, 8.0f, "%.2fx")) {
+        // The floor is not taste: tile 0 samples one texel and reads as a flat
+        // color, not as a bad value. AlwaysClamp so a typed 0 hits it too.
+        if (ImGui::DragFloat("tile", &layer.tile, 0.05f, 0.01f, FLT_MAX, "%.2fx",
+                             ImGuiSliderFlags_AlwaysClamp)) {
             *dirty = true; *what = "change layer tiling";
         }
         if (ImGui::IsItemHovered())
             UiTooltip("How many times the image repeats across the target. "
-                      "1 stretches it to fit.");
+                      "1 stretches it to fit. Drag to adjust, Ctrl+Click to "
+                      "type any value.");
     }
 
     if (missing) {
@@ -12572,7 +13134,7 @@ static void BuildFxHistoryPane() {
 
     UiHint("Every edit is journalled to %s. Restore brings a snapshot back as a "
            "new edit, so nothing is lost by trying one.",
-           PanelFxJournalPath().string().c_str());
+           PathStr(PanelFxJournalPath()).c_str());
 
     ImGui::Separator();
     if (!ImGui::BeginTable("hist", 3,
@@ -13055,7 +13617,7 @@ static void BuildFxTab() {
                   "immediately. Nothing is picked up on its own.\n"
                   "Shift-click to force a re-read of every image, changed or "
                   "not.",
-                  FxOverlayDir().string().c_str());
+                  PathStr(FxOverlayDir()).c_str());
     ImGui::SameLine();
     if (ImGui::Checkbox("Follow display brightness", &gFxFollowBrightness)) SavePanelFx();
     if (ImGui::IsItemHovered())
@@ -13095,7 +13657,7 @@ static void BuildFxTab() {
     UiHint("Broader targets composite first, so a group is a base and its "
            "members refine it. A layer can be a flat color or an image from "
            "%s (%d found).",
-           FxOverlayDir().string().c_str(), (int)gFxTextures.size());
+           PathStr(FxOverlayDir()).c_str(), (int)gFxTextures.size());
 
     BuildFxAmbientPane();
     // Beside the ambient pin and not inside the per-target source pane: both are
@@ -13154,7 +13716,7 @@ static std::string gRepoPath;
 static fs::path DevPrefsPath() {
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_dev.txt";
+    return PathFromXplm(root) / "Output" / "preferences" / "ToLissPhoton_dev.txt";
 }
 
 static void SaveDevPrefs() {
@@ -13164,7 +13726,7 @@ static void SaveDevPrefs() {
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     if (!f) return;
     f << "repo " << gRepoPath << "\n";
-    Log("dev: saved dev prefs to " + p.string());
+    Log("dev: saved dev prefs to " + PathStr(p));
 }
 
 static void LoadDevPrefs() {
@@ -13416,10 +13978,10 @@ static void DbgLogDsl(const DbgLight& l) {
 // debug OBJ silently hiding the gate it is meant to show.
 static fs::path DbgTuningFilePath() {
     if (!gRepoPath.empty())
-        return fs::path(gRepoPath) / ".scratch" / "light_tuning.txt";
+        return photon::fsutil::PathFromUtf8(gRepoPath) / ".scratch" / "light_tuning.txt";
     char root[512] = {0};
     XPLMGetSystemPath(root);
-    return fs::path(root) / "Output" / "preferences" / "ToLissPhoton_tuning.txt";
+    return PathFromXplm(root) / "Output" / "preferences" / "ToLissPhoton_tuning.txt";
 }
 
 static bool DbgLightChanged(const DbgLight& l) {
@@ -13464,7 +14026,7 @@ static void DbgSaveTuning(bool quiet) {
     fs::create_directories(p.parent_path(), ec);
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     if (!f) {
-        gDbgNote = "could not write " + p.string();
+        gDbgNote = "could not write " + PathStr(p);
         Log("light editor: " + gDbgNote);
         return;
     }
@@ -13524,10 +14086,10 @@ static void DbgSaveTuning(bool quiet) {
         f << ";\n\n";
     }
     if (!changed) f << "# (no per-light edits)\n";
-    gDbgNote = "saved " + std::to_string(changed) + " edited light(s) -> " + p.string();
+    gDbgNote = "saved " + std::to_string(changed) + " edited light(s) -> " + PathStr(p);
     if (!quiet) Log("light editor: " + gDbgNote);
     else        Log("light editor: auto-saved " + std::to_string(changed)
-                    + " edited light(s) -> " + p.string());
+                    + " edited light(s) -> " + PathStr(p));
 }
 
 // Called from the two paths that would otherwise DISCARD a session's work: the
@@ -13672,11 +14234,11 @@ static void DbgLoadTuning() {
 
     if (!ok && !stale && !gone) return;
     std::string note = "restored " + std::to_string(ok) + " tuned light(s) from "
-                     + p.filename().string();
+                     + PathStr(p.filename());
     if (stale) note += ", skipped " + std::to_string(stale) + " the OBJ has moved past";
     if (gone)  note += ", " + std::to_string(gone) + " no longer in the manifest";
     gDbgNote = note;
-    Log("light editor: " + note + " (" + p.string() + ")");
+    Log("light editor: " + note + " (" + PathStr(p) + ")");
     if (stale)
         Log("light editor: a skipped record was tuned against different baked "
             "values than this OBJ has - the .phdsl moved on, so the authored "
@@ -13686,8 +14248,8 @@ static void DbgLoadTuning() {
 static void DbgForgetTuning() {
     std::error_code ec;
     const fs::path p = DbgTuningFilePath();
-    if (fs::remove(p, ec)) gDbgNote = "deleted " + p.string();
-    else                   gDbgNote = "no tuning file at " + p.string();
+    if (fs::remove(p, ec)) gDbgNote = "deleted " + PathStr(p);
+    else                   gDbgNote = "no tuning file at " + PathStr(p);
     Log("light editor: " + gDbgNote);
 }
 
@@ -14241,7 +14803,7 @@ static void BuildLightsTab() {
     // "Forget saved" to be clicked on a session whose values it has no bearing
     // on — and that button deletes another session's work.
     if (!gDbgReadOnly) {
-        const std::string tuningPath = DbgTuningFilePath().string();
+        const std::string tuningPath = PathStr(DbgTuningFilePath());
         ImGui::TextDisabled("tuning file: %s", tuningPath.c_str());
         if (ImGui::IsItemHovered())
             UiTooltip("Saved here automatically on aircraft reload and sim shutdown, "
@@ -14329,20 +14891,58 @@ static void DestroyDebugImguiWindows() { DestroyDevWindow(); }
 static XPLMMenuID gDbgMenuID = nullptr;
 enum { kDbgMenuWindow = 0, kDbgMenuFcu, kDbgMenuOff, kDbgMenuReload };
 
+// ---- reloading the aircraft (DEV ONLY) --------------------------------------
+// ⚠ THIS IS NOT SAFE FROM ANY CONTEXT AND IT IS NOT OFFERED TO USERS. It shipped
+// for one day in 2026-08 - first as a Settings-tab button, then as a menu row -
+// and crashed the simulator both times, for two different reasons. The second one
+// is the one that matters, because it says the feature cannot exist:
+//
+//   1. As a BUTTON it died inside the window walk: the reload destroys the
+//      windows ToLiss, SASL and kosp own while X-Plane is still dispatching to
+//      ours (`out == theWindow->visible`, XPLM/legacy/XPLMDisplay.cpp:1018). A
+//      menu handler is outside that walk and fixed it. See imgui_xplm.h.
+//
+//   2. As a MENU ROW the first reload worked and the SECOND one crashed, in
+//      `AirbusFBW_A320_XP11.xpl_unloaded` - a DEP/execute fault (WER BEX64,
+//      c0000005) at an address inside the PREVIOUS, unloaded copy of ToLiss's
+//      plugin. ⚠ The log names the leak, identically on both reloads and at the
+//      same record address and creation time:
+//
+//        [ToLiss Photon]: XPLMDrawCallbackRecord at 0x... is being deleted by a
+//        different plugin. - previously created by AirbusFBW - XP11 at 50.23967
+//
+//      The whole synchronous teardown runs on OUR stack, so X-Plane sees Photon
+//      as the plugin doing the deleting, REFUSES to delete AirbusFBW's own draw
+//      callback, and then unloads the module out from under a record that is
+//      still registered. It survived reload one and was executed after reload
+//      two, when that address space no longer backed it. ⚠ THE LEAK IS
+//      CUMULATIVE, which is the whole of the "worked once, then crashed"
+//      signature - and it is why no fourth choice of callback context fixes
+//      this. Anything Photon calls, Photon is on the stack for.
+//
+// It stays here because the dev loop needs it and a dev machine may spend the
+// hazard knowingly; `watch.py` and PI_PhotonDevReload.py have always reloaded
+// this way. ⚠ Do not re-expose it in a shipping build. docs/dev-tools.md §3b.
+static void IssueAircraftReload() {
+    XPLMCommandRef c = XPLMFindCommand("sim/operation/reload_aircraft");
+    if (!c) {
+        Log("reload aircraft: sim/operation/reload_aircraft not found");
+        return;
+    }
+    Log("dev: reloading the aircraft (leaks an aircraft-plugin callback record; "
+        "see IssueAircraftReload)");
+    XPLMCommandOnce(c);
+}
+
 static void DebugMenuHandler(void*, void* itemRef) {
     switch ((intptr_t)itemRef) {
         case kDbgMenuWindow: ShowDevWindow(); break;
         case kDbgMenuFcu:    ApplyFcuPreset(); SavePanelDebug(); ShowDevWindow(); break;
         case kDbgMenuOff:    WritePanelProbeMode(nullptr, kProbeOff); SavePanelDebug(); break;
         case kDbgMenuReload:
-            // ⚠ MENU-HANDLER CONTEXT ONLY. This command runs synchronously and
-            // unloads the aircraft's plugins; from a flight loop or a draw
-            // callback it tears the aircraft down mid-frame. That is why the
-            // Build tab has no button for it.
-            if (XPLMCommandRef c = XPLMFindCommand("sim/operation/reload_aircraft")) {
-                Log("dev: reloading the aircraft");
-                XPLMCommandOnce(c);
-            }
+            // ⚠ DEV ONLY, and hazardous even here - read the block above
+            // IssueAircraftReload before adding a second caller or a shipping one.
+            IssueAircraftReload();
             break;
         default: break;
     }
@@ -14350,8 +14950,8 @@ static void DebugMenuHandler(void*, void* itemRef) {
 
 static void AppendDebugMenu(XPLMMenuID parent) {
     // The separator is OURS, not CreatePhotonMenu's — the shipping build's stub
-    // does nothing at all, so a release ends cleanly on About... rather than on
-    // a divider with nothing under it.
+    // does nothing at all, so a release ends cleanly on its last real row rather
+    // than on a divider with nothing under it.
     XPLMAppendMenuSeparator(parent);
     int item = XPLMAppendMenuItem(parent, "Dev", nullptr, 0);
     gDbgMenuID = XPLMCreateMenu("Dev", parent, item, DebugMenuHandler, nullptr);

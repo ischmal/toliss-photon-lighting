@@ -398,7 +398,7 @@ RunResult Run(const std::string& rootUtf8, const PatchData& data,
             if (!fsutil::ReadFileBytes(bak, bakText)) continue;
             if (bakText.find(kMarker) != std::string::npos) {
                 result.log.push_back("  = " + name +
-                                     ": .bak itself contains a patch (?), skipping");
+                                     ": the .bak already contains a patch, skipping");
                 continue;
             }
             raw = bakText;

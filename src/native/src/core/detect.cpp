@@ -553,8 +553,11 @@ std::vector<Aircraft> DetectAircraft(const std::string& xplaneRootUtf8) {
         Aircraft ac;
         std::error_code re;
         const fs::path rel = fs::relative(folder, acDir, re);
+        // ⚠ UTF-8, never generic_string(): a hangar or aircraft folder named
+        // outside the ANSI code page used to THROW out of this scan, and the GUI
+        // had no net under it — see fsutil::PathToUtf8Generic.
         ac.folder = re ? fsutil::PathToUtf8(folder.filename())
-                       : rel.generic_string();
+                       : fsutil::PathToUtf8Generic(rel);
         ac.path = folderUtf8;
         ac.airframe = airframe;
         ac.acVer = cfg.version.empty() ? "?" : cfg.version;

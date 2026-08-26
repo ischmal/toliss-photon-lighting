@@ -55,17 +55,30 @@ bool AirframeHasInterior(const std::string& key) {
 
 const std::vector<std::string>& InteriorTextures() {
     // Ordered by name so the install progress display is stable run to run.
-    // NINE of these replace a stock ToLiss file and are restored from backup on
+    // SEVEN of these replace a stock ToLiss file and are restored from backup on
     // uninstall; the two in InteriorTextureIsAdded have no stock counterpart.
+    //
+    // ⚠ `text_LIT.png` AND `knobs_LIT.png` ARE NO LONGER HERE (2026-08-24), and
+    // their absence is the whole integral-lighting feature. They used to be
+    // Gus's finished files, shipped in the payload and copied onto all three
+    // A3xx — which is how the A321 came to wear the A319/A320 trim-scale artwork
+    // (docs/interior_plan.md §1.4b). They are now DERIVED per aircraft from
+    // whatever stock file that aircraft actually has, once per era, by
+    // `InstallIntegral`. Two consequences worth stating:
+    //
+    //   * a bundle no longer carries them, so `payload::InteriorTextureFiles`
+    //     must not look for them either — see build/make_release.py;
+    //   * they still end up in `backed_up[]` and are still restored on
+    //     uninstall, because the install still OVERWRITES a stock file. Being
+    //     computed rather than copied changes where the bytes come from, not
+    //     what the bookkeeping owes the user.
     static const std::vector<std::string> kTextures = {
         "chairs_LIT.png",
         "kitchens_LIT.png",
         "knobs.png",
-        "knobs_LIT.png",
         "panels_overhead_LIT.png",
         "pedals_details_1.png",
         "pedals_details_2.png",
-        "text_LIT.png",
         "walls_bottom_LIT.png",
         "walls_outer_LIT.png",
         "walls_top_LIT.png",

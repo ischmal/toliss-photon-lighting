@@ -49,6 +49,22 @@ CONSTANTS_H = (REPO / "src" / "native" / "src" / "core" / "constants.h").read_te
 EXT_AIRFRAMES = ("a319", "a320", "a321", "a339")
 
 
+def _enclosing_guards(needle, text=PLUGIN_CPP):
+    """Every `#if...` still open at the line `needle` starts on. A grep cannot
+    answer "is this inside PHOTON_DEV" — the file nests conditionals — and the
+    question matters: a reload reachable from a release is a shipped crash."""
+    stack = []
+    for line in text.splitlines():
+        t = line.strip()
+        if re.match(r"#\s*if", t):
+            stack.append(t)
+        elif re.match(r"#\s*endif", t) and stack:
+            stack.pop()
+        if t.startswith(needle):
+            return stack
+    raise AssertionError("%r is not in the file at all" % needle)
+
+
 def _cpp_string(name, text=CONSTANTS_H):
     """A `constexpr char name[] = "..."` value out of a header, ignoring the
     comment lines that document it (this header quotes its own constants)."""
@@ -252,13 +268,30 @@ class MenuTests(unittest.TestCase):
         return m.group(1)
 
     def test_the_stale_menu_is_one_row_and_about(self):
+        """⚠ ABOUT, NOT SETTINGS, and this is the ONE row where the two menus
+        differ. The ordinary menu swapped its About row for Settings (2026-08-24)
+        because About is a page nobody needs twice while Settings had no way in
+        at all — but a reverted install has no Settings TAB, since it goes dark
+        with the axis tabs, so the same swap here would point at nothing."""
         stale = _code(self._stale_branch())
         self.assertIn('"Reinstall required..."', stale)
         self.assertIn('"About..."', stale)
+        self.assertNotIn('"Settings..."', stale)
         self.assertIn("XPLMAppendMenuSeparator(gMenuID);", stale)
         for gone in ('"Exterior"', '"Cockpit"', '"Displays..."'):
             self.assertNotIn(gone, stale,
                              "%s is still offered on a reverted install" % gone)
+
+    def test_the_ordinary_menu_offers_settings_under_the_divider(self):
+        """The row below the separator is the one that is not an axis. It opens
+        the Settings TAB, which is otherwise reachable only by opening the window
+        on some other errand and noticing the tab is there."""
+        body = _code(_fn("CreatePhotonMenu"))
+        ordinary = body[body.index('XPLMAppendMenuItem(gMenuID, "Exterior"'):]
+        self.assertRegex(ordinary,
+                         r'"Settings\.\.\.",\s*\(void\*\)\(intptr_t\)kTabSettings')
+        self.assertNotIn('"About..."', ordinary,
+                         "About is a tab now, not a menu row")
 
     def test_the_row_opens_the_error_tab(self):
         """It is the only place the reason is written down, so the row that
@@ -319,7 +352,7 @@ class TabTests(unittest.TestCase):
         self.assertEqual(names,
                          ["kTabError", "kTabExterior", "kTabCockpit",
                           "kTabDisplays", "kTabSettings", "kTabAbout",
-                          "kTabCount"])
+                          "kTabHelp", "kTabCount"])
         order = [t for t in re.findall(r"TabFlags\((kTab\w+)\)",
                                        _fn("BuildMainUi"))]
         self.assertEqual(order, names[:-1],
@@ -344,14 +377,27 @@ class TabTests(unittest.TestCase):
             self.assertNotIn(gone, stale)
             self.assertIn(gone, ordinary)
 
-    def test_about_survives_both_shapes(self):
-        """The one tab that is always there — and the stale menu's second row
-        points at it, so it cannot live inside either branch."""
+    def test_about_and_help_survive_both_shapes(self):
+        """The two tabs that are always there — and the stale menu's second row
+        points at About, so it cannot live inside either branch.
+
+        ⚠ Help is in the same position for a stronger reason than symmetry: a
+        reverted install is the state a user is most likely to be reporting FROM,
+        and the support report saved on that tab is the one artifact that can
+        explain how they got there. A Help tab that vanished exactly when things
+        broke would be the least useful possible arrangement."""
         body = _fn("BuildMainUi")
         branch = re.search(r"if \(gInstallStale\) \{.*?\n    \} else \{.*?\n    \}",
                            body, re.S)
         after = body[branch.end():]
         self.assertIn('BeginTabItem("About"', after)
+        self.assertIn('BeginTabItem("Help"', after)
+
+    def test_help_is_last_in_the_bar(self):
+        """It is a support page, not a landing page: at the head of the bar it
+        would be the first thing a working install shows you."""
+        order = re.findall(r'BeginTabItem\("(\w+)"', _fn("BuildMainUi"))
+        self.assertEqual(order[-1], "Help")
 
     def test_the_error_tab_says_all_three_things(self):
         """What happened, what to do, and how to stop being asked. It is the only
@@ -455,10 +501,78 @@ class SettingsTabTests(unittest.TestCase):
     Both used to hang off whichever axis tab their subject was nearest, where each
     was the one control on its page not answering "which era?"."""
 
-    def test_the_two_sections_are_there_and_advanced_is_collapsible(self):
+    def test_the_sections_are_there_and_none_of_them_is_collapsed(self):
+        """⚠ ADVANCED IS AN ORDINARY SECTION (2026-08-24), not a CollapsingHeader.
+        It was collapsed by default on the reading that "how much may the plugin
+        change?" has no obvious right answer and should not lead the page. What
+        that bought was a page whose last section was invisible until clicked —
+        and both things under it are things a user comes to this tab to find: the
+        override you switch off to troubleshoot, and the reload you press
+        afterwards."""
         body = _fn("BuildSettingsTab")
         self.assertIn('ImGui::SeparatorText("Performance")', body)
-        self.assertIn('ImGui::CollapsingHeader("Advanced")', body)
+        self.assertIn('ImGui::SeparatorText("Advanced")', body)
+        self.assertNotIn("CollapsingHeader", _code(body),
+                         "nothing on this page hides behind a click")
+
+    def test_advanced_points_at_XPLANES_reload_and_offers_none_of_its_own(self):
+        """⚠ PHOTON CANNOT RELOAD THE AIRCRAFT AT ALL, from any context it has, and
+        this page is where that keeps being forgotten. It was a "Reload
+        aircraft..." button with a modal, then a Photon menu row; both crashed the
+        simulator, and the second crash is the one that closes the question:
+
+            Fault Module Name = AirbusFBW_A320_XP11.xpl_unloaded   (WER BEX64)
+            Exception Code    = c0000005
+
+        — X-Plane executed a draw callback belonging to the PREVIOUS, unloaded copy
+        of ToLiss's plugin. The log names the leak, identically on both reloads, at
+        the same record address and creation time: `XPLMDrawCallbackRecord ... is
+        being deleted by a different plugin. - previously created by AirbusFBW`.
+        The teardown runs on OUR stack, so X-Plane refuses AirbusFBW's own cleanup
+        and then unloads the module under a record that is still registered. It is
+        CUMULATIVE, which is the "worked once, crashed the second time" signature,
+        and no choice of callback context changes who is on the stack."""
+        body = _code(_fn("BuildSettingsTab"))
+        self.assertLess(body.index('SeparatorText("Advanced")'),
+                        body.index("Developer menu"))
+        self.assertIn("next time this aircraft is loaded", body)
+        for gone in ("BuildReloadRow", "PostInputAction", "XPLMCommandOnce",
+                     "reload_aircraft", "IssueAircraftReload"):
+            self.assertNotIn(gone, body, "%s is back on a user-facing page" % gone)
+
+    def test_the_only_reload_left_is_dev_only(self):
+        """It stays for the dev loop, which has always reloaded this way and can
+        spend the hazard knowingly. ⚠ A shipping build must have no path to it —
+        the row is appended by AppendDebugMenu, which is an empty stub without
+        PHOTON_DEV, and IssueAircraftReload is defined inside that block."""
+        self.assertEqual(1, PLUGIN_CPP.count('"sim/operation/reload_aircraft"'))
+        # Its one caller is the Dev submenu's handler.
+        callers = [ln.strip() for ln in PLUGIN_CPP.splitlines()
+                   if "IssueAircraftReload()" in ln and "static void" not in ln]
+        self.assertEqual(["IssueAircraftReload();"], callers)
+        self.assertIn("#if PHOTON_DEV", _enclosing_guards(
+            "static void IssueAircraftReload"),
+            "the reload escaped the PHOTON_DEV guard and is in a release")
+        # ...and the shipping menu has no row of its own.
+        menu = _code(_fn("CreatePhotonMenu"))
+        self.assertNotIn("Reload aircraft", menu)
+        self.assertNotIn("kMenuReload", PLUGIN_CPP)
+
+    def test_the_backend_offers_no_way_to_defer_out_of_a_draw_callback(self):
+        """PostInputAction stashed a function for the window's next mouse/cursor/
+        key callback to run, on the reading that a window INPUT callback is the
+        same dispatch class as a menu handler. It is not — it is a third mutated
+        list. Deleted rather than left unused: a helper whose whole documented
+        purpose is the thing that crashes is one someone reaches for again."""
+        for name in ("imgui_xplm.h", "imgui_xplm.cpp"):
+            text = (REPO / "src" / "native" / "src" / name).read_text(
+                encoding="utf-8", errors="replace")
+            self.assertNotIn("void PostInputAction", text)
+            self.assertNotIn("InputActionDrain", text)
+        # The lesson stays where the next attempt would be written.
+        hdr = (REPO / "src" / "native" / "src" / "imgui_xplm.h").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn("out == theWindow->visible", hdr)
 
     def test_the_axis_tabs_no_longer_carry_either_section(self):
         """⚠ MOVED, not copied. Two live checkboxes on one flag, on two tabs, is
@@ -466,8 +580,21 @@ class SettingsTabTests(unittest.TestCase):
         looked at."""
         body = _code(_fn("BuildConfigTab"))
         for gone in ("SetCockpitOptimized", "SetWaveformOverride",
-                     'SeparatorText("Performance")', 'CollapsingHeader("Advanced")'):
+                     'SeparatorText("Performance")', 'SeparatorText("Advanced")',
+                     'CollapsingHeader("Advanced")'):
             self.assertNotIn(gone, body)
+
+    def test_the_cockpit_tab_only_POINTS_at_the_brightness_setting(self):
+        """⚠ A SENTENCE, NOT A CONTROL. It stores nothing, switches nothing and
+        goes nowhere — which is the whole of why it does not break the rule above.
+        (It was a button that jumped to the Settings tab, briefly, on 2026-08-24;
+        a button is a control, and one under a grid of era choices reads as a
+        sixth thing to choose.)"""
+        body = _code(_fn("BuildConfigTab"))
+        self.assertIn("Cockpit light brightness can be adjusted in the Settings "
+                      "tab.", body)
+        self.assertNotIn("gWantTab =", body,
+                         "the axis tab is navigating rather than pointing")
 
     def test_the_backlight_row_is_the_inverse_of_the_displays_tabs(self):
         """⚠ DELIBERATE, and both stay. "Do I want the screens to light the
@@ -526,7 +653,7 @@ class WaveformSwitchTests(unittest.TestCase):
 
     def test_the_control_exists_and_is_worded_as_a_permission(self):
         body = _fn("BuildSettingsTab")
-        self.assertIn('ImGui::CollapsingHeader("Advanced")', body)
+        self.assertIn('ImGui::SeparatorText("Advanced")', body)
         self.assertIn('"Allow ToLiss Photon to control strobe/beacon timing"', body)
 
     def test_the_default_is_what_the_add_on_has_always_done(self):

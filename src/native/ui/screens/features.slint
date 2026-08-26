@@ -25,6 +25,16 @@ export component FeaturesScreen inherits Rectangle {
 
     // Whether this airframe HAS an interior variant at all (the A339 does not).
     in property <bool> interior-available: true;
+
+    // Does this machine run a lighting mod that raises X-Plane's spill-light
+    // cutoff? Auto-ticked from neomod::Detect before this screen is ever shown.
+    //
+    // ⚠ IT INSTALLS NOTHING. Every other control here adds files; this one only
+    // changes how bright the cockpit lamps are BUILT, which is why it sits under
+    // the cockpit row as a qualifier rather than beside it as a fourth feature.
+    // See core/neomod.h for what it detects and core/patch_intensity.h for the
+    // compensation.
+    in property <bool> neo: false;
     // ⚠ And whether it offers wing mods. `resolve_mount()` falls back to whatever
     // mount exists, so offering RealWings on an airframe that has no such variant
     // is how a stock OBJ ships mislabeled as a mod build.
@@ -36,6 +46,7 @@ export component FeaturesScreen inherits Rectangle {
     callback toggle-exterior();
     callback toggle-displays();
     callback toggle-interior();
+    callback toggle-neo();
     callback set-wing(int);
 
     background: Tokens.screen-bg;
@@ -103,9 +114,35 @@ export component FeaturesScreen inherits Rectangle {
         // Same rule: the A330 has no interior variant at all, so the row goes.
         if root.interior-available: OptionRow {
             title: "Cockpit Lighting by Gus Rodrigues";
-            description: "Enhances cockpit lamps and lighting. Selectable options for LED, old halogen, and new halogen.";
+            description: "Enhances cockpit lamps, lighting and backlit placards. Selectable options for LED, old halogen, and new halogen.";
             checked: root.interior;
             toggled => { root.toggle-interior(); }
+        }
+
+        // The BSS NEO qualifier, indented under the row it qualifies — the same
+        // shape as the wing-mod sub-choice above, for the same reason: it
+        // describes the machine the cockpit is being built FOR.
+        //
+        // ⚠ ONE CONTROL, TWO STATES — NOT a member of an exclusive set. The wing
+        // radios above are three-states-in-two-controls and clear each other;
+        // this is a plain boolean that happens to wear the same chrome, so it
+        // must never grow a "clicking it again clears it to something else"
+        // rule by analogy.
+        //
+        // ⚠ HIDDEN WITH ITS PARENT, and disabled when the cockpit mod is
+        // unticked: with no interior installed there are no lamps to brighten,
+        // so the question is not merely inapplicable, it is unanswerable.
+        if root.interior-available: VerticalLayout {
+            padding-left: 30px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+
+            SmallRadio {
+                label: "For the BSS NEO Mod";
+                checked: root.neo;
+                enabled: root.interior;
+                clicked => { root.toggle-neo(); }
+            }
         }
     }
 }

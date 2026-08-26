@@ -861,21 +861,80 @@ class PluginSideValueSpaceTests(unittest.TestCase):
         # would move a v1 file that is already correct.
         self.assertIn("if (schema == 2)", self.cpp)
 
+    #: Interior categories that are NOT gated in `lights_inn.obj` and so have no
+    #: DSL branches to compare against. ⚠ `integral` switches which `text_LIT.png`
+    #: / `knobs_LIT.png` ToLiss's OWN cockpit OBJs are bound to
+    #: (core/patch_integral), so the branches live in `lamps.obj`/`knobs.obj` and
+    #: the DSL never sees them. Anything added here has to be a deliberate
+    #: exception, which is why it is a named set rather than a skip.
+    NOT_IN_THE_DSL = {"integral"}
+
     def test_the_plugin_and_the_dsl_agree_on_how_many_looks_each_category_has(self):
         """The OBJ emits one gated branch per profile; the plugin's `values` says
         how many buttons the row offers and what a profile folds onto. They are
-        edited in different files and nothing but this compares them."""
+        edited in different files and nothing but this compares them.
+
+        ⚠ EVERY ROW IS PARSED, including the ones whose dataref is a shared
+        CONSTANT rather than a string literal. A regex that only matched literals
+        would silently stop counting `integral` — and would then still pass,
+        because the count it compares against would match too."""
         import re
         table = re.search(r"kIntCategories\[NINT\] = \{(.*?)\n\};", self.cpp, re.S)
         self.assertIsNotNone(table)
-        rows = re.findall(r'\{"(\w+)",\s*"[^"]+",\s*"[^"]+",\s*(\d+),', table.group(1))
-        self.assertEqual(len(rows), len(INT_VALUES))
+        rows = re.findall(
+            r'\{"(\w+)",\s*(?:"[^"]+"|[\w:]+),\s*"[^"]+",\s*(\d+),',
+            table.group(1))
+        keys = [k for k, _ in rows]
+        self.assertEqual(set(keys), set(INT_VALUES) | self.NOT_IN_THE_DSL)
+        self.assertEqual(len(keys), len(set(keys)), "a category key is duplicated")
         cfg = B.load_config(wing="stock")
         em = B.Emitter(cfg, "a320", "stock", target="interior")
         for key, values in rows:
             with self.subTest(category=key):
+                if key in self.NOT_IN_THE_DSL:
+                    # No DSL branches to count — but its value space still has to
+                    # be one this codebase can gate, and 2 is the only other one.
+                    self.assertIn(int(values), (2, 3))
+                    # ⚠ And it really must be ABSENT from the DSL, not merely
+                    # unused by it. A category that grew branches in
+                    # lights_inn.obj while still listed here as an exception
+                    # would go uncompared by the loop above — which is the exact
+                    # hole this branch exists to keep shut.
+                    self.assertNotIn(key, em.categories)
+                    continue
                 self.assertEqual(int(values), INT_VALUES[key])
                 self.assertEqual(len(em.profiles_of(key)), INT_VALUES[key])
+
+    def test_the_integral_row_is_two_valued_and_shares_its_dataref_name(self):
+        """⚠ Integral lighting is the FIRST two-valued interior category that has
+        ever shipped, and three separate things have to agree about it.
+
+        1. Two values, so `IntValueForProfile` folds both halogen profiles onto
+           Incandescent and LED onto LED — which is the default asked for. At 2 a
+           two-valued gate hides NEITHER branch and both draw at once.
+        2. "Incandescent", not "Halogen": the row sits beside others offering
+           "Old Halogen" and "New Halogen", and a third, contradictory answer to
+           the same question is worse than a longer word.
+        3. Its dataref comes from `photon::integral::kDataRef`, the same constant
+           the installer writes into the OBJ's ANIM_hide. A literal here would
+           compile, run, and gate nothing — the branch would simply never draw."""
+        import re
+        table = re.search(r"kIntCategories\[NINT\] = \{(.*?)\n\};", self.cpp, re.S)
+        row = re.search(
+            r'\{"integral",\s*([\w:]+),\s*"([^"]+)",\s*(\d+),\s*'
+            r'\{"([^"]+)",\s*"([^"]+)",\s*nullptr\}\}',
+            table.group(1))
+        self.assertIsNotNone(row, "the integral row is not in its expected shape")
+        dataref, label, values, first, second = row.groups()
+        self.assertEqual(dataref, "photon::integral::kDataRef")
+        self.assertEqual(label, "Integral Lights")
+        self.assertEqual(int(values), 2)
+        self.assertEqual((first, second), ("Incandescent", "LED"))
+        # ⚠ And the row is HIDDEN where the LED twin OBJs are not installed, not
+        # shown inert: one dead row in a grid of five reads as a broken look
+        # rather than an absent one.
+        self.assertIn("if (row == kIntIntegralIndex) return gIntegralInstalled;",
+                      self.cpp)
 
     def test_a_row_button_is_named_the_same_as_the_profile_that_sets_it(self):
         """The Custom rows and the profile dropdown are two lists of the same
@@ -1512,12 +1571,38 @@ class IntensityMultiplierTests(unittest.TestCase):
         in-memory text BEFORE WriteOrThrow, so the aircraft sees exactly one
         atomic write and a reinstall cannot silently reset the brightness."""
         i = self.actions.index("std::vector<std::string> InstallInterior(")
-        body = self.actions[i:i + 3000]
+        body = self.actions[i:i + 5000]
         saved = body.index("intensity::SavedFactor(opts.xplaneRoot)")
         patched = body.index("intensity::PatchText(")
         write = body.index("WriteOrThrow(target, text)")
         self.assertLess(saved, patched)
         self.assertLess(patched, write)
+
+    def test_the_installer_persists_the_neo_flag_before_it_bakes_the_boost(self):
+        """⚠ THE TWO HALVES MUST AGREE ON THE FACTOR. The plugin recomputes
+        EffectiveFactor(SavedFactor, SavedNeo) on every aircraft load and
+        rewrites the OBJ when it disagrees — so an installer that baked a
+        compensation the plugin could not read back would have it patched out
+        on the very next load, and the cockpit would go dim again some time
+        after a successful install with nothing to connect the two."""
+        i = self.actions.index("std::vector<std::string> InstallInterior(")
+        body = self.actions[i:i + 5000]
+        saved_neo = body.index("intensity::SaveNeo(opts.xplaneRoot, opts.neo)")
+        effective = body.index("intensity::EffectiveFactor(")
+        patched = body.index("intensity::PatchText(")
+        self.assertLess(saved_neo, effective)
+        self.assertLess(effective, patched)
+
+    def test_both_halves_bake_the_factor_through_EffectiveFactor(self):
+        """The one place the user setting and the NEO flag are combined. If
+        either half multiplied by hand, the two would drift and re-patch the
+        OBJ against each other on alternate loads."""
+        self.assertIn("intensity::EffectiveFactor(", self.actions)
+        self.assertIn("photon::intensity::EffectiveFactor(", self.plugin)
+        # ⚠ and the plugin's on-load apply must not pass the RAW setting.
+        i = self.plugin.index("static void ApplyInteriorIntensity(")
+        body = self.plugin[i:i + 1600]
+        self.assertIn("EffectiveFactor(", body)
 
     def test_the_settings_row_is_hidden_without_the_mod(self):
         """Same rule as the simplified-floods row above it: HIDDEN, not grayed,

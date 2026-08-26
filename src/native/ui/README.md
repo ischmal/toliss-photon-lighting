@@ -152,12 +152,28 @@ independent, so one file serves the logo at both the 235×124 splash size and th
 | `radio-off.svg`, `radio-on.svg` | the aircraft-card radio indicator |
 | `marker-todo.svg`, `marker-current.svg`, `marker-done.svg` | the sidebar step dots |
 | `divider.svg` | the 1 px rule |
-| `glyph-success.svg`, `glyph-failure.svg` | the outcome tick and cross |
+| `glyph-success.svg`, `glyph-warning.svg`, `glyph-failure.svg` | the outcome tick, triangle and cross |
 
-⚠ **The two outcome glyphs are used in TWO places and that is the point**: at 32 px
+⚠ **The three outcome glyphs are used in TWO places and that is the point**: at 32 px
 on the Complete screen, and at 12 px as the installer log's per-line marker. The
-same two shapes mean the same two things throughout the installer. They also carry
-their own fills — the palette's green and red — so nothing tints them.
+same three shapes mean the same three things throughout the installer. They also
+carry their own fills — the palette's green, amber and red — so nothing tints them.
+
+⚠ **The triangle arrived third (2026-08-24), and it exists because two shapes were
+one too few.** `LogLine` carried a bool `bad` that was ERROR *or* WARN, so both drew
+the red cross — and the loudest warning the installer has is the wing-mod mismatch,
+which is a note about an install that **completed**. A red cross beside it reads as
+an aborted run, and did. It is the Figma **Warn Glyph** (`371:522`) and its amber is
+`log-ink-warn`, the glyph's own fill.
+
+⚠ **It is 32×30, not 32×32 like the cross**, so `image-fit: contain` and a per-state
+box carry it on both screens. ⚠ **Those box numbers are the SVG's own `width`/
+`height`** and `GlyphGeometryTests` re-reads the three files to check it — a
+re-export at a different size otherwise leaves the box behind, and `contain`
+letterboxes the difference instead of failing. It shipped for one day at **32×29**
+(2026-08-24), which is where `complete.slint`'s floored `y` comes from; the redraw
+that put it on the pixel grid made every height even again, and the floor stays as a
+guard.
 
 ⚠ **The log's marker is an SVG because NEITHER EMBEDDED FONT HAS U+2713 `✓`**
 (checked against both `cmap` tables). A checkmark character there is drawn by a

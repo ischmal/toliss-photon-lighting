@@ -19,6 +19,7 @@
 #include "core/constants.h"
 #include "core/detect.h"
 #include "core/fsutil.h"
+#include "core/neomod.h"
 #include "core/payload.h"
 #include "core/version.h"
 #include "core/wingmod.h"
@@ -190,12 +191,12 @@ std::string ScreenXplane() {
             std::filesystem::weakly_canonical(fsutil::PathFromUtf8(remembered), ec);
         if (!ec) remembered = fsutil::PathToUtf8(canon);
         if (detect::IsValidRoot(remembered)) {
-            LogLine("remembered X-Plane root still valid: " + remembered);
+            LogLine("saved X-Plane root still valid: " + remembered);
             if (std::find(roots.begin(), roots.end(), remembered) == roots.end()) {
                 roots.insert(roots.begin(), remembered);
             }
         } else {
-            LogLine("remembered X-Plane root no longer valid, discarding: " + remembered,
+            LogLine("saved X-Plane root no longer valid, discarding: " + remembered,
                     "WARN");
             config::ClearSavedRoot();
             remembered.clear();
@@ -348,7 +349,22 @@ std::string AircraftOption(const detect::Aircraft& ac, int w1, int w2) {
 
 detect::Aircraft ScreenAircraft(const std::string& xplaneRoot) {
     while (true) {
-        const std::vector<detect::Aircraft> aircraft = detect::DetectAircraft(xplaneRoot);
+        // A scan that throws goes back to the directory screen with the reason on
+        // it, like "nothing found" does — not to the top-level FATAL handler.
+        std::vector<detect::Aircraft> aircraft;
+        try {
+            aircraft = detect::DetectAircraft(xplaneRoot);
+        } catch (const std::exception& e) {
+            tui::Flash(kStageAircraft,
+                       {std::string(C::kRed) + "Could not scan the Aircraft folder under" +
+                            C::kReset,
+                        std::string(C::kDim) +
+                            fsutil::PathToUtf8(fsutil::PathFromUtf8(xplaneRoot) /
+                                               "Aircraft") +
+                            C::kReset,
+                        std::string(C::kDim) + e.what() + C::kReset});
+            throw tui::Back{};
+        }
         if (aircraft.empty()) {
             tui::Flash(kStageAircraft,
                        {std::string(C::kRed) + "No compatible ToLiss aircraft found under" +
@@ -428,7 +444,7 @@ std::string SeedWing(const detect::Aircraft& ac) {
     tui::Render(kStageConfigure,
                 {"", tui::Step("Step 3.  Checking the aircraft…"), "",
                  std::string(C::kDim) +
-                     "Looking at which wing mod is actually installed…" + C::kReset});
+                     "Checking which wing mod is actually installed…" + C::kReset});
     const wingmod::Result wm = wingmod::Detect(ac.path, ac.airframe);
     const std::string want = wm.determined ? wm.wing : std::string("stock");
     const bool offered = std::find(wings.begin(), wings.end(), want) != wings.end();
@@ -609,6 +625,42 @@ bool ScreenInterior(const detect::Aircraft& ac) {
     }
 }
 
+// The BSS NEO qualifier — asked only when the cockpit mod is going in, since it
+// only changes how bright those lamps are built.
+//
+// ⚠ THE DETECTOR PRESELECTS, THE USER DECIDES — same contract as the GUI's
+// checkbox and the wing radio. The terminal has no way to show a pre-ticked box,
+// so the verdict is stated in the body text and the default cursor position
+// carries the recommendation instead.
+bool ScreenNeo(const std::string& xplaneRoot) {
+    const neomod::Result n = neomod::Detect(xplaneRoot);
+    if (n.Detected()) LogLine("neo detection: " + n.summary);
+
+    const std::vector<std::string> options = {"Yes", "No"};
+    const std::string body =
+        n.Detected()
+            ? std::string(
+                  "A lighting mod that dims X-Plane's spill lights was found on "
+                  "this install (") + n.summary +
+                  "). Photon can build the cockpit lamps brighter to compensate."
+            : std::string(
+                  "Some global lighting mods (BSS NEO and similar) dim X-Plane's "
+                  "spill lights, which makes Photon's cockpit lamps look faint. "
+                  "Nothing of the sort was found on this install.");
+
+    tui::MenuOpts mo;
+    // ⚠ The cursor IS the recommendation here, and it must follow the detector
+    // rather than sit on a fixed row: defaulting to "Yes" on a clean install
+    // would talk a user into brightening a cockpit that has nothing dimming it.
+    mo.index = n.Detected() ? 0 : 1;
+    const int choice =
+        tui::Menu(kStageConfigure,
+                  "Step 3e.  (Optional) Compensate for a spill-dimming lighting mod?",
+                  body, options, mo);
+    LogLine(std::string("neo opt-in: ") + (choice == 0 ? "true" : "false"));
+    return choice == 0;
+}
+
 // Whether to also remove the shared plugin on uninstall. Left installed by default
 // (other airframes may use it); only offered when this is the last airframe with
 // Photon on it.
@@ -671,10 +723,13 @@ PerformResult ScreenPerform(const detect::Aircraft& ac, const std::string& actio
     // Back; let it propagate to the flow unchanged.
     bool removePlugin = false;
     bool wantInterior = false;
+    bool wantNeo = false;
     if (action == "uninstall") {
         removePlugin = ScreenPluginDisposition(ac, xplaneRoot);
     } else {
         wantInterior = ScreenInterior(ac);
+        // Only when there is a cockpit going in — see ScreenNeo.
+        if (wantInterior) wantNeo = ScreenNeo(xplaneRoot);
     }
 
     actions::Options opts;
@@ -683,6 +738,7 @@ PerformResult ScreenPerform(const detect::Aircraft& ac, const std::string& actio
     opts.wing = action == "uninstall" ? std::string("stock") : action;
     opts.xplaneRoot = xplaneRoot;
     opts.interior = wantInterior;
+    opts.neo = wantNeo;
     opts.dryRun = gDryRun;
     opts.removePlugin = removePlugin;
 
@@ -903,7 +959,8 @@ int RunTui(const std::string& xplaneRootOverride, bool dryRun) {
     } else {
         // ⚠ There is no dev-tree fallback that builds this on the fly — hence the
         // staging command in the message rather than just "build a release".
-        log.Write("no installable payload found (looked in " + payload::PayloadDir() +
+        log.Write("no installable payload found (payload directory: " +
+                      payload::PayloadDir() +
                       "); install/uninstall will fail until one is staged — "
                       "python build/make_release.py --payload-only",
                   "ERROR");
@@ -977,7 +1034,7 @@ int RunTui(const std::string& xplaneRootOverride, bool dryRun) {
         tui::ShowCursor();
         tui::LeaveAltScreen();
         log.Write(std::string("FATAL: ") + e.what(), "ERROR");
-        std::cerr << "The installer hit an unexpected error: " << e.what() << "\n"
+        std::cerr << "The installer stopped on an unexpected error: " << e.what() << "\n"
                   << "Log saved to: " << log.Path() << "\n";
         rc = 1;
     }

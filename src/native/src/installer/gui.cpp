@@ -18,6 +18,7 @@
 #include "core/detect.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
+#include "core/neomod.h"
 #include "core/version.h"
 #include "core/wingmod.h"
 #include "installer/log.h"
@@ -390,7 +391,7 @@ void ScheduleBlackWindowCheck(FileLog* log, int attemptsLeft, int strikes) {
                 slint::quit_event_loop();
             } else if (log != nullptr) {
                 log->Write("relaunch failed - run photon-installer --software or "
-                           "photon-installer-console by hand",
+                           "photon-installer-console manually",
                            "ERROR");
             }
         });
@@ -403,6 +404,34 @@ void ScheduleBlackWindowCheck(FileLog* log, int attemptsLeft, int strikes) {
 // the same event-loop callback, so with no delay the last frame the Run screen
 // ever paints is the one before the bar filled.
 constexpr int kAutoAdvanceMs = 500;
+
+// ─── how bad was it? ─────────────────────────────────────────────────────────
+// ⚠ WIRE. `screens/run.slint`'s `LogLine.severity` and `app.slint`'s `run-outcome`
+// spell the same three numbers, deliberately: ONE severity scale for the whole
+// installer UI, so a 1 means "warning" on a log row and on the Complete screen
+// alike. They are written out on both sides rather than shared, for the reason
+// `AircraftEntry.kind` gives — a Slint enum crossing into C++ renames its variants
+// and the mapping stops being greppable.
+//
+// ⚠ THE THIRD VALUE IS THE WHOLE POINT (2026-08-24). A `bool bad` folded ERROR and
+// WARN together, so the loudest warning the installer has — the wing-mod mismatch,
+// which is a note about an install that COMPLETED — drew the same red cross an
+// aborted run does. It was read as exactly that.
+constexpr int kSeverityOk = 0;
+constexpr int kSeverityWarn = 1;
+constexpr int kSeverityError = 2;
+
+// ⚠ THE ONE PLACE A LOG LEVEL BECOMES A NUMBER. Everything downstream — the glyph,
+// the ink, the problem summary, the auto-advance, the Complete screen's glyph and
+// the ", with warnings" beside it — reads that number, so none of them can disagree
+// about what a level means. ⚠ ANYTHING UNKNOWN IS `kSeverityOk`, matching the old
+// `level == "ERROR" || level == "WARN"`: an unrecognized level must not be able to
+// stop the wizard on a screen with nothing on it worth reading.
+int SeverityForLevel(const std::string& level) {
+    if (level == "ERROR") return kSeverityError;
+    if (level == "WARN") return kSeverityWarn;
+    return kSeverityOk;
+}
 
 // The step numbering app.slint documents. Kept as named constants because the
 // bottom bar's behavior keys off them and `step == 5` in three files is how they
@@ -621,6 +650,15 @@ struct Gui {
     bool displays = true;
     bool interior = true;
     int wing = 0;
+    // "This machine runs a mod that dims spill lights." Seeded from
+    // neomod::Detect whenever the root changes; see core/neomod.h.
+    bool neo = false;
+    // The root `neo` was last seeded for. ⚠ SAME RULE AS `wingSeededFor` above,
+    // and for the same reason: the seed is a DEFAULT, so a user who unticked the
+    // box and then stepped back through the directory screen must not have their
+    // correction silently re-ticked. Keyed on the root because that is what the
+    // detection is a property of.
+    std::string neoSeededFor;
     // The aircraft folder `wing` was last seeded for from `wingmod::Detect`.
     //
     // ⚠ IT IS WHAT KEEPS THE SEED A DEFAULT RATHER THAN AN OVERRIDE. Availability
@@ -787,11 +825,53 @@ bool ApplyRoot(Gui& g) {
     g.ui->set_root_status(untouched ? "Path was automatically found."
                                     : "Valid X-Plane 12 installation.");
     g.ui->set_root_status_ok(true);
+
+    // ⚠ SEEDED HERE, ONCE PER ROOT, AND SYNCHRONOUSLY — unlike the wing probe,
+    // which needs a thread because it reads hundreds of megabytes of OBJs. This
+    // reads a handful of small `.lua` files in ONE directory, so the thread and
+    // the poll timer that go with it would be pure machinery around a few
+    // milliseconds. ⚠ It is a property of the ROOT, not of the aircraft, which is
+    // why it is not in the per-selection path with the wing verdict.
+    if (g.neoSeededFor != g.xplaneRoot) {
+        const neomod::Result n = neomod::Detect(g.xplaneRoot);
+        g.neo = n.Detected();
+        g.neoSeededFor = g.xplaneRoot;
+        g.ui->set_neo(g.neo);
+        // ⚠ TO THE FILE LOG ONLY. The run log does not exist yet at this point in
+        // the flow (it is created for the install), and this is exactly the line a
+        // support ticket needs to carry — "the cockpit is dim" arrives with a log
+        // attached far more often than it arrives with the screen described.
+        if (n.Detected() && g.fileLog) {
+            g.fileLog->Write(n.summary, "WARN");
+            for (const std::string& t : n.Texts(neomod::Severity::Problem)) {
+                g.fileLog->Write(t, "WARN");
+            }
+        }
+    }
     return true;
 }
 
+// ⚠ DETECTION MUST NOT BE ABLE TO TAKE THE WINDOW DOWN. It walks every folder
+// under Aircraft/ — names the user chose, in any language — and an exception out
+// of that walk propagated straight out of a Slint callback: the installer vanished
+// at the aircraft screen with nothing on screen to say why (2026-08-22; the cause
+// was a hangar name the ANSI code page could not spell). The scan is UTF-8 end to
+// end now, so this is the net under it: report on the directory screen's status
+// line, the one control the user can act on, and show an empty list rather than
+// no window.
+std::vector<detect::Aircraft> DetectAircraftOrReport(Gui& g) {
+    try {
+        return detect::DetectAircraft(g.xplaneRoot);
+    } catch (const std::exception& e) {
+        g.ui->set_root_status(slint::SharedString(
+            std::string("Could not scan the Aircraft folder: ") + e.what()));
+        g.ui->set_root_status_ok(false);
+        return {};
+    }
+}
+
 void RefreshAircraft(Gui& g) {
-    g.aircraft = detect::DetectAircraft(g.xplaneRoot);
+    g.aircraft = DetectAircraftOrReport(g);
     g.selected = -1;
     PublishAircraft(g);
 }
@@ -808,7 +888,7 @@ void RefreshAircraft(Gui& g) {
 void RefreshAircraftKeepingSelection(Gui& g) {
     const detect::Aircraft* was = g.Selected();
     const std::string folder = was == nullptr ? std::string() : was->folder;
-    g.aircraft = detect::DetectAircraft(g.xplaneRoot);
+    g.aircraft = DetectAircraftOrReport(g);
     g.selected = -1;
     if (!folder.empty()) {
         for (std::size_t i = 0; i < g.aircraft.size(); ++i) {
@@ -997,6 +1077,7 @@ void ApplyAvailability(Gui& g) {
     g.ui->set_wing(g.wing);
     g.ui->set_exterior(g.exterior);
     g.ui->set_displays(g.displays);
+    g.ui->set_neo(g.neo);
 }
 
 // ─── review ──────────────────────────────────────────────────────────────────
@@ -1048,7 +1129,20 @@ void BuildReview(Gui& g) {
     // choice the user was never offered and could not have made; an absent row
     // says "not applicable", which is the true statement.
     if (AirframeHasInterior(ac->airframe)) {
-        add("Cockpit lighting", g.EffectiveInterior() ? "Yes" : "No");
+        // ⚠ THE NEO STATE RIDES IN THE VALUE, NEVER AS ITS OWN ROW. This page has
+        // no vertical slack — an extra Attribute row pushes the bottom bar off
+        // the window (see ReviewLayoutTests and the 2026-08-14 write-up) — and
+        // the qualifier is meaningless apart from the row it qualifies anyway.
+        // It must be here in some form: this install will bake the cockpit
+        // brighter than the user's slider says, and the review screen restating
+        // every choice EXCEPT the one that changes the light levels would make
+        // the run log the first place they hear about it.
+        // ⚠ Same effective value the install itself uses (`opts.neo` in
+        // StartRun): intent AND-ed with EffectiveInterior, or the two would
+        // disagree whenever interior is unticked with the box still remembered.
+        add("Cockpit lighting", !g.EffectiveInterior() ? "No"
+                                : g.neo               ? "Yes (for BSS NEO)"
+                                                      : "Yes");
     }
     g.ui->set_attributes(attrs);
 }
@@ -1085,18 +1179,23 @@ struct RunContext {
 // rebuild is not worth optimizing into a lifetime problem.
 // ⚠ BOTH MODELS COME OFF THE ONE VECTOR, and that is the point of doing the filter
 // here rather than in Slint. The Run screen repeats the ERROR/WARN lines under a
-// rule once the run has stopped; built from the same `bad` flag the rows are
-// colored by, a line cannot be red in the log and absent from the summary, or
-// worded differently in the two places. Slint has no filtered model, and the
-// alternative — a repeater over every line with the good ones hidden — leaves
-// invisible elements occupying their layout cells.
+// rule once the run has stopped; built from the same `severity` the rows are colored
+// by, a line cannot be marked in the log and absent from the summary, or worded
+// differently in the two places. Slint has no filtered model, and the alternative —
+// a repeater over every line with the good ones hidden — leaves invisible elements
+// occupying their layout cells.
+//
+// ⚠ THE FILTER IS `> kSeverityOk`, NOT `== kSeverityError`. Splitting a warning's
+// LOOK from an error's (2026-08-24) deliberately did not split what either means for
+// the run: a warning still holds the wizard on the Run screen, so it still has to
+// appear in the section that answers "why am I still here".
 void PublishLog(const slint::ComponentWeakHandle<App>& weak,
                 const std::vector<LogLine>& lines) {
     auto model = std::make_shared<slint::VectorModel<LogLine>>();
     auto bad = std::make_shared<slint::VectorModel<LogLine>>();
     for (const LogLine& line : lines) {
         model->push_back(line);
-        if (line.bad) bad->push_back(line);
+        if (line.severity > kSeverityOk) bad->push_back(line);
     }
     if (auto ui = weak.lock()) {
         (*ui)->set_log_lines(model);
@@ -1104,16 +1203,17 @@ void PublishLog(const slint::ComponentWeakHandle<App>& weak,
     }
 }
 
-// ⚠ `bad` IS ERROR *OR* WARN, and it is the same predicate `RunLog::Clean` uses —
-// so a line drawn red and a line that stops the Run screen advancing itself are by
-// construction the same set. Two spellings of that rule would drift the first time
-// a level was added.
-void PostLine(const RunContext& ctx, const std::string& text, bool bad) {
+// ⚠ ONE CLASSIFIER, ONE SCALE. `SeverityForLevel` is the only place a log level
+// becomes a number, and `RunLog::Clean` reads the SAME number back — so a line that
+// carries a mark and a line that stops the Run screen advancing itself are by
+// construction the same set. Two spellings of that rule drifted the first time a
+// level was added, which is exactly how ERROR and WARN came to share a glyph.
+void PostLine(const RunContext& ctx, const std::string& text, int severity) {
     auto weak = ctx.weak;
     auto lines = ctx.log;
     LogLine line;
     line.text = slint::SharedString(text);
-    line.bad = bad;
+    line.severity = severity;
     slint::invoke_from_event_loop([weak, lines, line] {
         lines->push_back(line);
         PublishLog(weak, *lines);
@@ -1135,14 +1235,14 @@ public:
 
     void Write(const std::string& msg, const std::string& level) override {
         if (ctx_.file != nullptr) ctx_.file->Write(msg, level);
-        // ⚠ NO MARKER IS PREFIXED ANY MORE. It used to be " ✓  " / " !  " glued
-        // onto the string; the Run screen draws it from `bad` instead, as an SVG
-        // and a color — because NEITHER embedded font contains U+2713 and that
+        // ⚠ NO MARKER IS PREFIXED ANY MORE. It used to be a tick or a bang glued
+        // onto the string; the Run screen draws it from `severity` instead, as an
+        // SVG and a color — because NEITHER embedded font contains U+2713 and that
         // checkmark was being drawn by a system fallback. Putting a glyph back
         // into this string gets it in the message's color and doubled.
-        const bool bad = (level == "ERROR" || level == "WARN");
-        if (bad) clean_ = false;
-        PostLine(ctx_, msg, bad);
+        const int severity = SeverityForLevel(level);
+        if (severity > worst_) worst_ = severity;
+        PostLine(ctx_, msg, severity);
     }
 
     // Whether the run reported nothing at all to look at — no ERROR and, ⚠
@@ -1155,11 +1255,18 @@ public:
     //
     // ⚠ Read on the WORKER thread once the run returns, which is the only place
     // it is safe: `Write` runs there too, and nothing else touches this.
-    bool Clean() const { return clean_; }
+    bool Clean() const { return worst_ == kSeverityOk; }
+
+    // The worst thing any line said, on the shared scale. ⚠ THE SAME STORAGE
+    // `Clean()` READS, not a second tally: it is what decides the Complete screen's
+    // glyph and the ", with warnings" the headline beside it carries, and those two
+    // agreeing with the auto-advance is the entire reason the three states exist.
+    // Same thread rule as `Clean()`.
+    int Worst() const { return worst_; }
 
 private:
     const RunContext& ctx_;
-    bool clean_ = true;
+    int worst_ = kSeverityOk;
 };
 
 // ⚠ THE FRACTION IS THE WHOLE RUN'S, NOT ONE LOOP'S. It used to be "textures copied
@@ -1248,18 +1355,37 @@ std::string RunHeadline(bool uninstalling, bool dryRun) {
 // ⚠ A FAILED RUN IS NOT "Finished." — it stopped. The log it is sitting above is
 // the one the user is about to read, so the heading must not read as success while
 // an ERROR line is on screen; Complete says the same thing over the summary.
-std::string RunDoneHeadline(bool ok, bool dryRun) {
+// ⚠ `warned` IS A THIRD STATE HERE, NOT A DECORATION (2026-08-24). This heading sits
+// directly above a log whose amber lines and whose problem summary the run has just
+// STOPPED the user on — and a bare "Finished." over that reads as the screen having
+// nothing to do with why they are still looking at it. Saying it is also what lets
+// the amber glyphs be a picture of something rather than a mood.
+std::string RunDoneHeadline(bool ok, bool dryRun, bool warned) {
     if (!ok) return "Something went wrong.";
-    return dryRun ? "Finished - nothing was written." : "Finished.";
+    if (dryRun) {
+        return warned ? "Finished with warnings - nothing was written."
+                      : "Finished - nothing was written.";
+    }
+    return warned ? "Finished with warnings." : "Finished.";
 }
 
 // The Complete screen's heading. It names the OPERATION, since by this point the
 // summary underneath is the only other thing saying which one ran — and a dry run
 // names itself instead, for the reason above.
-std::string CompleteHeadline(bool ok, bool uninstalling, bool dryRun) {
+// ⚠ THE SUFFIX IS WHAT LICENSES THE AMBER GLYPH BESIDE IT. complete.slint's own rule
+// is that the picture may not say anything the sentences do not — so a run that
+// warned gets the words too, in one place rather than three, because ", with
+// warnings" reads correctly after all three bases.
+//
+// ⚠ THE SUMMARY UNDER IT IS DELIBERATELY UNCHANGED. It is a sentence about what was
+// installed and where, and that sentence is exactly as true on a run that warned;
+// the qualifier belongs on the verdict, which is this line.
+std::string CompleteHeadline(bool ok, bool uninstalling, bool dryRun, bool warned) {
     if (!ok) return "Something went wrong";
-    if (dryRun) return "Dry run complete";
-    return uninstalling ? "Uninstall complete" : "Install complete";
+    const std::string base =
+        dryRun ? "Dry run complete"
+               : (uninstalling ? "Uninstall complete" : "Install complete");
+    return warned ? base + ", with warnings" : base;
 }
 
 // ─── the close-X-Plane gate ──────────────────────────────────────────────────
@@ -1316,7 +1442,7 @@ void StartRun(Gui& g) {
     g.ui->set_progress(0.0f);
     // ⚠ CLEARED HERE, not only on success. A second run after a failed one would
     // otherwise open on a red bar and a failure glyph before it had done anything.
-    g.ui->set_run_failed(false);
+    g.ui->set_run_outcome(kSeverityOk);
     g.ui->set_run_headline(
         slint::SharedString(RunHeadline(g.uninstalling, g.dryRun)));
     g.log->clear();
@@ -1331,6 +1457,11 @@ void StartRun(Gui& g) {
     // on the A339 asks for a payload that does not exist.
     opts.wing = WingName(g.EffectiveWing());
     opts.interior = g.EffectiveInterior();
+    // ⚠ AND-ED WITH THE EFFECTIVE INTERIOR for the same reason as the guard on the
+    // toggle: the flag only ever changes how bright the cockpit OBJ is built, so
+    // on an install that stages no cockpit OBJ it would record a preference the
+    // user cannot see the effect of and would not think to undo.
+    opts.neo = g.neo && g.EffectiveInterior();
     opts.dryRun = g.dryRun;
     opts.progress = &OnProgress;
 
@@ -1388,16 +1519,31 @@ void StartRun(Gui& g) {
         // state — which is what makes advancing on the user's behalf acceptable at
         // all rather than merely convenient.
         const bool advance = ok && log.Clean();
+        // ⚠ ONE VERDICT, READ FIVE WAYS. The glyph, the headline's suffix, the bar's
+        // red and the auto-advance all come off this number, so none of them can say
+        // a different thing about the same run — which is the failure the split was
+        // fixing in the first place.
+        //
+        // ⚠ `ok` DECIDES `kSeverityError`, NOT THE LOG. The catch writes an ERROR
+        // line, so `Worst()` would usually agree — but the red bar is a statement
+        // about whether the operation completed, and hanging it on a line having been
+        // written would make it a statement about the logging instead.
+        const int outcome = ok ? log.Worst() : kSeverityError;
+        // ⚠ A FAILED RUN IS NOT ALSO A WARNED ONE. It says "Something went wrong",
+        // and ", with warnings" appended to that is a smaller thing crowding out a
+        // bigger one.
+        const bool warned = outcome == kSeverityWarn;
         // ⚠ THE RUN'S DONE HEADLINE IS POSTED HERE, NOT DERIVED FROM `progress` IN
         // THE UI. The bar reaching 1.000 and the run being over are the same event
         // only because they travel in this one hop: the cost model can be short a
         // phase (`SetUnknownStepHook`), so a Slint-side `progress >= 1.0` would be a
         // heading that says "Finished." with work still running.
-        const std::string runDone = RunDoneHeadline(ok, ctx.dryRun);
-        const std::string headline = CompleteHeadline(ok, ctx.uninstalling, ctx.dryRun);
+        const std::string runDone = RunDoneHeadline(ok, ctx.dryRun, warned);
+        const std::string headline =
+            CompleteHeadline(ok, ctx.uninstalling, ctx.dryRun, warned);
         auto weak = ctx.weak;
         slint::invoke_from_event_loop([weak, summary, runDone, headline,
-                                       advance, ok] {
+                                       advance, ok, outcome] {
             auto ui = weak.lock();
             if (!ui) return;
             // ⚠ ONLY A SUCCESSFUL RUN IS FORCED TO 100%. A failed one stops where
@@ -1405,7 +1551,7 @@ void StartRun(Gui& g) {
             // the first thing anyone reading the log wants to know, and which a
             // full red bar reading "100%" would flatly contradict.
             if (ok) (*ui)->set_progress(1.0f);
-            (*ui)->set_run_failed(!ok);
+            (*ui)->set_run_outcome(outcome);
             (*ui)->set_run_finished(true);
             (*ui)->set_run_headline(slint::SharedString(runDone));
             (*ui)->set_complete_headline(slint::SharedString(headline));
@@ -1671,6 +1817,14 @@ int RunGui(const std::string& xplaneRootOverride, bool dryRun) {
         if (!g.ui->get_interior_available()) return;
         g.interior = !g.interior;
         g.ui->set_interior(g.interior);
+    });
+    g.ui->on_toggle_neo([&g] {
+        // ⚠ Guarded on the SAME availability the row is hidden by, and on
+        // `interior`: with no cockpit mod going in there are no lamps to
+        // brighten, so the flag would be recorded against nothing.
+        if (!g.ui->get_interior_available() || !g.interior) return;
+        g.neo = !g.neo;
+        g.ui->set_neo(g.neo);
     });
     g.ui->on_set_wing([&g](int w) {
         if (!g.ui->get_wings_available()) return;

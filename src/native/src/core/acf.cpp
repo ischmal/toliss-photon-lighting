@@ -61,7 +61,7 @@ std::string ShortestRoundTrip(double value) {
     if (std::isnan(value) || std::isinf(value)) {
         // Not representable in an `.acf` at all; refuse rather than write a token
         // X-Plane's parser would take as zero.
-        throw AcfError("refusing to render a non-finite value into a .acf");
+        throw AcfError("cannot render a non-finite value into a .acf");
     }
 
     char buf[64];

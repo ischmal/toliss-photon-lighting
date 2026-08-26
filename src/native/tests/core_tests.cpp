@@ -11,6 +11,8 @@
 // binary through its CLI (docs/installer_cpp_plan.md §6.2).
 #include "test_harness.h"
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -21,11 +23,14 @@
 #include "core/fsutil.h"
 #include "core/manifest.h"
 #include "core/marker.h"
+#include "core/neomod.h"
 #include "core/patch_acf.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_glow.h"
+#include "core/patch_integral.h"
 #include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
+#include "core/support.h"
 #include "core/version.h"
 #include "installer/tui.h"
 
@@ -1593,4 +1598,632 @@ TEST("intensity: SavedFactor reads the plugin's prefs, absent means 1x") {
     CHECK(intensity::SameFactor(intensity::SavedFactor(root), 1.0));
 }
 
+// ============================ the support report =============================
+// The Help tab's "Save Log" — see core/support.h. Everything here is decidable
+// from a string or a temp directory, which is the whole reason the collection
+// rules live in core rather than in plugin.cpp.
+
+TEST("support: a log names the airframe its install-target tag states") {
+    const std::string log =
+        "04:18:55 [INFO ] ToLiss Photon 0.9.2 installer log\n"
+        "04:19:00 [INFO ] " + std::string(support::kInstallTargetTag) +
+        "a321 (ToLiss A321) - install - C:/X-Plane 12/Aircraft/ToLissA321\n"
+        "04:19:01 [INFO ] writing .../objects/lights_out321_XP12.obj (34007 bytes)\n";
+    const std::vector<std::string> keys = support::AirframesNamedIn(log);
+    CHECK_EQ(keys.size(), (size_t)1);
+    CHECK_EQ(keys[0], std::string("a321"));
+}
+
+TEST("support: an untagged log still classifies, by the OBJ fingerprint") {
+    // ⚠ THE FALLBACK IS NOT DEAD CODE. Every installer log already on a user's
+    // disk predates the tag, and those are exactly the logs a first bug report
+    // carries.
+    const std::string log =
+        "01:42:32 [INFO ] writing C:/X/Aircraft/A319/objects/lights_out319_XP12.obj\n"
+        "01:42:33 [INFO ] writing C:/X/Aircraft/A319/objects/lights_inn.obj\n";
+    const std::vector<std::string> keys = support::AirframesNamedIn(log);
+    CHECK_EQ(keys.size(), (size_t)1);
+    CHECK_EQ(keys[0], std::string("a319"));
+}
+
+TEST("support: a tagged log does NOT also answer from the fingerprint") {
+    // ⚠ THE A340 CASE, one level up. `ExternalLights_XP12.obj` is ToLiss's name
+    // for every newer airframe's exterior lights OBJ, so the fingerprint alone
+    // reads an A340 run — which the installer REFUSES — as an installed a339.
+    // Where the run stated its target, that statement is the answer.
+    const std::string log =
+        std::string("[INFO ] ") + support::kInstallTargetTag +
+        "a320 (ToLiss A320) - install - C:/X/Aircraft/A320\n"
+        "[INFO ] detect: skipped ExternalLights_XP12.obj (ICAO A342, not A339)\n"
+        "[INFO ] writing .../objects/lights_out320_XP12.obj\n";
+    const std::vector<std::string> keys = support::AirframesNamedIn(log);
+    CHECK_EQ(keys.size(), (size_t)1);
+    CHECK_EQ(keys[0], std::string("a320"));
+}
+
+TEST("support: the newest log per airframe wins, and one file is listed once") {
+    TempDir tmp;
+    const std::string dir = fsutil::PathToUtf8(tmp.path());
+    // Oldest first, so the mtimes come out in the order they are written.
+    const std::string prefix = support::kInstallerLogPrefix;
+    Write(tmp / (prefix + "20260101_000000.log"),
+          std::string("[INFO ] ") + support::kInstallTargetTag + "a321 (x) - install\n");
+    Write(tmp / (prefix + "20260102_000000.log"),
+          std::string("[INFO ] ") + support::kInstallTargetTag + "a319 (x) - install\n"
+          "[INFO ] " + support::kInstallTargetTag + "a321 (x) - install\n");
+    // Not ours: a same-folder file that merely ends in .log.
+    Write(tmp / "SomeOtherInstaller.log", "not ours\n");
+
+    const std::vector<support::LogFile> logs = support::InstallerLogs(dir);
+    // The a319/a321 run is newest and covers BOTH, so it is the only file taken:
+    // the older a321-only run is superseded, and the foreign .log is not a
+    // candidate at all.
+    CHECK_EQ(logs.size(), (size_t)1);
+    CHECK_EQ(logs[0].name, prefix + "20260102_000000.log");
+    CHECK_EQ(logs[0].airframes.size(), (size_t)2);
+    CHECK_EQ(logs[0].kind, std::string("installer"));
+}
+
+TEST("support: a run that named no aircraft is still carried, as the newest") {
+    // A detection-only run, or one that failed before it chose anything. It is
+    // the only evidence there is about an installer that would not start.
+    TempDir tmp;
+    Write(tmp / (std::string(support::kInstallerLogPrefix) + "20260103_000000.log"),
+          "[ERROR] no installable payload found\n");
+    const std::vector<support::LogFile> logs =
+        support::InstallerLogs(fsutil::PathToUtf8(tmp.path()));
+    CHECK_EQ(logs.size(), (size_t)1);
+    CHECK(logs[0].airframes.empty());
+}
+
+TEST("support: X-Plane's rotated logs come back newest first, missing ones skipped") {
+    TempDir tmp;
+    Write(tmp / "Log.txt", "current\n");
+    Write(tmp / "Log.1.txt", "one\n");
+    // No Log.2.txt on purpose — a sim that has only been run twice.
+    Write(tmp / "Log.3.txt", "three\n");
+    Write(tmp / "Log.9.txt", "out of range\n");
+    const std::vector<support::LogFile> logs =
+        support::XPlaneLogs(fsutil::PathToUtf8(tmp.path()), 3);
+    CHECK_EQ(logs.size(), (size_t)3);
+    CHECK_EQ(logs[0].name, std::string("Log.txt"));
+    CHECK_EQ(logs[1].name, std::string("Log.1.txt"));
+    CHECK_EQ(logs[2].name, std::string("Log.3.txt"));
+    CHECK_EQ(logs[0].note, std::string("current session"));
+}
+
+TEST("support: a CDATA section survives a log that contains ]]>") {
+    // ⚠ SILENT OTHERWISE. `]]>` is a byte sequence, not an escape: it simply ENDS
+    // the section, and everything after it becomes markup the reader rejects.
+    const std::string xml = support::XmlCdata("before ]]> after");
+    CHECK(xml.find("]]]]><![CDATA[>") != std::string::npos ||
+          xml.find("]]><![CDATA[>") != std::string::npos);
+    // The payload is still all there, in order.
+    CHECK(xml.find("before ") != std::string::npos);
+    CHECK(xml.find(" after") != std::string::npos);
+    // ...and no bare `]]>` remains except the one that closes the last section.
+    size_t last = xml.rfind("]]>");
+    CHECK_EQ(last, xml.size() - 3);
+}
+
+TEST("support: bytes XML cannot carry are dropped rather than emitted") {
+    std::string dirty = "ok\ttab\nline\r\n";
+    dirty += (char)0x01;          // a C0 control XML 1.0 forbids
+    dirty += (char)0x7F;          // DEL
+    dirty += "end";
+    const std::string clean = support::SanitizeXmlText(dirty);
+    CHECK(clean.find((char)0x01) == std::string::npos);
+    CHECK(clean.find((char)0x7F) == std::string::npos);
+    // Tab, LF and CR are the three that stay.
+    CHECK(clean.find('\t') != std::string::npos);
+    CHECK(clean.find('\n') != std::string::npos);
+    CHECK(clean.find("okend") == std::string::npos);   // nothing else was eaten
+    CHECK(clean.find("end") != std::string::npos);
+}
+
+TEST("support: invalid UTF-8 becomes a placeholder, valid UTF-8 is untouched") {
+    // A scenery name written in some other code page is the realistic source.
+    std::string mangled = "caf";
+    mangled += (char)0xE9;        // ISO-8859-1 'e-acute', not UTF-8
+    const std::string clean = support::SanitizeXmlText(mangled);
+    CHECK_EQ(clean, std::string("caf?"));
+    const std::string good = "caf\xC3\xA9 \xE2\x9A\xA0";   // é and the warning sign
+    CHECK_EQ(support::SanitizeXmlText(good), good);
+}
+
+TEST("support: an over-long log keeps BOTH its head and its tail") {
+    // ⚠ Both ends, never one. The system block — GPU, driver, plugin list — is at
+    // the top and the failure is at the bottom; a tail-only excerpt loses which
+    // driver it was and a head-only one loses the error.
+    std::string big = "FIRST LINE\n";
+    big += std::string(2 * 1024 * 1024, 'a') + "\n";
+    big += std::string(2 * 1024 * 1024, 'b') + "\n";
+    big += "LAST LINE\n";
+    bool truncated = false;
+    const std::string cut = support::Excerpt(big, truncated);
+    CHECK(truncated);
+    CHECK(cut.size() < big.size());
+    CHECK(cut.find("FIRST LINE") != std::string::npos);
+    CHECK(cut.find("LAST LINE") != std::string::npos);
+    CHECK(cut.find("bytes omitted from the middle") != std::string::npos);
+
+    // A log that fits comes back byte for byte, and says so.
+    bool small = true;
+    CHECK_EQ(support::Excerpt("short\n", small), std::string("short\n"));
+    CHECK(!small);
+}
+
+TEST("support: the report is well formed and carries every log it was given") {
+    TempDir tmp;
+    Write(tmp / "Log.txt", "x-plane says <hello> & \"goodbye\"\n");
+    Write(tmp / "Log.1.txt", "an older session\n");
+    const std::vector<support::LogFile> logs =
+        support::XPlaneLogs(fsutil::PathToUtf8(tmp.path()), 3);
+    std::vector<support::ReportFact> facts;
+    facts.push_back(support::ReportFact{"Aircraft", "C:/X/A320 & \"friends\".acf"});
+
+    const std::string xml = support::BuildReportXml(facts, logs);
+    CHECK(fsutil::StartsWith(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    CHECK(fsutil::EndsWith(xml, "</photonReport>\n"));
+    CHECK(xml.find("<logs count=\"2\">") != std::string::npos);
+    // The attribute is escaped...
+    CHECK(xml.find("A320 &amp; &quot;friends&quot;.acf") != std::string::npos);
+    // ...and the log body is NOT, because it is inside CDATA. That asymmetry is
+    // the point: a log full of angle brackets would otherwise triple in size.
+    CHECK(xml.find("x-plane says <hello> & \"goodbye\"") != std::string::npos);
+    CHECK(xml.find("excerpt=\"complete\"") != std::string::npos);
+    // Every element opened is closed — crude, but it catches a stray tag.
+    CHECK_EQ(std::count(xml.begin(), xml.end(), '<'),
+             std::count(xml.begin(), xml.end(), '>'));
+
+    // And it lands on disk under a name that sorts by time.
+    std::string err;
+    const std::string written =
+        support::WriteReport(fsutil::PathToUtf8(tmp.path()), xml, err);
+    CHECK(err.empty());
+    CHECK(!written.empty());
+    std::string back;
+    CHECK(fsutil::ReadFileBytes(fsutil::PathFromUtf8(written), back));
+    CHECK_EQ(back, xml);
+    CHECK(fsutil::StartsWith(
+        fsutil::PathToUtf8(fsutil::PathFromUtf8(written).filename()),
+        "ToLissPhoton_Report_"));
+    CHECK(fsutil::EndsWith(written, ".xml"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// integral lighting — the OBJ gate (core/patch_integral)
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// Shaped like the real `objects/lamps.obj`: tab-separated, CRLF, a header ending
+// in POINT_COUNTS, then the vertex and index tables, then drawing — including
+// geometry both inside and outside an existing ANIM block, and a trailing
+// exporter comment. Every one of those is a place the wrap can go wrong.
+std::string LampsObjFixture() {
+    return
+        "I\r\n"
+        "800\r\n"
+        "OBJ\r\n"
+        "\r\n"
+        "GLOBAL_cockpit_lit\r\n"
+        "TEXTURE\ttext.png\r\n"
+        "TEXTURE_LIT\ttext_LIT.png\r\n"
+        "POINT_COUNTS\t3\t0\t0\t3\r\n"
+        "VT\t0 0 0\t0 1 0\t0 0\r\n"
+        "VT\t1 0 0\t0 1 0\t1 0\r\n"
+        "VT\t0 1 0\t0 1 0\t0 1\r\n"
+        "IDX10\t0 1 2 0 1 2 0 1 2 0\r\n"
+        "ATTR_light_level\t0\t1\tckpt/brt/pedistal\t1500\r\n"
+        "ANIM_begin\r\n"
+        "\tANIM_hide\t0\t0\tckpt/radio/2/radioNavCover\r\n"
+        "\tTRIS\t0\t3\r\n"
+        "ANIM_end\r\n"
+        "TRIS\t0\t3\r\n"
+        "# Build with Blender 3.6.20\r\n";
+}
+
+// The offset of `needle`, or npos — so a test can say one thing comes before
+// another, which is the whole contract for where the block opens.
+std::size_t At(const std::string& text, const std::string& needle) {
+    return text.find(needle);
+}
+
+}  // namespace
+
+TEST("integral: the gate opens after the vertex tables, never above them") {
+    // ⚠ THE ONE STRUCTURAL RULE. VT/IDX are data and OBJ8 requires them directly
+    // after POINT_COUNTS; an ANIM_begin above them is not a harmless extra
+    // block, it is a malformed file — and it would fail at load, silently, on a
+    // 300 k-line file nobody is going to read.
+    std::string out, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, out, err));
+    CHECK(err.empty());
+    CHECK(At(out, "POINT_COUNTS") < At(out, "VT\t0 0 0"));
+    CHECK(At(out, "IDX10") < At(out, "ANIM_begin\r\n\tANIM_hide\t1"));
+    CHECK(At(out, "ANIM_begin\r\n\tANIM_hide\t1") <
+          At(out, "ATTR_light_level"));
+    // …and it closes past everything, exporter comment included. ⚠ `rfind`: the
+    // file already contains ToLiss's own ANIM_end blocks, so the first one says
+    // nothing about ours.
+    CHECK(At(out, "# Build with Blender") < out.rfind("ANIM_end\r\n"));
+    CHECK(fsutil::EndsWith(out, "ANIM_end\r\n"));
+}
+
+TEST("integral: each branch hides at the OTHER branch's value") {
+    // Two-valued gating, the exterior form: one hide per branch, at the value
+    // that is not its own. Get this backwards and BOTH branches draw at once —
+    // two cockpits of placards in the same place, which reads as a broken mod
+    // rather than as an inverted comparison.
+    std::string inc, led, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, inc, err));
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed,
+                              "text_LIT_photon_led.png", kPhotonVersion, led,
+                              err));
+    CHECK(HasLine(inc, "ANIM_hide\t1\t1\tToLissPhoton/interior/integral"));
+    CHECK(HasLine(led, "ANIM_hide\t0\t0\tToLissPhoton/interior/integral"));
+}
+
+TEST("integral: a missing plugin fails OPEN to incandescent") {
+    // An OBJ binds dataref NAMES at load and an unresolved one reads 0 forever.
+    // So the branch that must survive a plugin that did not start is the one
+    // whose hide does NOT match 0 — incandescent. This is the same fail-open
+    // argument as `interior/optimized`, and it is why the polarity is not
+    // arbitrary: reversed, an older plugin would give a cockpit nobody chose.
+    std::string inc, led, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, inc, err));
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed, "",
+                              kPhotonVersion, led, err));
+    // hide bounds are [v v]; at a dataref reading 0, incandescent's [1 1] does
+    // not match (drawn) and LED's [0 0] does (hidden).
+    CHECK(HasLine(inc, "ANIM_hide\t1\t1\t"));
+    CHECK(HasLine(led, "ANIM_hide\t0\t0\t"));
+}
+
+TEST("integral: only the LED copy is repointed, and only its TEXTURE_LIT") {
+    std::string inc, led, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, inc, err));
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed,
+                              "text_LIT_photon_led.png", kPhotonVersion, led,
+                              err));
+    // The in-place branch keeps the stock name — that file now holds the
+    // incandescent recolor, so repointing it would orphan the recolor.
+    CHECK(HasLine(inc, "TEXTURE_LIT\ttext_LIT.png\r\n"));
+    CHECK(HasLine(led, "TEXTURE_LIT\ttext_LIT_photon_led.png\r\n"));
+    // ⚠ The DAY texture is shared by both copies and must not be touched: it is
+    // one file on disk and duplicating it would double 5 MB for no difference.
+    CHECK(HasLine(led, "TEXTURE\ttext.png\r\n"));
+}
+
+TEST("integral: an already-gated OBJ is refused, never wrapped twice") {
+    // A double wrap is invisible in a diff of a 300 k-line file and shows up in
+    // the cockpit as the branch never drawing at all.
+    std::string once, twice, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, once, err));
+    CHECK(integral::IsPatched(once));
+    CHECK(!integral::PatchText(once, integral::Era::kIncandescent, "",
+                               kPhotonVersion, twice, err));
+    CHECK(!err.empty());
+    CHECK(twice.empty());
+}
+
+TEST("integral: the marker lands in the header, where a head-scan finds it") {
+    // `marker::Parse` callers pass only the first few KB of these files — the
+    // draw section is 300 k lines down. A marker written beside the gate would
+    // parse in a test and be invisible to every real reader.
+    std::string out, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed,
+                              "text_LIT_photon_led.png", kPhotonVersion, out,
+                              err));
+    CHECK(At(out, "ToLissPhoton version:") < At(out, "VT\t0 0 0"));
+    const marker::Marker m = marker::Parse(out.substr(0, 512));
+    CHECK(m.found);
+    CHECK_EQ(m.version, std::string(kPhotonVersion));
+    CHECK_EQ(m.wing, std::string("integral"));
+}
+
+TEST("integral: newline flavor survives the wrap") {
+    std::string crlf, lf, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+                              "", kPhotonVersion, crlf, err));
+    CHECK(crlf.find("ANIM_begin\r\n") != std::string::npos);
+
+    std::string noCr;
+    for (char c : LampsObjFixture()) {
+        if (c != '\r') noCr.push_back(c);
+    }
+    CHECK(integral::PatchText(noCr, integral::Era::kIncandescent, "",
+                              kPhotonVersion, lf, err));
+    CHECK(lf.find('\r') == std::string::npos);
+}
+
+TEST("integral: TextureLitOf reads the binding and stops at POINT_COUNTS") {
+    CHECK_EQ(integral::TextureLitOf(LampsObjFixture()),
+             std::string("text_LIT.png"));
+    // ⚠ Stops at the header's end so a TEXTURE_LIT-shaped string further down —
+    // a comment, or our own gate comment — cannot answer for the binding.
+    const std::string noBinding =
+        "I\r\n800\r\nOBJ\r\nPOINT_COUNTS\t0 0 0 0\r\n"
+        "# TEXTURE_LIT\tnot_a_binding.png\r\n";
+    CHECK(integral::TextureLitOf(noBinding).empty());
+}
+
+TEST("integral: the LED name goes before the extension, OBJ and PNG alike") {
+    CHECK_EQ(integral::LedNameFor("lamps.obj"),
+             std::string("lamps_photon_led.obj"));
+    CHECK_EQ(integral::LedNameFor("text_LIT.png"),
+             std::string("text_LIT_photon_led.png"));
+    CHECK_EQ(integral::LedNameFor("knobs_LIT.png"),
+             std::string("knobs_LIT_photon_led.png"));
+}
+
+TEST("integral: a file that is not an OBJ8 is refused rather than mangled") {
+    std::string out, err;
+    CHECK(!integral::PatchText("not an obj at all\r\n",
+                               integral::Era::kIncandescent, "", kPhotonVersion,
+                               out, err));
+    CHECK(!err.empty());
+    // And an OBJ with a header but no drawing — every line a table line.
+    CHECK(!integral::PatchText("I\r\n800\r\nOBJ\r\nPOINT_COUNTS\t1 0 0 0\r\n"
+                               "VT\t0 0 0\t0 1 0\t0 0\r\n",
+                               integral::Era::kIncandescent, "", kPhotonVersion,
+                               out, err));
+    CHECK(!err.empty());
+}
+
+TEST("integral: an era names one profile, and LED is not incandescent") {
+    CHECK(integral::ProfileFor(integral::Era::kIncandescent) ==
+          lit::Profile::kIncandescent);
+    CHECK(integral::ProfileFor(integral::Era::kLed) == lit::Profile::kLed);
+    CHECK_EQ(std::string(integral::EraKey(integral::Era::kLed)),
+             std::string("led"));
+    CHECK_EQ(std::string(integral::EraLabel(integral::Era::kIncandescent)),
+             std::string("Incandescent"));
+}
+
 int main(int argc, char** argv) { return photontest::RunAll(argc, argv); }
+
+// ─── neomod: detecting a spill-dimming lighting mod ──────────────────────────
+//
+// The whole group asks the same question from different angles: does this text
+// WRITE `spill_cutoff_level`, and can we read the value back? Everything else
+// about BSS NEO — its scattering maths, its textures, its scenery — is
+// irrelevant to Photon. See core/neomod.h.
+
+namespace {
+
+// The shape of the real script's one line that matters, plus both corroborators.
+std::string NeoLuaFixture() {
+    return
+        "-- some header\n"
+        "dataref(\"sun_pitch\", \"sim/graphics/scenery/sun_pitch_degrees\", \"readonly\")\n"
+        "set(\"sim/private/controls/lights/spill_cutoff_level\", 0.09)\n"
+        "set(\"sim/private/controls/lights/photobb/hack_ev_lo\", 6.0)\n"
+        "dataref(\"turbidity\", \"sim/private/controls/scattering/override_turbidity_t\", "
+        "\"writable\")\n";
+}
+
+}  // namespace
+
+TEST("neomod: a set() of the spill cutoff is a write, and the value parses") {
+    const std::string lua = NeoLuaFixture();
+    CHECK(neomod::WritesSpillCutoff(lua));
+    CHECK(neomod::LooksRecognized(lua));
+    double v = -1.0;
+    CHECK(neomod::ParseSpillCutoff(lua, v));
+    CHECK(std::fabs(v - 0.09) < 1e-9);
+}
+
+TEST("neomod: READING the dataref is not writing it") {
+    // The distinction the whole detector rests on. A script that only watches
+    // the cutoff changes nothing, and reporting it would tell a user to
+    // compensate for a mod they do not have.
+    const std::string lua =
+        "dataref(\"cut\", \"sim/private/controls/lights/spill_cutoff_level\", "
+        "\"readonly\")\nprint(cut)\n";
+    CHECK(!neomod::WritesSpillCutoff(lua));
+    double v = -1.0;
+    CHECK(!neomod::ParseSpillCutoff(lua, v));
+}
+
+TEST("neomod: a writable dataref() binding counts as a write") {
+    const std::string lua =
+        "dataref(\"cut\", \"sim/private/controls/lights/spill_cutoff_level\", "
+        "\"writable\")\ncut = 0.2\n";
+    CHECK(neomod::WritesSpillCutoff(lua));
+    // But the VALUE is not parseable from a binding: the next token is a mode
+    // string, not a number. Detection must survive that; only the number is lost.
+    double v = -1.0;
+    CHECK(!neomod::ParseSpillCutoff(lua, v));
+}
+
+TEST("neomod: a call whose name merely ENDS in set is not a write") {
+    // ⚠ `offset(`, `reset(`, `asset(` all end in "set". A false positive here
+    // does not merely mis-parse — it tells a user to brighten a cockpit that
+    // nothing is dimming.
+    const std::string lua =
+        "local v = offset(\"sim/private/controls/lights/spill_cutoff_level\")\n";
+    CHECK(!neomod::WritesSpillCutoff(lua));
+}
+
+TEST("neomod: a commented-out write is not a write") {
+    // A user who has already disabled the line by hand must not be warned about
+    // a mod that is no longer doing anything.
+    const std::string lua =
+        "-- set(\"sim/private/controls/lights/spill_cutoff_level\", 0.09)\n";
+    CHECK(!neomod::WritesSpillCutoff(lua));
+    CHECK(!neomod::LooksRecognized(lua));
+}
+
+TEST("neomod: a cutoff of zero parses as zero, not as a parse failure") {
+    // Zero is a LEGAL cutoff meaning "cull nothing", and strtod returns 0.0 on
+    // failure too. Conflating them would report a mod that had switched culling
+    // off as though it had switched it on.
+    const std::string lua =
+        "set(\"sim/private/controls/lights/spill_cutoff_level\", 0)\n";
+    double v = -1.0;
+    CHECK(neomod::ParseSpillCutoff(lua, v));
+    CHECK(v == 0.0);
+}
+
+TEST("neomod: the cutoff alone is detected but not RECOGNIZED as BSS NEO") {
+    const std::string lua =
+        "set(\"sim/private/controls/lights/spill_cutoff_level\", 0.12)\n";
+    CHECK(neomod::WritesSpillCutoff(lua));
+    CHECK(!neomod::LooksRecognized(lua));
+}
+
+TEST("neomod: Detect reads Scripts/ only, never the disabled siblings") {
+    TempDir tmp;
+    const fs::path fwl = tmp.path() / "Resources" / "plugins" / "FlyWithLua";
+    fs::create_directories(fwl / "Scripts");
+    fs::create_directories(fwl / "Scripts (disabled)");
+    fs::create_directories(fwl / "Scripts (Quarantine)");
+    Write(fwl / "Scripts (disabled)" / "NEO.lua", NeoLuaFixture());
+    Write(fwl / "Scripts (Quarantine)" / "NEO.lua", NeoLuaFixture());
+    Write(fwl / "Scripts" / "harmless.lua", "-- nothing to see\n");
+
+    const neomod::Result r = neomod::Detect(fsutil::PathToUtf8(tmp.path()));
+    CHECK(!r.Detected());
+    CHECK(r.Token() == std::string("none"));
+}
+
+TEST("neomod: Detect finds a RENAMED script, because the name is never the test") {
+    // NEO.lua is what it ships as; a troubleshooting user renames things, and
+    // repackaged copies arrive called anything at all.
+    TempDir tmp;
+    const fs::path scripts =
+        tmp.path() / "Resources" / "plugins" / "FlyWithLua" / "Scripts";
+    fs::create_directories(scripts);
+    Write(scripts / "my lighting tweaks.lua", NeoLuaFixture());
+
+    const neomod::Result r = neomod::Detect(fsutil::PathToUtf8(tmp.path()));
+    CHECK(r.Detected());
+    CHECK(r.Token() == std::string("bss_neo"));
+    CHECK(r.scriptName == std::string("my lighting tweaks.lua"));
+    CHECK(std::fabs(r.spillCutoff - 0.09) < 1e-9);
+    CHECK(r.Texts(neomod::Severity::Problem).size() == 1u);
+}
+
+TEST("neomod: a recognized script outranks an unrecognized one whatever the order") {
+    TempDir tmp;
+    const fs::path scripts =
+        tmp.path() / "Resources" / "plugins" / "FlyWithLua" / "Scripts";
+    fs::create_directories(scripts);
+    // "aaa" sorts first and is the WEAKER answer; the verdict must still name
+    // the mod, because the name is the only part the user can act on.
+    Write(scripts / "aaa.lua",
+              "set(\"sim/private/controls/lights/spill_cutoff_level\", 0.2)\n");
+    Write(scripts / "zzz.lua", NeoLuaFixture());
+
+    const neomod::Result r = neomod::Detect(fsutil::PathToUtf8(tmp.path()));
+    CHECK(r.Detected());
+    CHECK(r.Token() == std::string("bss_neo"));
+    CHECK(r.scriptName == std::string("zzz.lua"));
+}
+
+TEST("neomod: no FlyWithLua at all is a clean, quiet answer") {
+    TempDir tmp;
+    fs::create_directories(tmp.path() / "Resources");
+    const neomod::Result r = neomod::Detect(fsutil::PathToUtf8(tmp.path()));
+    CHECK(!r.Detected());
+    CHECK(r.findings.empty());
+    CHECK(!r.summary.empty());
+}
+
+// ─── the compensation ────────────────────────────────────────────────────────
+
+TEST("intensity: EffectiveFactor multiplies only when the NEO flag is set") {
+    CHECK(intensity::SameFactor(intensity::EffectiveFactor(1.0, false), 1.0));
+    CHECK(intensity::SameFactor(intensity::EffectiveFactor(2.0, false), 2.0));
+    CHECK(intensity::SameFactor(intensity::EffectiveFactor(1.0, true),
+                                intensity::kNeoBoost));
+    CHECK(intensity::SameFactor(intensity::EffectiveFactor(2.0, true),
+                                2.0 * intensity::kNeoBoost));
+}
+
+TEST("intensity: the compensation may exceed the SLIDER's ceiling") {
+    // The whole point of the separate bound: clamping the product to kMax would
+    // silently cancel the compensation for exactly the users who had already
+    // turned the brightness up because of the mod.
+    const double e = intensity::EffectiveFactor(intensity::kMax, true);
+    CHECK(e > intensity::kMax);
+    CHECK(intensity::SameFactor(e, intensity::kEffectiveMax));
+    // ...but it is still bounded, and still NaN-safe on the low end.
+    CHECK(intensity::SameFactor(intensity::ClampEffective(1e9),
+                                intensity::kEffectiveMax));
+    CHECK(intensity::SameFactor(intensity::ClampEffective(-5.0), intensity::kMin));
+}
+
+TEST("intensity: PatchText accepts a compensated factor above kMax") {
+    int scaled = 0;
+    const double f = intensity::EffectiveFactor(intensity::kMax, true);
+    const std::string out = intensity::PatchText(InnObjFixture(), f, scaled);
+    CHECK(scaled > 0);
+    CHECK(intensity::SameFactor(intensity::FactorIn(out), f));
+    // and it still round-trips back to the authored file byte for byte
+    int back = 0;
+    const std::string restored = intensity::PatchText(out, 1.0, back);
+    CHECK(restored == InnObjFixture());
+}
+
+TEST("intensity: SaveNeo/SavedNeo round-trip and preserve everything else") {
+    TempDir tmp;
+    const fs::path prefs =
+        tmp.path() / "Output" / "preferences" / photon::kProfilesJsonName;
+    Write(prefs,
+              "{\n  \"$cockpit\": {\"optimized\": 1, \"intensity\": 2.50},\n"
+              "  \"MyLivery\": {\"profile\": 3}\n}\n");
+    const std::string root = fsutil::PathToUtf8(tmp.path());
+
+    CHECK(!intensity::SavedNeo(root));
+    CHECK(intensity::SaveNeo(root, true));
+    CHECK(intensity::SavedNeo(root));
+    // THE SURGICAL PART. An install that wiped the user's per-livery profiles to
+    // record one boolean would be a far worse bug than the one it fixes.
+    CHECK(Read(prefs).find("MyLivery") != std::string::npos);
+    CHECK(intensity::SameFactor(intensity::SavedFactor(root), 2.5));
+
+    CHECK(intensity::SaveNeo(root, false));
+    CHECK(!intensity::SavedNeo(root));
+    CHECK(Read(prefs).find("MyLivery") != std::string::npos);
+}
+
+TEST("intensity: a NEO flag that is not a real boolean reads as false") {
+    // The plugin writes a JSON true/false for exactly this reason. A numeric 1
+    // here must land on "change nothing" -- the flag decides what ships in the
+    // user's OBJ, and the two halves have to agree on it.
+    TempDir tmp;
+    const fs::path prefs =
+        tmp.path() / "Output" / "preferences" / photon::kProfilesJsonName;
+    Write(prefs, "{\n  \"$cockpit\": {\"neo\": 1}\n}\n");
+    CHECK(!intensity::SavedNeo(fsutil::PathToUtf8(tmp.path())));
+
+    Write(prefs, "{\n  \"$cockpit\": {\"neo\": true}\n}\n");
+    CHECK(intensity::SavedNeo(fsutil::PathToUtf8(tmp.path())));
+}
+
+TEST("intensity: SaveNeo refuses a corrupt prefs file rather than rewriting it") {
+    // It may be the only copy of the user's per-livery profiles.
+    TempDir tmp;
+    const fs::path prefs =
+        tmp.path() / "Output" / "preferences" / photon::kProfilesJsonName;
+    Write(prefs, "{ this is not json");
+    CHECK(!intensity::SaveNeo(fsutil::PathToUtf8(tmp.path()), true));
+    CHECK(Read(prefs) == std::string("{ this is not json"));
+}
+
+TEST("intensity: SaveNeo(false) with no prefs file writes nothing") {
+    // Absence already means false; inventing a preferences file to record a
+    // default is state the user never set.
+    TempDir tmp;
+    const fs::path prefs =
+        tmp.path() / "Output" / "preferences" / photon::kProfilesJsonName;
+    CHECK(intensity::SaveNeo(fsutil::PathToUtf8(tmp.path()), false));
+    CHECK(!fs::exists(prefs));
+}

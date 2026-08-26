@@ -167,15 +167,19 @@ PLUGIN_SOURCE_PATHS = (
     REPO / "src" / "native" / "CMakeLists.txt",
 )
 
-# ⚠ `src/installer/` is EXCLUDED from the freshness comparison: it is compiled
-# into `photon-installer` only, never the `.xpl` (CMakeLists: ToLissPhoton =
-# plugin.cpp + imgui + sysmetrics + photoncore), so no plugin rebuild can ever
-# freshen the binary against an edit there — the check would fire on EVERY
-# installer change and stay red until an unrelated plugin source moved. A check
-# that always fires gets --allow-stale-plugin typed as a reflex, which is the
-# note above proven right: this fired on the first installer-only edit after it
-# shipped (2026-08-15).
-PLUGIN_SOURCE_EXCLUDE = (REPO / "src" / "native" / "src" / "installer",)
+# ⚠ `src/installer/` and `src/tools/` are EXCLUDED from the freshness
+# comparison: they are compiled into `photon-installer` and `photon-lit-studio`
+# only, never the `.xpl` (CMakeLists: ToLissPhoton = plugin.cpp + imgui +
+# sysmetrics + photoncore), so no plugin rebuild can ever freshen the binary
+# against an edit there — the check would fire on EVERY edit and stay red until
+# an unrelated plugin source moved. A check that always fires gets
+# --allow-stale-plugin typed as a reflex, which is the note above proven right
+# twice: the first installer-only edit after the check shipped (2026-08-15),
+# then the first lit-studio-only edit after `src/tools/` arrived (2026-08-24).
+PLUGIN_SOURCE_EXCLUDE = (
+    REPO / "src" / "native" / "src" / "installer",
+    REPO / "src" / "native" / "src" / "tools",
+)
 
 # platform.system() -> the pretty OS name used in the bundle filename + README.
 OS_NAME = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}

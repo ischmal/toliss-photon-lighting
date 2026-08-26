@@ -10,6 +10,7 @@
 #include "core/detect.h"
 #include "core/fsutil.h"
 #include "core/manifest.h"
+#include "core/neomod.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
@@ -47,6 +48,7 @@ struct Args {
 const std::set<std::string>& ValuelessFlags() {
     static const std::set<std::string> kFlags = {
         "json", "dry-run", "interior", "remove-plugin", "force", "help", "detach",
+        "neo",
     };
     return kFlags;
 }
@@ -149,6 +151,28 @@ json AircraftToJson(const detect::Aircraft& ac) {
     return j;
 }
 
+// ⚠ ROOT-SCOPED, NOT AIRCRAFT-SCOPED — which is why it appears on `detect` (a
+// property of the install) as well as on `status` (where a support log needs it
+// beside everything else about one aeroplane). See core/neomod.h.
+json NeoModToJson(const neomod::Result& n) {
+    json j = json::object();
+    j["detected"] = n.Detected();
+    j["mod"] = n.Token();
+    j["script"] = n.scriptName;
+    j["summary"] = n.summary;
+    // ⚠ NULL, NOT -1 AND NOT 0, when the value could not be parsed. Zero is a
+    // legal cutoff meaning "cull nothing", so a sentinel number here would read
+    // as a real measurement of the opposite of the truth.
+    if (n.spillCutoff >= 0.0) {
+        j["spill_cutoff"] = n.spillCutoff;
+    } else {
+        j["spill_cutoff"] = nullptr;
+    }
+    j["problems"] = json(n.Texts(neomod::Severity::Problem));
+    j["notes"] = json(n.Texts(neomod::Severity::Note));
+    return j;
+}
+
 json ManifestSummary(const manifest::Manifest& m) {
     json j = json::object();
     j["present"] = m.present;
@@ -228,10 +252,20 @@ int CmdDetect(const Args& a) {
     }
     out["xplane_root"] = root;
     json list = json::array();
-    for (const detect::Aircraft& ac : detect::DetectAircraft(root)) {
-        list.push_back(AircraftToJson(ac));
+    // A scan that throws is an answer, not a crash: `ok: false` with the reason,
+    // the same shape every other refusal here takes.
+    try {
+        for (const detect::Aircraft& ac : detect::DetectAircraft(root)) {
+            list.push_back(AircraftToJson(ac));
+        }
+    } catch (const std::exception& e) {
+        out["ok"] = false;
+        out["error"] = std::string("could not scan the Aircraft folder: ") + e.what();
+        out["aircraft"] = list;
+        return Emit(out, asJson, false);
     }
     out["aircraft"] = list;
+    out["neo_mod"] = NeoModToJson(neomod::Detect(root));
     out["ok"] = true;
     return Emit(out, asJson, true);
 }
@@ -280,6 +314,15 @@ int CmdStatus(const Args& a) {
         {"summary", wm.summary},
         {"problems", json(wm.Texts(wingmod::Severity::Problem))},
         {"notes", json(wm.Texts(wingmod::Severity::Note))}};
+
+    // ⚠ A FOURTH AXIS, AND THE ONLY ONE THAT IS ABOUT THE X-PLANE INSTALL rather
+    // than about this aeroplane — so it is resolved from the root, and a status
+    // run that cannot find one simply omits it rather than failing. It earns its
+    // place here because "the cockpit is dim" arrives as a report about one
+    // aircraft, and this is the line that explains it.
+    std::string rootErr;
+    const std::string root = ResolveRoot(a, aircraft, rootErr);
+    if (!root.empty()) out["neo_mod"] = NeoModToJson(neomod::Detect(root));
     out["ok"] = true;
     return Emit(out, asJson, true);
 }
@@ -380,6 +423,11 @@ int CmdInstall(const Args& a) {
     opts.aircraftPath = a.Get("aircraft");
     opts.wing = a.Get("wing", "stock");
     opts.interior = a.Has("interior");
+    // ⚠ EXPLICIT ONLY on the CLI. The GUI ticks this box for the user from
+    // neomod::Detect; a headless run does not, because a scripted install that
+    // silently changed the cockpit brightness based on what it found lying about
+    // in Resources/ would be unreproducible from its own command line.
+    opts.neo = a.Has("neo");
     opts.dryRun = a.Has("dry-run");
 
     if (opts.aircraftPath.empty()) {
@@ -418,6 +466,7 @@ int CmdInstall(const Args& a) {
     out["airframe"] = opts.airframeKey;
     out["wing"] = opts.wing;
     out["xplane_root"] = opts.xplaneRoot;
+    out["neo"] = opts.neo;
     out["dry_run"] = opts.dryRun;
     try {
         out["steps"] = json(actions::Install(opts, log));
@@ -516,8 +565,8 @@ std::string UsageText() {
         "  photon-installer detect  [--xplane-root P] [--json]\n"
         "  photon-installer status  --aircraft P [--json]\n"
         "  photon-installer install --aircraft P [--wing stock|durantula|realwings]\n"
-        "                           [--interior] [--dry-run] [--xplane-root P]\n"
-        "                           [--force] [--json]\n"
+        "                           [--interior] [--neo] [--dry-run]\n"
+        "                           [--xplane-root P] [--force] [--json]\n"
         "  photon-installer uninstall --aircraft P [--remove-plugin] [--dry-run]\n"
         "                           [--xplane-root P] [--force] [--json]\n"
         "  photon-installer screens --aircraft P [--detach] [--dry-run] [--json]\n"

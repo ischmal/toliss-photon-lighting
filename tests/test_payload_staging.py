@@ -120,6 +120,16 @@ class PluginFreshnessTests(unittest.TestCase):
         self.assertIn("_newest_mtime(PLUGIN_SOURCE_PATHS, PLUGIN_SOURCE_EXCLUDE)",
                       MR)
 
+    def test_the_tools_tree_is_not_a_plugin_source(self):
+        """⚠ `src/tools/` is compiled into photon-lit-studio only (PHOTON_TOOLS,
+        dev-only, never staged), never the `.xpl` — the same shape as
+        `src/installer/`, and it fired the same way on 2026-08-24: the first
+        lit-studio-only edit left the check red with nothing a plugin rebuild
+        could do about it."""
+        m = re.search(r"PLUGIN_SOURCE_EXCLUDE = \((.*?)\)", MR, re.S)
+        self.assertIsNotNone(m, "PLUGIN_SOURCE_EXCLUDE is gone")
+        self.assertIn('"tools"', m.group(1))
+
     def test_the_dsl_is_not_a_plugin_source(self):
         """⚠ It is a PAYLOAD input, restaged every run, and its being newer says
         nothing about whether the .xpl needs rebuilding. Listed here the check

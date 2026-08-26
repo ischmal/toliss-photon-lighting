@@ -137,8 +137,9 @@ MigrateResult Migrate(const fs::path& aircraftDir, bool dryRun) {
         r.complete = !re;
     }
     if (!r.complete) {
-        r.log.push_back("  ! some files could not be moved — Photon will keep "
-                        "using the folder in objects/ and retry next time");
+        r.log.push_back("  ! some files could not be moved — the folder under "
+                        "objects/ stays in use, and the move is retried on the "
+                        "next run");
     }
     return r;
 }

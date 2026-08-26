@@ -8,14 +8,19 @@
 #include "core/backup.h"
 #include "core/constants.h"
 #include "core/fsutil.h"
+#include "core/image_io.h"
+#include "core/lit_recolor.h"
 #include "core/marker.h"
 #include "core/patch_acf.h"
+#include "core/patch_acf_integral.h"
 #include "core/patch_acf_screens.h"
 #include "core/patch_glow.h"
+#include "core/patch_integral.h"
 #include "core/patch_intensity.h"
 #include "core/patch_realwings.h"
 #include "core/payload.h"
 #include "core/progress.h"
+#include "core/support.h"
 #include "core/version.h"
 #include "core/wingmod.h"
 
@@ -101,12 +106,12 @@ Backup BackupOnce(const fs::path& src, const fs::path& backupDir,
                   Log& log, bool dryRun) {
     const std::string rel = fsutil::PathToUtf8(src.filename());
     if (Contains(m.backedUp, rel)) {
-        log.Write("backup skipped (already have one): " + rel);
+        log.Write("backup skipped (a backup already exists): " + rel);
         return Backup::kAlreadyHave;
     }
     if (added != nullptr && Contains(*added, rel)) {
-        log.Write("backup skipped (ours from an earlier install, no stock "
-                  "original): " + rel);
+        log.Write("backup skipped (written by an earlier Photon install, no "
+                  "stock original): " + rel);
         return Backup::kNoOriginal;
     }
     const fs::path dest = backupDir / src.filename();
@@ -204,7 +209,7 @@ std::string BackupLabel(const fs::path& aircraftDir, const fs::path& backupDir) 
     std::error_code ec;
     const fs::path rel = fs::relative(backupDir, aircraftDir, ec);
     if (ec || rel.empty()) return fsutil::PathToUtf8(backupDir.filename());
-    return rel.generic_string();
+    return fsutil::PathToUtf8Generic(rel);
 }
 
 // The backup name a livery override is stored under: its aircraft-relative POSIX
@@ -260,6 +265,8 @@ constexpr char kStepInteriorObj[] = "Cockpit lights";
 constexpr char kStepInteriorTex[] = "Cockpit textures";
 constexpr char kStepLiveries[] = "Livery overrides";
 constexpr char kStepInteriorAcf[] = "Cockpit spot lights";
+constexpr char kStepIntegralTex[] = "Integral light textures";
+constexpr char kStepIntegralObj[] = "Integral light objects";
 constexpr char kStepManifest[] = "Manifest";
 constexpr char kStepRestore[] = "Restoring originals";
 constexpr char kStepRemove[] = "Removing added files";
@@ -284,6 +291,25 @@ constexpr double kMsBackupMove = 3.0;
 // rounding error either way: 2 x ~2 MB at the scan rate is ~14 ms against the
 // ~65 ms the four `.acf` themselves cost in the same step.
 constexpr double kMsWingObjs = 15.0;
+
+// One integral-lighting recolor pass — decode the stock PNG, run the palette
+// over it, re-encode. ⚠ PRICED PER MEGAPIXEL, NOT PER BYTE, which is the odd one
+// out in this file and deliberate: everything else here is I/O and scales with
+// the file, while this is dominated by the encoder and scales with the ATLAS.
+// The two are not the same shape at all — `knobs_LIT.png` is 0.16 MB of file and
+// 4.2 megapixels, so a byte-derived estimate would price it at a fiftieth of its
+// real cost and the bar would hang there.
+//
+// Measured 2026-08-24, this machine: `photon-lit-studio recolor` over the A320's
+// 4096² placard atlas, 1.31 s end to end, i.e. 16.78 Mpx in 1310 ms.
+constexpr double kMsPerMegapixelRecolor = 78.0;
+
+// What one texture's two eras cost, from the atlas size the spec is authored
+// against — known without opening the file, which is what planning needs.
+double RecolorMs(lit::Texture texture) {
+    const double side = static_cast<double>(lit::TextureReferenceSize(texture));
+    return 2.0 * kMsPerMegapixelRecolor * (side * side) / 1.0e6;
+}
 
 // A wing token in a SENTENCE. ⚠ Not `WingLabel`, which renders `stock` as
 // "Default" — right on a form where it is one option among three, wrong in
@@ -473,6 +499,28 @@ progress::Plan BuildInstallPlan(const Options& opts, const fs::path& aircraftDir
         plan.Add(kStepInteriorTex, CopyMs(2 * texBytes, dry));
         plan.Add(kStepLiveries, kMsLiveryScan);
         plan.Add(kStepInteriorAcf, progress::MsForAcfSpots(AcfBytes(aircraftDir)));
+
+        // ⚠ THESE TWO RUN UNCONDITIONALLY INSIDE `InstallInterior`, so they are
+        // priced unconditionally here — same branch, both sides. A step the run
+        // enters that the plan never priced is invisible in the numbers (it is
+        // missing from the denominator too, so the run still ends on exactly
+        // 1.000); `progress::SetUnknownStepHook` is what catches it, and it is
+        // armed by install_tests.cpp.
+        //
+        // ⚠ The OBJ figure is the honest one to be surprised by: the twin of
+        // `knobs.obj` is a 26 MB write, which dwarfs every other file this
+        // install copies.
+        double recolorMs = 0.0;
+        std::uint64_t twinBytes = 0;
+        for (const integral::Fixture& f : integral::FixturesIn(objects)) {
+            recolorMs += RecolorMs(f.texture);
+            twinBytes += progress::FileSizeOrZero(
+                fsutil::PathToUtf8(objects / fsutil::PathFromUtf8(f.obj)));
+        }
+        plan.Add(kStepIntegralTex, recolorMs);
+        // Read the stock OBJ, write it back gated, write the twin: three passes.
+        plan.Add(kStepIntegralObj, CopyMs(3 * twinBytes, dry) +
+                                       progress::MsForAcfAttach(AcfBytes(aircraftDir)));
     }
 
     plan.Add(kStepManifest, kMsManifest);
@@ -519,6 +567,11 @@ progress::Plan BuildUninstallPlan(const manifest::Manifest& m,
         }
         plan.Add(kStepLiveries, kMsLiveryScan + CopyMs(2 * liveryBytes, dryRun));
         plan.Add(kStepInteriorAcf, progress::MsForAcfSpots(AcfBytes(aircraftDir)));
+        // ⚠ The detach runs whenever the interior did, so it is priced on the
+        // same condition — the mismatch this file has already been bitten by
+        // once (the screens detach, 2026-08-13) is a `rep.Begin` with no
+        // `plan.Add` under the same `if`.
+        plan.Add(kStepIntegralObj, progress::MsForAcfAttach(AcfBytes(aircraftDir)));
     }
     (void)objects;
     plan.Add(kStepManifest, kMsManifest);
@@ -623,10 +676,315 @@ std::vector<std::string> InstallScreens(const fs::path& objects,
     return steps;
 }
 
-// The interior ("Gus Mod") install — an INDEPENDENT, OPT-IN axis. Five parts: the
+// ─── integral lighting ───────────────────────────────────────────────────────
+// The backlit placards and knob markings, as a look the USER can switch in the
+// sim rather than one the installer bakes. Part of the interior axis, because
+// the two textures it owns are cockpit textures the interior install has always
+// replaced — so it installs and uninstalls with the cockpit mod and needs no
+// second opt-in.
+
+// ⚠ A BACKUP CAN BE POISONED AND `BackupOnce` ALONE CAN NEVER HEAL IT. A
+// manifest lost between two installs makes the next one back OUR OUTPUT up as
+// the stock original (the failure backup.h calls unrecoverable) — and from then
+// on every reinstall finds our output in `objects/`, falls back to that backup,
+// reads it as recolored too, and refuses. Seen on a tester's A319 on
+// 2026-08-25: no stock placard atlas left anywhere on the aircraft. The one
+// moment the poisoning is PROVABLE is when `objects/` itself reads as stock —
+// the backup exists only to answer what `objects/` cannot, so a backup that is
+// recolored (or unreadable) beside a stock `objects/` is strictly worse than a
+// copy of that stock, and `objects/` is also the FRESHER stock (it may carry a
+// ToLiss revision the backup predates). Refreshing needs BOTH judgments —
+// `objects/` provably stock AND the backup provably not — each with
+// `LooksRecolored`'s stated margins; a missing backup is `BackupOnce`'s to
+// create, never this function's.
+static void RefreshPoisonedBackup(const fs::path& inObjects,
+                                  const fs::path& inBackup, lit::Texture texture,
+                                  Log& log, bool dryRun) {
+    std::error_code ec;
+    if (!fs::exists(inBackup, ec) || ec) return;
+    lit::Image backup;
+    std::string err;
+    if (image::LoadPng(inBackup, backup, err) &&
+        !lit::LooksRecolored(backup, texture)) {
+        return;   // the backup is stock — the normal case, leave it alone
+    }
+    log.Write("the backed-up " + fsutil::PathToUtf8(inBackup.filename()) +
+              " is not a stock file — refreshing it from the stock copy in "
+              "objects/", "WARN");
+    if (dryRun) return;
+    fs::copy_file(inObjects, inBackup, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        log.Write("could not refresh the backup: " + ec.message(), "WARN");
+    }
+}
+//
+// Four things happen per drawn OBJ:
+//   1. its stock LIT texture is recolored ONCE PER ERA — incandescent over the
+//      stock filename, LED into a `_photon_led` twin;
+//   2. the OBJ itself is wrapped in a gate that draws it only in the
+//      incandescent branch;
+//   3. a twin OBJ is written, bound to the LED texture and gated the other way;
+//   4. the twin is attached in the XP12 `.acf` pair.
+//
+// ⚠ WHERE "STOCK" COMES FROM IS THE WHOLE REINSTALL PROBLEM, AND IT IS ASKED OF
+// THE PIXELS. On a first install the file in `objects/` is stock. On a reinstall
+// it is OUR OUTPUT, and re-deriving from it would compound the curve — silently,
+// because blue is already clipped to zero, so the second pass looks like a no-op
+// while freezing the result in as though it were stock. So: use `objects/` when
+// `lit::LooksRecolored` says it is stock, and the backup otherwise.
+//
+// ⚠ AND THAT ORDER IS NOT ARBITRARY — `objects/` IS PREFERRED. A backup records
+// what was stock at INSTALL TIME and can be a ToLiss revision behind: the
+// A319/A320 backup here still held the old misaligned trim artwork that a ToLiss
+// update has since fixed. When `objects/` holds a stock file it is the FRESHER
+// stock, so deriving from it picks up ToLiss's corrections for free. The backup
+// is the fallback for the one case `objects/` cannot answer — when we overwrote
+// it ourselves.
+std::vector<std::string> InstallIntegral(const Options& opts,
+                                         const fs::path& objects,
+                                         const fs::path& backupDir,
+                                         manifest::Manifest& m, Log& log,
+                                         Reporter& rep) {
+    std::vector<std::string> steps;
+    const fs::path aircraftDir = objects.parent_path();
+    const bool dryRun = opts.dryRun;
+
+    // ⚠ BOTH TESTS, AND THE SECOND IS THE ONE THAT MATTERS. "Binds one of our
+    // textures" finds `lamps_Std.obj` as well; "is in the attachment table"
+    // rules it out, because X-Plane 12 never draws it and twinning it would ADD
+    // geometry to an aeroplane that was not drawing it.
+    const auto drawn = patch_acf_integral::DrawnFixtures(
+        fsutil::PathToUtf8(aircraftDir), integral::FixturesIn(objects));
+
+    rep.Begin(kStepIntegralTex);
+    if (drawn.empty()) {
+        log.Write("no attached OBJ binds an integral-lighting texture — "
+                  "switchable integral lighting skipped", "WARN");
+        steps.push_back("! No cockpit OBJ binds the placard or knob light "
+                        "textures — integral lighting left stock");
+        rep.Finish(kStepIntegralTex);
+        rep.Skip(kStepIntegralObj);
+        return steps;
+    }
+
+    // 1 + 2. The textures, both eras, per fixture.
+    struct Ready {
+        integral::Fixture fixture;
+        bool ok = false;
+    };
+    std::vector<Ready> ready;
+    for (std::size_t i = 0; i < drawn.size(); ++i) {
+        const integral::Fixture& f = drawn[i];
+        rep.Sub(kStepIntegralTex)(static_cast<double>(i) / drawn.size());
+        Ready r;
+        r.fixture = f;
+
+        // The stock LIT is about to be overwritten, so it is backed up like any
+        // other replaced file — and `nullptr` is wrong here: we WRITE over it,
+        // so a missing original must be recorded as ours to delete.
+        BackupOnce(objects / fsutil::PathFromUtf8(f.stockLit), backupDir, m,
+                   &m.interior.added, log, dryRun);
+
+        lit::Image stock;
+        std::string err;
+        const fs::path inObjects = objects / fsutil::PathFromUtf8(f.stockLit);
+        const fs::path inBackup = backupDir / fsutil::PathFromUtf8(f.stockLit);
+        std::string source;
+        if (image::LoadPng(inObjects, stock, err) &&
+            !lit::LooksRecolored(stock, f.texture)) {
+            source = fsutil::PathToUtf8(inObjects);
+            RefreshPoisonedBackup(inObjects, inBackup, f.texture, log, dryRun);
+        } else if (image::LoadPng(inBackup, stock, err)) {
+            source = fsutil::PathToUtf8(inBackup);
+            if (lit::LooksRecolored(stock, f.texture)) {
+                // ⚠ REFUSE. Both copies are already ours, so there is no stock
+                // anywhere and every era we could derive would be a second pass
+                // over a first one. Leaving the aircraft as it is beats baking a
+                // compounded curve in permanently.
+                log.Write("both " + f.stockLit + " and its backup are already "
+                          "recolored — no stock source left to derive from",
+                          "WARN");
+                steps.push_back("! " + f.stockLit +
+                                " has no stock copy left (neither in objects/ "
+                                "nor in " + BackupLabel(aircraftDir, backupDir) +
+                                ") — left as it is");
+                ready.push_back(r);
+                continue;
+            }
+        } else {
+            log.Write("cannot read a stock " + f.stockLit + ": " + err, "WARN");
+            steps.push_back("! Could not read " + f.stockLit +
+                            " — integral lighting skipped for it");
+            ready.push_back(r);
+            continue;
+        }
+        log.Write("integral: deriving " + f.stockLit + " from " + source);
+
+        // ⚠ The DAY texture is only read by a PROMOTE region, which the placards
+        // have (PEDAL DISC) and the knobs do not. A missing one must cost the
+        // promotion and nothing else, so it is loaded optionally.
+        lit::Image albedo;
+        std::string aerr;
+        const bool haveAlbedo = image::LoadPng(
+            objects / fsutil::PathFromUtf8(lit::TextureDayName(f.texture)),
+            albedo, aerr);
+
+        bool wroteBoth = true;
+        for (const integral::Era era :
+             {integral::Era::kIncandescent, integral::Era::kLed}) {
+            lit::Image work = stock;   // each era derives from STOCK, never from
+                                       // the other era's output
+            const std::size_t changed =
+                lit::Apply(work, haveAlbedo ? &albedo : nullptr,
+                           lit::SpecForProfile(integral::ProfileFor(era),
+                                               f.texture));
+            const std::string name =
+                (era == integral::Era::kLed) ? f.ledLit : f.stockLit;
+            const fs::path dest = objects / fsutil::PathFromUtf8(name);
+            log.Write("integral: " + std::string(integral::EraKey(era)) + " " +
+                      name + " — " + std::to_string(changed) + " px changed");
+            if (!dryRun) {
+                std::string werr;
+                if (!image::SavePng(dest, work, werr)) {
+                    log.Write("cannot write " + fsutil::PathToUtf8(dest) + ": " +
+                              werr, "WARN");
+                    wroteBoth = false;
+                    break;
+                }
+            }
+            // The LED file has no stock counterpart, so uninstall DELETES it.
+            if (era == integral::Era::kLed && !Contains(m.interior.added, name)) {
+                m.interior.added.push_back(name);
+            }
+        }
+        r.ok = wroteBoth;
+        ready.push_back(r);
+    }
+    std::size_t okCount = 0;
+    for (const Ready& r : ready) {
+        if (r.ok) ++okCount;
+    }
+    steps.push_back("Derived Incandescent and LED integral lighting for " +
+                    std::to_string(okCount) + " of " +
+                    std::to_string(drawn.size()) + " cockpit texture(s)");
+    rep.Finish(kStepIntegralTex);
+
+    // ⚠ THE SWITCH IS ALL-OR-NOTHING ACROSS FIXTURES. A cockpit with a
+    // switchable knob atlas and unswitchable placards is not half a feature, it
+    // is a broken-looking one: the plugin offers the Integral row for ANY twin
+    // OBJ on disk (DetectIntegral is a name test, deliberately), so flipping it
+    // would move the knob markings while the placards inches away held still.
+    // Shipped exactly that way to a tester's A319 on 2026-08-25 — a poisoned
+    // backup refused the placard derivation and the knobs went ahead alone.
+    // Withholding step 3 keeps the cockpit consistent: every fixture that COULD
+    // derive still wears its fresh incandescent recolor, there is just no LED
+    // row offered until a stock copy of the failed file is restored (ToLiss
+    // updater or SkunkCrafts re-sync) and Photon is reinstalled.
+    if (okCount != ready.size()) {
+        log.Write("switchable integral lighting not installed — " +
+                  std::to_string(ready.size() - okCount) + " of " +
+                  std::to_string(ready.size()) + " cockpit texture(s) have no "
+                  "stock source, and a partial switch would move some lights "
+                  "and not others", "WARN");
+        steps.push_back("! Switchable integral lighting NOT installed — restore "
+                        "a stock copy of the file(s) named above (ToLiss "
+                        "updater / re-download) and reinstall to enable it");
+        rep.Skip(kStepIntegralObj);
+        return steps;
+    }
+
+    // 3. The OBJs — the stock one gated in place, its twin written beside it.
+    rep.Begin(kStepIntegralObj);
+    std::vector<integral::Fixture> attach;
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+        if (!ready[i].ok) continue;
+        const integral::Fixture& f = ready[i].fixture;
+        rep.Sub(kStepIntegralObj)(static_cast<double>(i) / (ready.size() + 1));
+
+        const fs::path objPath = objects / fsutil::PathFromUtf8(f.obj);
+        BackupOnce(objPath, backupDir, m, nullptr, log, dryRun);
+
+        // ⚠ SOURCE THE STOCK TEXT THE SAME WAY THE TEXTURE IS SOURCED, for the
+        // same reason: on a reinstall the file in `objects/` already carries the
+        // gate, and `PatchText` refuses a wrapped file rather than nesting one.
+        std::string stockText;
+        const fs::path backupObj = backupDir / fsutil::PathFromUtf8(f.obj);
+        if (fsutil::ReadFileBytes(objPath, stockText) &&
+            !integral::IsPatched(stockText)) {
+            // stock, as found. Same healing rule as the texture above: a
+            // backed-up OBJ that already carries the gate beside a provably
+            // un-gated objects/ copy is a poisoned backup, and un-gated is as
+            // provable as `LooksRecolored`'s stock answer.
+            std::error_code bec;
+            std::string backupText;
+            if (fs::exists(backupObj, bec) && !bec &&
+                (!fsutil::ReadFileBytes(backupObj, backupText) ||
+                 integral::IsPatched(backupText))) {
+                log.Write("the backed-up " + f.obj + " is not a stock file — "
+                          "refreshing it from the stock copy in objects/",
+                          "WARN");
+                if (!dryRun) {
+                    fs::copy_file(objPath, backupObj,
+                                  fs::copy_options::overwrite_existing, bec);
+                    if (bec) {
+                        log.Write("could not refresh the backup: " +
+                                  bec.message(), "WARN");
+                    }
+                }
+            }
+        } else if (!fsutil::ReadFileBytes(backupObj, stockText) ||
+                   integral::IsPatched(stockText)) {
+            log.Write("no un-gated copy of " + f.obj + " to derive from", "WARN");
+            steps.push_back("! No stock " + f.obj +
+                            " to gate — integral lighting skipped for it");
+            continue;
+        }
+
+        std::string incText, ledText, err;
+        if (!integral::PatchText(stockText, integral::Era::kIncandescent, "",
+                                 kPhotonVersion, incText, err) ||
+            !integral::PatchText(stockText, integral::Era::kLed, f.ledLit,
+                                 kPhotonVersion, ledText, err)) {
+            log.Write("cannot gate " + f.obj + ": " + err, "WARN");
+            steps.push_back("! Could not gate " + f.obj + " (" + err + ")");
+            continue;
+        }
+        if (!dryRun) {
+            WriteOrThrow(objPath, incText);
+            WriteOrThrow(objects / fsutil::PathFromUtf8(f.ledObj), ledText);
+        }
+        if (!Contains(m.interior.added, f.ledObj)) {
+            m.interior.added.push_back(f.ledObj);
+        }
+        attach.push_back(f);
+    }
+
+    // 4. Attach the twins. Nothing draws them until this runs, which is exactly
+    //    what makes the whole feature reversible.
+    if (!attach.empty()) {
+        const auto res = patch_acf_integral::Run(
+            fsutil::PathToUtf8(aircraftDir), attach, false, dryRun,
+            rep.Sub(kStepIntegralObj));
+        LogLines(log, "acf integral", res.log);
+        if (!res.changed.empty() || !res.touched.empty()) {
+            steps.push_back(
+                "Installed switchable integral lighting (Incandescent / LED) — " +
+                std::to_string(attach.size()) + " cockpit object(s), attached in " +
+                std::to_string(res.touched.size()) + " .acf file(s)");
+        } else {
+            steps.push_back("! Could not attach the LED cockpit object(s) — "
+                            "integral lighting will stay on Incandescent");
+        }
+    }
+    rep.Finish(kStepIntegralObj);
+    return steps;
+}
+
+// The interior ("Gus Mod") install — an INDEPENDENT, OPT-IN axis. Six parts: the
 // OBJ, the texture set, the livery-shadow scan, the four-`.acf` cockpit-spot patch,
-// and its own manifest block. A user who wants only the exterior mod never runs any
-// of it, and uninstalling one axis does not disturb the other.
+// the switchable integral lighting, and its own manifest block. A user who wants
+// only the exterior mod never runs any of it, and uninstalling one axis does not
+// disturb the other.
 std::vector<std::string> InstallInterior(const Options& opts,
                                          const fs::path& objects,
                                          const fs::path& backupDir,
@@ -653,15 +1011,53 @@ std::vector<std::string> InstallInterior(const Options& opts,
     // in-memory text so the aircraft still sees exactly one atomic write. A
     // user who never touched the slider has no prefs entry, SavedFactor
     // answers 1x, and the staged bytes are untouched.
-    const double intensityFactor = intensity::SavedFactor(opts.xplaneRoot);
+    //
+    // ⚠ AND THE BSS NEO COMPENSATION MULTIPLIES IT. A lighting mod that raises
+    // X-Plane's spill-light cutoff culls exactly these lamps (core/neomod.h), so
+    // the cockpit has to be built brighter to show through it. `opts.neo` is the
+    // installer screen's checkbox, auto-ticked from neomod::Detect.
+    //
+    // ⚠ THE FLAG IS PERSISTED FIRST, and it matters that it is persisted at all:
+    // the plugin recomputes this same product on every aircraft load and rewrites
+    // the OBJ when it disagrees. If the installer baked a boost the plugin could
+    // not know about, the very next load would quietly patch it back out.
+    //
+    // ⚠ GUARDED BY dryRun LIKE EVERY OTHER WRITE IN THIS FILE. It is the one
+    // write here that lands OUTSIDE the aircraft folder — in the user's own
+    // preferences — which is exactly why it is easy to forget: nothing about a
+    // dry run on an aeroplane suggests a file two directories away.
+    if (!dryRun && !intensity::SaveNeo(opts.xplaneRoot, opts.neo)) {
+        // Never fatal — a preference is not worth failing an install over. It
+        // does mean the plugin will level the OBJ back on the next load, so the
+        // line has to be loud enough to explain that if it happens.
+        log.Write("could not record the BSS NEO setting in the plugin's "
+                  "preferences; the cockpit brightness compensation may be reset "
+                  "on the next aircraft load",
+                  "WARN");
+    }
+    const double userFactor = intensity::SavedFactor(opts.xplaneRoot);
+    const double intensityFactor = intensity::EffectiveFactor(userFactor, opts.neo);
     if (!intensity::AtDefault(intensityFactor)) {
         int scaledLines = 0;
         text = intensity::PatchText(text, intensityFactor, scaledLines);
         log.Write("cockpit light intensity " + intensity::Label(intensityFactor) +
-                  " from plugin settings applied to " +
-                  std::to_string(scaledLines) + " light line(s)");
-        steps.push_back("Applied your cockpit light intensity setting (" +
-                        intensity::Label(intensityFactor) + ")");
+                  " (setting " + intensity::Label(userFactor) +
+                  (opts.neo ? ", BSS NEO compensation " +
+                                  intensity::Label(intensity::kNeoBoost)
+                            : std::string()) +
+                  ") applied to " + std::to_string(scaledLines) + " light line(s)");
+        // ⚠ TWO DIFFERENT SENTENCES, because they are two different claims. One
+        // says "your setting was preserved"; the other says "we changed your
+        // cockpit because of something else on this machine", and a user who is
+        // not told the second reads a brighter cockpit as the installer having
+        // ignored their slider.
+        steps.push_back(
+            opts.neo
+                ? "Brightened the cockpit for BSS NEO (" +
+                      intensity::Label(intensityFactor) + ", from your " +
+                      intensity::Label(userFactor) + " setting)"
+                : "Applied your cockpit light intensity setting (" +
+                      intensity::Label(intensityFactor) + ")");
     }
     log.Write("writing " + fsutil::PathToUtf8(target) + " (" +
               std::to_string(text.size()) + " bytes)");
@@ -721,11 +1117,14 @@ std::vector<std::string> InstallInterior(const Options& opts,
         std::error_code re;
         const fs::path rel = fs::relative(f, aircraftDir, re);
         if (re) continue;
-        const std::string relPosix = rel.generic_string();
+        // ⚠ UTF-8, NEVER generic_string(): this string becomes the manifest entry
+        // AND the backup's file name, and the livery folder was named by a user in
+        // whatever language they write. See fsutil::PathToUtf8Generic.
+        const std::string relPosix = fsutil::PathToUtf8Generic(rel);
         if (Contains(m.interior.liveriesPatched, relPosix)) continue;
         const fs::path dest =
             backupDir / "liveries" / fsutil::PathFromUtf8(LiveryBackupName(relPosix));
-        log.Write("livery override shadows our texture, removing: " +
+        log.Write("livery override shadows the installed texture, removing: " +
                   fsutil::PathToUtf8(f));
         if (!dryRun) {
             WriteOrThrow(dest, CopyBytes(f));
@@ -762,6 +1161,15 @@ std::vector<std::string> InstallInterior(const Options& opts,
     }
 
     rep.Finish(kStepInteriorAcf);
+
+    // 5. ⚠ AFTER the texture copy, not inside it. That loop writes the payload's
+    //    nine files; these two are DERIVED from the aircraft's own stock, and
+    //    running them first would mean deriving from a file the copy is about to
+    //    replace.
+    const auto integralSteps =
+        InstallIntegral(opts, objects, backupDir, m, log, rep);
+    steps.insert(steps.end(), integralSteps.begin(), integralSteps.end());
+
     m.interior.installed = true;
     m.interior.version = kPhotonVersion;
     m.interior.airframe = opts.airframeKey;
@@ -877,6 +1285,19 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
     }
     const Airframe* af = AirframeByKey(opts.airframeKey);
     if (af == nullptr) throw ActionError("unknown airframe: " + opts.airframeKey);
+
+    // ⚠ THE ONE LINE THAT SAYS WHICH AEROPLANE THIS RUN IS ABOUT, and it is
+    // written for a READER THAT IS NOT A HUMAN: the plugin's Help tab collects the
+    // newest installer log PER AIRFRAME into a support report, and everything else
+    // in this file names an aircraft only incidentally, inside a "writing <path>"
+    // line. Attributing a log by guessing at those paths is exactly the kind of
+    // thing that is right until a user renames their aircraft folder.
+    //
+    // ⚠ THE KEY COMES FIRST AND UNADORNED (`install target: a321 ...`).
+    // support::AirframesNamedIn reads to the first space; anything before the key
+    // would have to be parsed instead of skipped. See core/support.h.
+    log.Write(std::string(support::kInstallTargetTag) + af->key + " (" +
+              af->prettyName + ") - install - " + opts.aircraftPath);
 
     const fs::path aircraftDir = fsutil::PathFromUtf8(opts.aircraftPath);
     const fs::path objects = aircraftDir / "objects";
@@ -1030,7 +1451,8 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
             break;
         case Backup::kNoOriginal:
             steps.push_back(std::string("! No original ") + af->objName +
-                            " to back up — ours will be removed on uninstall");
+                            " to back up — the installed copy will be removed "
+                            "on uninstall");
             break;
     }
 
@@ -1196,6 +1618,13 @@ std::vector<std::string> Install(const Options& opts, Log& log) {
 }
 
 std::vector<std::string> Uninstall(const Options& opts, Log& log) {
+    // The same machine-readable stamp Install writes — an uninstall is a run a
+    // bug report may well be about, and a log with no target line at all reads to
+    // the collector as a run that never chose an aircraft.
+    if (const Airframe* af = AirframeByKey(opts.airframeKey)) {
+        log.Write(std::string(support::kInstallTargetTag) + af->key + " (" +
+                  af->prettyName + ") - uninstall - " + opts.aircraftPath);
+    }
     const fs::path aircraftDir = fsutil::PathFromUtf8(opts.aircraftPath);
     const fs::path objects = aircraftDir / "objects";
     // ⚠ RESOLVED, AND DELIBERATELY NOT MIGRATED FIRST. An uninstall is about to
@@ -1321,6 +1750,9 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
     // ── interior ─────────────────────────────────────────────────────────────
     // The OBJ and the nine stock-replacing textures are already restored by the
     // backed_up loop above. What remains is what a backup cannot express.
+    // Livery backups whose livery is gone stay behind (see below); the count
+    // decides whether the folder's README stays with them.
+    int keptLiveryBackups = 0;
     if (m.interior.installed) {
         rep.Begin(kStepLiveries);
         // 1. Files we ADDED, which never had a stock original to restore. These must
@@ -1345,6 +1777,26 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
                 log.Write("livery backup missing, cannot restore: " +
                           fsutil::PathToUtf8(src), "WARN");
                 steps.push_back("! Livery backup missing for " + rel + " — left as-is");
+                continue;
+            }
+            // ⚠ ONLY INTO A LIVERY THAT STILL EXISTS. `rel` is
+            // `liveries/<name>/objects/<file>`, and AtomicWriteBytes creates every
+            // missing parent — so a livery the user deleted or renamed since the
+            // install would come BACK as a folder holding one texture: a ghost
+            // livery X-Plane lists, ToLiss logs about, and one more entry in the
+            // livery index X-Plane keeps in the aircraft prefs. The backup stays
+            // where it is (a renamed livery's owner may still want it) and the step
+            // line says where.
+            const fs::path liveryDir = dest.parent_path().parent_path();
+            std::error_code le;
+            if (!fs::is_directory(liveryDir, le) || le) {
+                log.Write("livery folder no longer exists, not recreating it: " +
+                          fsutil::PathToUtf8(liveryDir), "WARN");
+                steps.push_back("! Livery folder for " + rel +
+                                " no longer exists — not recreated; its backed-up "
+                                "texture was left in " +
+                                BackupLabel(aircraftDir, backupDir));
+                ++keptLiveryBackups;
                 continue;
             }
             log.Write("restoring livery override " + fsutil::PathToUtf8(dest));
@@ -1372,6 +1824,31 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
 
         if (!dryRun) fsutil::RemoveDirIfEmpty(backupDir / "liveries");
         rep.Finish(kStepInteriorAcf);
+
+        // 4. ⚠ The LED twins' attachment rows, found BY SUFFIX rather than from
+        //    the manifest. The twin OBJs themselves were just deleted by the
+        //    `added[]` loop above, so a row left behind would name a file that is
+        //    gone — and X-Plane logs a missing attachment on every load. Working
+        //    by suffix also means an uninstall still cleans up when the manifest
+        //    has lost the list, which is the state a half-finished install or a
+        //    hand-edited folder leaves behind.
+        //
+        //    The gated `lamps.obj`/`knobs.obj` need nothing here: they are in
+        //    `backed_up[]` and the restore loop has already put the stock files
+        //    back, gate and all.
+        rep.Begin(kStepIntegralObj);
+        {
+            const auto res = patch_acf_integral::Run(
+                fsutil::PathToUtf8(aircraftDir), {}, true, dryRun,
+                rep.Sub(kStepIntegralObj));
+            LogLines(log, "acf integral", res.log);
+            if (!res.changed.empty()) {
+                steps.push_back("Detached the LED cockpit object(s) from " +
+                                std::to_string(res.changed.size()) +
+                                " .acf file(s)");
+            }
+        }
+        rep.Finish(kStepIntegralObj);
     }
 
     rep.Begin(kStepManifest);
@@ -1383,7 +1860,9 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         }
         std::error_code ec;
         fs::remove(backupDir / kManifestName, ec);
-        fs::remove(backupDir / backup::kReadmeName, ec);
+        // ⚠ The README stays with anything that stays: a livery backup kept
+        // because its livery is gone must not sit in a folder nothing explains.
+        if (keptLiveryBackups == 0) fs::remove(backupDir / backup::kReadmeName, ec);
         fsutil::RemoveDirIfEmpty(backupDir);   // only succeeds if now empty
         // ⚠ BOTH LOCATIONS, and the second is not redundant. An install that could
         // not finish its migration leaves an empty folder behind in `objects/`, and
@@ -1392,7 +1871,11 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         // Only-if-empty, so a legacy folder still holding files is never touched.
         fsutil::RemoveDirIfEmpty(backup::LegacyDir(aircraftDir));
     }
-    steps.push_back(std::string("Removed ") + kBackupDirName + " and manifest");
+    steps.push_back(keptLiveryBackups == 0
+                        ? std::string("Removed ") + kBackupDirName + " and manifest"
+                        : "Removed manifest; " + std::to_string(keptLiveryBackups) +
+                              " livery texture backup(s) kept in " +
+                              BackupLabel(aircraftDir, backupDir));
     rep.Finish(kStepManifest);
 
     if (opts.removePlugin) {

@@ -14,25 +14,49 @@ import {
 
 // One line of the installer log.
 //
-// ⚠ `text` CARRIES NO MARKER. C++ used to prefix " ✓  " / " !  " into the string;
-// the marker is now drawn from `bad`, because it is a picture and a color rather
-// than two characters — see `LogRow`. Anything that puts a glyph back into the
-// string gets it in the WRONG COLOR and doubled.
+// ⚠ `text` CARRIES NO MARKER. C++ used to prefix a tick / a bang into the string;
+// the marker is now drawn from `severity`, because it is a picture and a color
+// rather than two characters — see `LogRow`. Anything that puts a glyph back into
+// the string gets it in the WRONG COLOR and doubled.
 export struct LogLine {
     text: string,
-    // ⚠ ERROR *OR* WARN. It is the same flag the auto-advance reads
-    // (`RunLog::Clean`), so a line that stops the wizard on this screen and a line
-    // painted red are by construction the same set.
-    bad: bool,
+    // ⚠ AN INT, AND THE VALUES ARE WIRE — the same rule as `AircraftEntry.kind`,
+    // and deliberately THE SAME THREE NUMBERS as `App.run-outcome`, so 1 means
+    // "warning" everywhere in this UI. gui.cpp writes them; they are spelled out in
+    // both files rather than shared, because a Slint enum crossing into C++ renames
+    // its variants and the mapping stops being greppable.
+    //   0 = ok      the step did what it says   -> checkmark, white
+    //   1 = warn    the run went on; read this  -> triangle,  amber
+    //   2 = error   the run could not do this   -> cross,     red
+    //
+    // ⚠ IT REPLACED A BOOL `bad` (2026-08-24), AND THAT BOOL WAS THE BUG. ERROR and
+    // WARN shared one flag, so both drew the red cross — and the loudest warning the
+    // installer has is the wing-mod mismatch, which is a note about an install that
+    // COMPLETED. Users read a red cross beside it and concluded the run had been
+    // aborted. Two levels reaching the file log had nowhere to be two things here.
+    //
+    // ⚠ ANYTHING ABOVE 0 IS STILL ONE SET WHERE IT HAS TO BE. That is what the
+    // problem summary is filtered on and what `RunLog::Clean` counts, so a line that
+    // carries a mark and a line that stops the wizard advancing are the same set they
+    // always were. The severity splits how a line LOOKS, never what it MEANS for the
+    // run — a warning still holds the wizard on this screen, which is the whole
+    // reason it is worth drawing differently rather than hiding.
+    severity: int,
 }
 
 // A log line: a fixed marker gutter, then the message.
 //
-// ⚠ THE MARKER IS AN IMAGE AND THAT IS NOT DECORATION. The design writes `✓` as a
-// character, and NEITHER embedded font has U+2713 — what shipped before was a
+// ⚠ THE MARKER IS AN IMAGE AND THAT IS NOT DECORATION. The design writes the tick as
+// a CHARACTER, and NEITHER embedded font has U+2713 — what shipped before was a
 // system fallback for that one glyph, i.e. exactly what embedding the fonts exists
-// to prevent. The two SVGs are the Complete screen's own success/failure glyphs, so
-// the same two shapes mean the same two things throughout the installer.
+// to prevent. The three SVGs are the Complete screen's own outcome glyphs, so the
+// same three shapes mean the same three things throughout the installer.
+//
+// ⚠ THREE MARKS, NOT TWO, SINCE 2026-08-24 — see `LogLine.severity`. The amber
+// triangle is the whole point of the split: it is the mark for a line the run
+// SURVIVED, and it has to be distinguishable at a glance from the one for a line
+// that killed it, because the two arrive at the same place and stop the wizard the
+// same way.
 //
 // ⚠ THE GUTTER IS A COLUMN, WHICH IS WHAT MAKES A WRAPPED LINE READ. A long path
 // wraps, and in a HorizontalLayout its second line starts under the MESSAGE rather
@@ -51,24 +75,31 @@ component LogRow inherits HorizontalLayout {
         height: Tokens.log-glyph * 2;
 
         Image {
-            source: root.line.bad
+            source: root.line.severity == 2
                 ? @image-url("../assets/glyph-failure.svg")
-                : @image-url("../assets/glyph-success.svg");
+                : (root.line.severity == 1
+                    ? @image-url("../assets/glyph-warning.svg")
+                    : @image-url("../assets/glyph-success.svg"));
             width: Tokens.log-glyph;
             height: Tokens.log-glyph;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            // ⚠ `contain`, NOT `fill`. The two glyphs are 41x32 and 32x32 — a
-            // shared square box would squash the checkmark by a fifth.
+            // ⚠ `contain`, NOT `fill`. The three glyphs are 41x32, 32x32 and 32x30 —
+            // one square box for all of them would squash the checkmark by a fifth
+            // and stretch the triangle by a fifteenth.
             image-fit: contain;
         }
     }
 
     Text {
         text: root.line.text;
-        // ⚠ THE WHOLE LINE, not just the marker. A red glyph is not findable
-        // while scrolling a 288 px well; a red line is.
-        color: root.line.bad ? Tokens.log-ink-bad : Tokens.log-ink;
+        // ⚠ THE WHOLE LINE, not just the marker. A 12 px glyph is not findable while
+        // scrolling a 288 px well; a colored line is — and that argument is what
+        // makes the amber worth having at all, since a warning the reader has to
+        // hunt for is a warning that reads as an error on the way past.
+        color: root.line.severity == 2
+            ? Tokens.log-ink-bad
+            : (root.line.severity == 1 ? Tokens.log-ink-warn : Tokens.log-ink);
         font-family: Tokens.font-mono;
         font-size: Tokens.label-size;
         font-weight: Tokens.weight-medium;
@@ -146,7 +177,7 @@ export component RunScreen inherits Rectangle {
     in property <float> progress: 0.0;
     in property <[LogLine]> log-lines;
     // ⚠ THE SAME LINES AGAIN, NOT A SECOND ACCOUNT OF THEM. C++ filters the one
-    // vector it already keeps on `bad`, so a line cannot appear in the summary
+    // vector it already keeps on `severity > 0`, so a line cannot appear in the summary
     // worded differently from the way it appeared in the log — or appear in one and
     // not the other.
     in property <[LogLine]> problems;

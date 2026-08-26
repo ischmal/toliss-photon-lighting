@@ -318,6 +318,15 @@ export global Tokens {
     out property <color> log-ink: #ffffff;
     out property <color> log-ink-bad: #f26951;        // = status-broken
 
+    // ⚠ A THIRD INK, BECAUSE A WARNING IS NOT A FAILURE (2026-08-24). ERROR and
+    // WARN both painted `log-ink-bad` and both drew the red cross — so the wing-mod
+    // mismatch, which is a note about an install that COMPLETED, wore the same mark
+    // as an install that died, and users read the log and concluded the run had been
+    // aborted. The amber is the Figma `Warn Glyph`'s own fill (`371:522`), so — like
+    // `status-ok` and `status-broken`, which are the logo's dots — it is a color the
+    // design already carries rather than one invented here.
+    out property <color> log-ink-warn: #f2cc51;       // = the Warn Glyph's fill
+
     // The rule above the log's problem summary (2026-08-14). ⚠ THE PADDING IS THE
     // POINT, not the line: the summary repeats lines that are already in the log
     // above it, so what has to read at a glance is that a SECTION has started. A

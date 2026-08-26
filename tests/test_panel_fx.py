@@ -127,7 +127,7 @@ class BlendModeTableTests(unittest.TestCase):
         self.helps = _string_array("kFxBlendHelp")
 
     def test_the_tables_parsed(self):
-        self.assertGreaterEqual(len(self.enum), 8)
+        self.assertGreaterEqual(len(self.enum), 9)
 
     def test_every_mode_has_a_name_and_a_help_string(self):
         # A short kFxBlendName is read past its end by the Combo, and a short
@@ -146,6 +146,24 @@ class BlendModeTableTests(unittest.TestCase):
         # FxBlendFromName returns the FIRST match, so a duplicate makes one mode
         # unreachable after a reload.
         self.assertEqual(sorted(self.names), sorted(set(self.names)))
+
+    def test_boost_is_a_gain_and_leaves_black_alone(self):
+        # Boost exists to scale a Subtract layer's residue without lifting the
+        # background that layer zeroed, and only src=DST_COLOR expresses that:
+        # dst x C + dst, proportional to what is already there. Any other source
+        # factor emits a CONSTANT term — a mode that lights the background
+        # exactly like Add, which looks fine over a lit readout and only shows
+        # over the blacked-out one it was authored for.
+        m = re.search(r"case kFxBoost:(.*?)break;", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "FxQuadColorFor lost its kFxBoost case")
+        body = m.group(1)
+        self.assertIn("src = GL_DST_COLOR; dst = GL_ONE;", body)
+        # Identity is black, carried as color x opacity like the other additive
+        # modes, and the equation stays the default GL_FUNC_ADD — an `eq =`
+        # here would move the mode onto the driver-dependent equation path for
+        # nothing.
+        self.assertIn("r *= o; g *= o; b *= o;", body)
+        self.assertNotIn("eq =", body)
 
 
 class WireFormatTests(unittest.TestCase):

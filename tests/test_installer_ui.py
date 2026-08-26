@@ -294,6 +294,41 @@ class ReviewRowTests(unittest.TestCase):
             self.assertLess(
                 guard, row, f"{predicate} no longer guards the {label} row")
 
+    def test_the_neo_choice_rides_in_the_cockpit_value_never_as_its_own_row(self):
+        """⚠ The Review page has no vertical slack (ReviewLayoutTests below) —
+        one extra Attribute row pushes the bottom bar off the window. So the
+        BSS NEO qualifier is part of the Cockpit lighting row's VALUE. It must
+        appear SOMEWHERE on this screen: the install will bake the cockpit
+        brighter than the user's slider says, and a review that restates every
+        choice except the one changing the light levels leaves the run log as
+        the first place they hear about it."""
+        text = (REPO / "src" / "native" / "src" / "installer"
+                / "gui.cpp").read_text(encoding="utf-8")
+        start = text.find("void BuildReview")
+        body = text[start:text.find("\n}", start)]
+        self.assertIn('"Yes (for BSS NEO)"', body,
+                      "the review no longer states the NEO compensation")
+        self.assertNotIn('add("BSS NEO', body,
+                         "NEO grew its own Attribute row — the review layout "
+                         "has no room for one (see ReviewLayoutTests)")
+
+    def test_the_neo_seed_is_a_default_not_an_override(self):
+        """Same contract `wingSeededFor` states for the wing radio: detection
+        preselects the checkbox ONCE per root, and a user's correction must
+        survive walking back through the directory screen. The seed key is the
+        ROOT, because the detection is a property of the install."""
+        text = (REPO / "src" / "native" / "src" / "installer"
+                / "gui.cpp").read_text(encoding="utf-8")
+        self.assertIn("neoSeededFor", text, "the seed guard is gone")
+        seed = text.find("g.neoSeededFor != g.xplaneRoot")
+        detect = text.find("neomod::Detect(g.xplaneRoot)")
+        self.assertNotEqual(-1, seed, "the once-per-root guard is gone")
+        self.assertNotEqual(-1, detect, "ApplyRoot no longer seeds from Detect")
+        self.assertLess(seed, detect,
+                        "Detect runs outside the once-per-root guard — every "
+                        "revisit of the directory screen re-ticks the box over "
+                        "a correction the user already made")
+
 
 class ReviewLayoutTests(unittest.TestCase):
     """⚠ THE REVIEW PAGE HAS NO VERTICAL SLACK, AND OVERFLOWING IT DOES NOT CLIP —
@@ -1014,22 +1049,34 @@ class LogRenderingTests(unittest.TestCase):
                 f"{name} now contains U+2713 — the SVG marker rule above can be "
                 f"revisited")
 
-    def test_the_red_line_and_the_stalled_advance_are_one_rule(self):
-        """⚠ `bad` IS ERROR *OR* WARN, the same predicate `RunLog::Clean` uses, so
-        a line painted red and a line that stops the Run screen advancing itself
-        are by construction the same set. Two spellings drift the first time a
-        level is added."""
+    def test_the_marked_line_and_the_stalled_advance_are_one_rule(self):
+        """⚠ A MARKED LINE IS ERROR *OR* WARN, and `RunLog::Clean` reads the SAME
+        STORAGE the marker does — so a line that carries a glyph and a line that
+        stops the Run screen advancing itself are by construction the same set.
+
+        ⚠ THIS IS THE TEST THE 2026-08-24 SPLIT HAD TO SURVIVE. Warnings and errors
+        now LOOK different; what they mean for the run is deliberately unchanged, and
+        the way that is guaranteed is one `worst_` that both readers consult. A
+        second tally beside it is how the two would drift apart again.
+        """
         text = (REPO / "src" / "native" / "src" / "installer"
                 / "gui.cpp").read_text(encoding="utf-8")
         start = text.find("class RunLog")
         body = text[start:text.find("};", start)]
-        match = re.search(r"const bool bad\s*=\s*([^;]+);", body)
-        self.assertIsNotNone(match, "RunLog no longer classifies its lines")
-        self.assertIn("ERROR", match.group(1))
-        self.assertIn("WARN", match.group(1))
         self.assertIn(
-            "if (bad) clean_ = false;", body,
-            "the red-line flag and the clean-run flag are computed separately")
+            "const int severity = SeverityForLevel(level);", body,
+            "RunLog no longer classifies its lines through the one classifier")
+        self.assertIn(
+            "if (severity > worst_) worst_ = severity;", body,
+            "RunLog no longer keeps the worst level it saw")
+        self.assertIn(
+            "return worst_ == kSeverityOk;", body,
+            "the clean-run flag is computed separately from the value that marks "
+            "a log row, so the two can drift")
+        self.assertIn(
+            "int Worst() const { return worst_; }", body,
+            "the Complete screen's outcome is read from something other than the "
+            "storage Clean() reads")
 
     def test_copy_log_joins_what_the_screen_draws(self):
         """The colored rows cost drag-selection; this replaced it. It must read
@@ -1078,20 +1125,254 @@ def _cmap(path):
     return chars
 
 
+class WarningGlyphTests(unittest.TestCase):
+    """A WARNING IS NOT A FAILURE, and until 2026-08-24 the installer drew them the
+    same (Figma `371:522`, the Warn Glyph).
+
+    `LogLine` carried a bool `bad` that was ERROR *or* WARN, so the loudest warning
+    the installer has — "this aircraft is running stock wings, but you chose the
+    RealWings build" — wore the red cross an aborted run wears, in red text, on the
+    screen the run had just deliberately stopped on. It reads as the install having
+    failed. It had not; the wing check is expressly read-only and the install goes on
+    with what the user asked for.
+
+    The fix is a third state, and these are the joins it has to hold:
+      * one severity scale, spelled the same on both sides of the Slint wire;
+      * one classifier turning a log level into a number;
+      * the picture and the words agreeing on the Complete screen;
+      * and — the part that must NOT change — a warning still counting as a problem,
+        so it still appears in the summary and still stops the auto-advance.
+    """
+
+    AMBER = "#f2cc51"
+
+    def setUp(self):
+        self.assets = UI / "assets"
+        self.tokens = (UI / "tokens.slint").read_text(encoding="utf-8")
+        self.run = strip_comments(
+            (UI / "screens" / "run.slint").read_text(encoding="utf-8"))
+        self.complete = strip_comments(
+            (UI / "screens" / "complete.slint").read_text(encoding="utf-8"))
+        self.app = strip_comments((UI / "app.slint").read_text(encoding="utf-8"))
+        self.cpp = (REPO / "src" / "native" / "src" / "installer"
+                    / "gui.cpp").read_text(encoding="utf-8")
+
+    def test_the_glyph_exists_and_is_the_designs_own_amber(self):
+        """⚠ THE COLOR IS IN THE SVG, NOT APPLIED BY SLINT — same as the other two
+        glyphs, which carry the palette's green and red themselves. The token has to
+        match it, or a line's ink and its marker disagree by a shade."""
+        svg = self.assets / "glyph-warning.svg"
+        self.assertTrue(svg.exists(), "assets/glyph-warning.svg is gone")
+        body = svg.read_text(encoding="utf-8")
+        self.assertIn(self.AMBER, body.lower(),
+                      "the warn glyph no longer carries the design's amber fill")
+        self.assertIn(f"log-ink-warn: {self.AMBER}", self.tokens.lower(),
+                      "tokens.slint's warning ink no longer matches the glyph's own "
+                      "fill, so a warning line and its marker are two ambers")
+
+    def test_all_three_glyphs_are_used_in_both_places(self):
+        """⚠ THE SAME SHAPES MEAN THE SAME THINGS THROUGHOUT — the rule the original
+        two were introduced under, extended. A screen that knows only two of them is
+        one that renders a warning as something else."""
+        for name in ("glyph-success", "glyph-failure", "glyph-warning"):
+            url = f'@image-url("../assets/{name}.svg")'
+            self.assertIn(url, self.run, f"the log no longer draws {name}")
+            self.assertIn(url, self.complete,
+                          f"the Complete screen no longer draws {name}")
+
+    def test_the_log_draws_a_warning_as_a_warning(self):
+        """Both halves of a row — the marker and the ink — key off `severity`, and
+        the failure branch is `== 2` rather than `> 0`. `> 0` is what the bool was."""
+        rows = [b for b in blocks(self.run, "component LogRow") if "Image" in b]
+        self.assertTrue(rows, "run.slint lost LogRow")
+        row = rows[0]
+        self.assertNotIn("line.bad", row,
+                         "the log row still keys off the two-state flag")
+        for expected in ("root.line.severity == 2", "root.line.severity == 1"):
+            self.assertIn(expected, row,
+                          f"the log row no longer distinguishes on `{expected}`")
+        self.assertIn("Tokens.log-ink-warn", row,
+                      "a warning line is drawn in an ink that is not the warning's")
+
+    def test_the_severity_numbers_are_the_same_on_both_sides_of_the_wire(self):
+        """⚠ WIRE, AND SPELLED OUT ON BOTH SIDES. A Slint enum crossing into C++
+        renames its variants, which is why `AircraftEntry.kind` is an int too — the
+        cost is that nothing but a test keeps the two spellings in step."""
+        for name, value in (("kSeverityOk", 0), ("kSeverityWarn", 1),
+                            ("kSeverityError", 2)):
+            self.assertIn(f"constexpr int {name} = {value};", self.cpp,
+                          f"gui.cpp's {name} moved off {value}, and Slint still "
+                          f"compares against the old number")
+        self.assertIn("severity: int,", self.run,
+                      "LogLine.severity is no longer the int the C++ side writes")
+        self.assertIn("in property <int> run-outcome", self.app,
+                      "app.slint's run-outcome is no longer on the severity scale")
+        self.assertIn("in property <int> outcome", self.complete,
+                      "the Complete screen's outcome is no longer on the severity "
+                      "scale")
+
+    def test_a_level_becomes_a_number_in_exactly_one_place(self):
+        """⚠ TWO SPELLINGS OF THIS RULE IS HOW ERROR AND WARN CAME TO SHARE A GLYPH.
+        `SeverityForLevel` is the only function that may read a level string, so the
+        marker, the ink, the summary and the auto-advance cannot disagree about what
+        a level means."""
+        self.assertIn('if (level == "ERROR") return kSeverityError;', self.cpp)
+        self.assertIn('if (level == "WARN") return kSeverityWarn;', self.cpp)
+        body = self.cpp[self.cpp.find("int SeverityForLevel"):]
+        body = body[:body.find("\n}")]
+        self.assertIn("return kSeverityOk;", body,
+                      "an unrecognized level no longer falls through to clean, so it "
+                      "can now strand the wizard on a screen with nothing to read")
+        # Every level comparison in the file has to be inside that one function.
+        outside = [i for i, line in enumerate(self.cpp.splitlines(), 1)
+                   if "level ==" in line and not line.lstrip().startswith("//")]
+        self.assertEqual(
+            2, len(outside),
+            "a log level is being classified somewhere other than "
+            "SeverityForLevel — that is how the two states drifted apart before")
+
+    def test_the_words_move_with_the_glyph(self):
+        """⚠ complete.slint's OWN RULE: the picture may not say anything the
+        sentences beside it do not. An amber glyph over an unqualified "Install
+        complete" is exactly that."""
+        self.assertIn('return warned ? base + ", with warnings" : base;', self.cpp,
+                      "the Complete headline no longer says a run warned, while its "
+                      "glyph still shows it")
+        self.assertIn('warned ? "Finished with warnings." : "Finished.";', self.cpp,
+                      "the Run screen's done headline no longer says a run warned, "
+                      "on the very screen the warnings hold the user")
+
+    def test_only_a_failure_paints_the_bar_red(self):
+        """⚠ THE BAR IS A VERDICT ABOUT WHETHER THE RUN FINISHED, and a warned run
+        did. A red bar over a log of amber lines would be the loudest thing on the
+        screen contradicting every one of them."""
+        match = re.search(r"failed\s*:\s*root\.run-outcome\s*==\s*(\d+)\s*;",
+                          self.app)
+        self.assertIsNotNone(
+            match, "the Run screen's progress bar is no longer driven by the one "
+                   "outcome, or has gone back to a bool")
+        self.assertEqual("2", match.group(1),
+                         "the progress bar goes red on something other than an "
+                         "outright failure")
+
+    def test_a_warning_still_counts_as_a_problem(self):
+        """⚠ THE HALF THAT MUST NOT HAVE CHANGED. Splitting how a warning LOOKS was
+        never meant to split what it MEANS: it still fills the problem summary and it
+        still stops the wizard advancing past the screen that shows it. Anything that
+        narrows either to errors makes the warning mechanism pointless — which is the
+        opposite mistake to the one this all fixed, and just as quiet."""
+        self.assertIn("const bool advance = ok && log.Clean();", self.cpp,
+                      "the auto-advance no longer waits on a clean run")
+        start = self.cpp.find("void PublishLog")
+        body = self.cpp[start:self.cpp.find("\n}", start)]
+        self.assertIn("line.severity > kSeverityOk", body,
+                      "the problem summary has narrowed to errors")
+
+
+class GlyphGeometryTests(unittest.TestCase):
+    """The Complete screen draws each outcome glyph in a box the size the design
+    drew it — and the boxes are LITERALS in `complete.slint` while the sizes live in
+    the SVGs, so only this keeps them in step.
+
+    ⚠ THE FAILURE IT CATCHES IS SILENT. `image-fit: contain` never errors: hand it a
+    box of the wrong aspect and it fits the artwork inside and letterboxes the rest,
+    so a re-export at a new size renders a glyph that is merely a bit small or a bit
+    off-centre in its column. That is indistinguishable from a design decision.
+
+    ⚠ AND IT HAS ALREADY HAPPENED ONCE. The warn triangle shipped 2026-08-24 at
+    31.9993x28.9997 and was redrawn onto the pixel grid the next day as an exact
+    32x30 — a change that is invisible in the SVG diff's shape and moves the box it
+    needs by a pixel.
+    """
+
+    # `complete.slint`'s per-state box, by `outcome`. The Run screen is exempt:
+    # its marker is a 12 px square gutter for all three by design.
+    EXPECTED = {"glyph-success": (41, 32),
+                "glyph-warning": (32, 30),
+                "glyph-failure": (32, 32)}
+
+    def natural(self, name):
+        """The SVG's own width/height, rounded — Figma exports fractional sizes for
+        a shape whose bounds are not integral, and a box is whole pixels."""
+        svg = (UI / "assets" / f"{name}.svg").read_text(encoding="utf-8")
+        out = []
+        for attr in ("width", "height"):
+            match = re.search(rf'\b{attr}="([0-9.]+)"', svg)
+            self.assertIsNotNone(match, f"{name}.svg has no {attr}")
+            out.append(round(float(match.group(1))))
+        return tuple(out)
+
+    def test_the_boxes_match_the_artwork(self):
+        for name, expected in self.EXPECTED.items():
+            self.assertEqual(
+                expected, self.natural(name),
+                f"{name}.svg is no longer {expected[0]}x{expected[1]} — "
+                f"complete.slint's box for it is now the wrong aspect, and "
+                f"`image-fit: contain` will letterbox rather than complain")
+
+    def test_complete_states_every_one_of_those_numbers(self):
+        """A width or height missing from the file means one state is falling back
+        to another's box."""
+        text = strip_comments(
+            (UI / "screens" / "complete.slint").read_text(encoding="utf-8"))
+        image = [b for b in blocks(text, "Image") if "image-fit" in b]
+        self.assertTrue(image, "the Complete screen lost its outcome glyph")
+        body = image[0]
+        for name, (w, h) in self.EXPECTED.items():
+            self.assertIn(f"{w}px", body,
+                          f"the Complete screen has no {w}px box, so "
+                          f"{name}.svg is being drawn at another glyph's width")
+            self.assertIn(f"{h}px", body,
+                          f"the Complete screen has no {h}px box, so "
+                          f"{name}.svg is being drawn at another glyph's height")
+
+    def test_the_glyph_y_is_floored(self):
+        """⚠ A GUARD, NOT A LIVE REQUIREMENT — every height is even again since the
+        2026-08-25 redraw. It stays because the one day the triangle was 29 px tall
+        put it on a half pixel, resampled across two rows, and nothing about that
+        looks like a bug: it looks like a slightly soft icon. `link-y` in the same
+        file floors a division that also comes out whole today."""
+        text = strip_comments(
+            (UI / "screens" / "complete.slint").read_text(encoding="utf-8"))
+        image = [b for b in blocks(text, "Image") if "image-fit" in b]
+        self.assertTrue(image, "the Complete screen lost its outcome glyph")
+        match = re.search(r"y\s*:\s*root\.y-outcome\s*\+\s*floor\(", image[0])
+        self.assertIsNotNone(
+            match,
+            "the outcome glyph's y is no longer floored — a glyph whose height "
+            "is odd now lands on a half pixel and is drawn soft")
+
+
 class OutcomeTests(unittest.TestCase):
     """The progress bar's red state and the Complete screen's glyph both report
     the run's outcome without being read — so both must agree with the sentences
-    C++ renders, which means all three read the same `ok`."""
+    C++ renders, which means all three read the ONE verdict gui.cpp computes."""
 
     def setUp(self):
         self.cpp = (REPO / "src" / "native" / "src" / "installer"
                     / "gui.cpp").read_text(encoding="utf-8")
 
-    def test_the_failed_flag_comes_from_the_same_ok_as_the_words(self):
+    def test_the_outcome_comes_from_the_same_ok_as_the_words(self):
+        """⚠ `ok` DECIDES THE FAILED STATE, NOT THE LOG. The catch writes an ERROR
+        line so `Worst()` would usually agree — but the red bar is a statement about
+        whether the operation COMPLETED, and deriving it from a line having been
+        written would make it a statement about the logging instead."""
         self.assertIn(
-            "set_run_failed(!ok)", self.cpp,
-            "the red bar and the failure glyph are driven by something other "
-            "than the `ok` the headline and summary are rendered from")
+            "const int outcome = ok ? log.Worst() : kSeverityError;", self.cpp,
+            "the run's outcome is no longer `ok` first and the log's worst level "
+            "second — the red bar and the outcome glyph can now disagree with the "
+            "headline and summary")
+        self.assertIn(
+            "set_run_outcome(outcome)", self.cpp,
+            "the UI is driven by something other than the one computed outcome")
+
+    def test_a_failure_is_not_also_a_warning(self):
+        """"Something went wrong, with warnings" is a smaller thing crowding out a
+        bigger one — so the warned state is the middle of a scale, not a second
+        flag that can be set alongside the failure."""
+        self.assertIn(
+            "const bool warned = outcome == kSeverityWarn;", self.cpp,
+            "`warned` is no longer exclusive with the failed state")
 
     def test_a_failed_run_is_not_forced_to_a_hundred_percent(self):
         """⚠ A full red bar reading "100%" contradicts "Something went wrong".
@@ -1105,7 +1386,7 @@ class OutcomeTests(unittest.TestCase):
         start = self.cpp.find("void StartRun")
         body = self.cpp[start:self.cpp.find("\n}", start)]
         self.assertIn(
-            "set_run_failed(false)", body,
+            "set_run_outcome(kSeverityOk)", body,
             "a run started after a failed one opens on a red bar and a failure "
             "glyph before it has done anything")
 
@@ -1163,17 +1444,24 @@ class LogTailTests(unittest.TestCase):
             "scroll-to-bottom() no longer scrolls to the computed maximum")
 
     def test_the_summary_is_the_same_lines_the_log_drew(self):
-        """⚠ FILTERED IN C++ FROM THE ONE VECTOR, on the same `bad` flag the rows
-        are colored by — so a line cannot be red in the log and absent from the
+        """⚠ FILTERED IN C++ FROM THE ONE VECTOR, on the same `severity` the rows
+        are colored by — so a line cannot be marked in the log and absent from the
         summary, or worded differently in the two places. Slint has no filtered
         model, and the alternative (a repeater over every line with the good ones
-        hidden) leaves invisible elements occupying their layout cells."""
+        hidden) leaves invisible elements occupying their layout cells.
+
+        ⚠ AND THE FILTER IS `> kSeverityOk`, NEVER `== kSeverityError`. Splitting a
+        warning's LOOK from an error's did not split what either MEANS for the run:
+        a warning still holds the wizard on the Run screen, so it still has to
+        appear in the section that answers "why am I still here".
+        """
         start = self.cpp.find("void PublishLog")
         self.assertNotEqual(-1, start, "PublishLog is gone")
         body = self.cpp[start:self.cpp.find("\n}", start)]
-        self.assertIn("line.bad", body,
-                      "the problem summary is no longer filtered on the same flag "
-                      "that colors a log row red")
+        self.assertIn("line.severity > kSeverityOk", body,
+                      "the problem summary is no longer filtered on the same value "
+                      "that marks and colors a log row — or it has narrowed to "
+                      "errors, dropping the warnings the wizard stops for")
         self.assertIn("set_problems", body,
                       "the problem summary is no longer published beside the log, "
                       "so the two can be published at different moments")
@@ -1670,7 +1958,13 @@ class AutoAdvanceTests(unittest.TestCase):
         """⚠ `Clean()` COUNTS A WARN, not just an ERROR. A warning is a problem
         the user is meant to read — the wing-mod mismatch is the live example,
         where the installer proceeds with what was asked and says so — and
-        skipping the only screen that shows it would make warning pointless."""
+        skipping the only screen that shows it would make warning pointless.
+
+        ⚠ STILL TRUE AFTER THE 2026-08-24 GLYPH SPLIT. A warning now LOOKS unlike
+        an error (amber triangle, not the red cross that had users reading a
+        completed install as an aborted one), and that changed nothing here: it is
+        the same `worst_` both readers consult, so the set of runs that stop on
+        this screen is the set it always was."""
         gate = re.search(r"const bool advance\s*=\s*([^;]+);", self.body)
         self.assertIsNotNone(gate, "the auto-advance lost its condition")
         for token in ("ok", "Clean()"):
@@ -1679,10 +1973,10 @@ class AutoAdvanceTests(unittest.TestCase):
                 f"the auto-advance no longer consults `{token}` — a run worth "
                 f"reading now skips its own log")
         self.assertIn(
-            "clean_ = false",
+            "if (severity > worst_) worst_ = severity;",
             self.text[self.text.find("class RunLog"):],
-            "RunLog stopped recording that a run said something, so `Clean()` "
-            "can only ever be true")
+            "RunLog stopped recording the worst level it saw, so `Clean()` can "
+            "only ever be true")
 
     def test_it_gives_up_if_the_user_has_already_moved(self):
         self.assertIn(

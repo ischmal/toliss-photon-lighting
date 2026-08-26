@@ -118,4 +118,37 @@ void AssertFailed(const char* expr, const char* file, int line);
 // disjoint causes in one sim start, which is otherwise a restart per hypothesis.
 void SetDiagnostics(bool on);
 bool Diagnostics();
+
+// ⚠ THERE IS NO WAY TO REACH MENU-HANDLER CONTEXT FROM A BUTTON, AND THIS IS
+// WHERE THE ATTEMPT WENT (2026-08-24). `PostInputAction` used to be declared
+// here: a draw callback stashed a function pointer and the window's next
+// mouse/cursor/key callback ran it, on the reading that a window INPUT callback
+// is X-Plane's UI-input dispatch and therefore the same class as a menu handler.
+// IT IS NOT, and the one caller it was written for - `sim/operation/
+// reload_aircraft`, from the Settings tab's reload button - took the simulator
+// down the first time a user pressed it:
+//
+//   [ToLiss Photon]: XPLMWindowCallbackRecord at 0x... does not exist so cannot
+//     be deleted. - previously destroyed by A319/A321 (SASL)
+//   E/PLG: Plugin assert: out == theWindow->visible
+//     (SDK/COMMON/xplanesdk/Src/XPLM/legacy/XPLMDisplay.cpp:1018)
+//
+// The reload unloads the AIRCRAFT'S plugins, and ToLiss, SASL and kosp each own
+// windows - so their window records are destroyed while X-Plane is still walking
+// the window list to dispatch to us, and X-Plane blames whichever plugin is on
+// the stack. That is the flight-loop crash and the draw-callback crash exactly,
+// on a THIRD list. What makes a menu handler safe is not that it is "input": it
+// is that it is inside NO callback list the aircraft teardown mutates, and every
+// entry point in this file is inside one.
+//
+// ⚠ AND MOVING IT TO A MENU ROW WAS NOT ENOUGH EITHER. That fixed the crash
+// above and the SECOND reload then died in `AirbusFBW_A320_XP11.xpl_unloaded`
+// (WER BEX64 / c0000005): X-Plane executed a draw callback belonging to the
+// previous, unloaded copy of ToLiss's plugin. The reload is synchronous, so the
+// whole teardown runs on OUR stack whatever we call it from - X-Plane sees Photon
+// as the plugin doing the deleting, refuses AirbusFBW's own cleanup, and unloads
+// the module under a still-registered record. The leak is CUMULATIVE. So this is
+// not a deferral problem, there was never a fourth hop to try, and Photon offers
+// no reload at all: `IssueAircraftReload` is PHOTON_DEV-only. docs/dev-tools.md
+// §3b-3c has the logs.
 }

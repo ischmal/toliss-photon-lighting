@@ -22,7 +22,16 @@
 // ⚠ THE GLYPH IS THE ONLY THING ON THIS SCREEN THAT SAYS WHICH WAY IT WENT WITHOUT
 // BEING READ. The headline and the summary are both rendered by C++ and both say so
 // in words; a picture that disagreed with them would be worse than none, which is
-// why `failed` comes from the same `ok` the sentences do.
+// why `outcome` comes from the same run verdict the sentences do.
+//
+// ⚠ AND THERE ARE THREE OF THEM SINCE 2026-08-24, not two. A run that completed but
+// warned about something is neither of the old answers: a green tick over "Install
+// complete" is true and yet says nothing about the amber lines the user was just
+// held on the Run screen to read, and the red cross — what a WARN used to draw in
+// the log — says the install did not happen, which is exactly the misreading the
+// third glyph exists to end. Because of the rule above, the WORDS move with it:
+// `CompleteHeadline` appends ", with warnings", so the picture is never saying
+// something the sentence beside it does not.
 
 import { Tokens } from "../tokens.slint";
 import {
@@ -35,7 +44,11 @@ export component CompleteScreen inherits Rectangle {
     // no business assembling it.
     in property <string> headline: "Operation complete";
     in property <string> summary;
-    in property <bool> failed: false;
+    // ⚠ 0 / 1 / 2 — clean, completed with warnings, failed. THE SAME THREE WIRE
+    // NUMBERS `LogLine.severity` uses, deliberately: one severity scale for the whole
+    // installer UI, so 1 means "warning" on the log rows and on this screen alike.
+    // See `App.run-outcome` and `LogLine.severity` for the rest of the rule.
+    in property <int> outcome: 0;
     // ⚠ The screen opens with this focused, so Enter starts the next job. See
     // `apply-focus` in app.slint for why it is done HERE and not there.
     in property <bool> autofocus: false;
@@ -145,16 +158,33 @@ export component CompleteScreen inherits Rectangle {
     // must not put the tick at two different heights relative to the words it
     // belongs to.
     Image {
-        source: root.failed
+        source: root.outcome == 2
             ? @image-url("../assets/glyph-failure.svg")
-            : @image-url("../assets/glyph-success.svg");
+            : (root.outcome == 1
+                ? @image-url("../assets/glyph-warning.svg")
+                : @image-url("../assets/glyph-success.svg"));
         x: Tokens.content-pad-x
             + (root.glyph-col-w - self.width) / 2;
-        y: root.y-outcome + (76px - self.height) / 2;
-        width: root.failed ? 32px : 41px;
-        height: 32px;
-        // ⚠ `contain`, NOT `fill` — the two are 41x32 and 32x32, and one box for
-        // both would squash the checkmark by a fifth.
+        // ⚠ FLOORED AS A GUARD, not because today's numbers need it. All three
+        // heights are even — 32, 32, 30 — so the halved remainder is whole for each;
+        // it was NOT whole for the triangle's first cut at 29 px, and half a pixel
+        // here means resampled across two rows, the soft edge the whole positioned
+        // layout above exists to avoid. `link-y` floors a division that also comes
+        // out whole today, for the same reason: the cost is a function call and the
+        // failure is invisible. ⚠ A FOURTH GLYPH AT AN ODD HEIGHT IS THE CASE IT
+        // catches, and nothing else in this file would.
+        y: root.y-outcome + floor((76px - self.height) / 2 / 1px) * 1px;
+        // ⚠ EACH GLYPH IN A BOX THE SIZE THE DESIGN DREW IT, which is what keeps all
+        // three at one weight: 41x32, 32x32 and 32x30. ⚠ THESE NUMBERS ARE THE SVGs'
+        // OWN `width`/`height`, and `GlyphGeometryTests` re-reads the files to check
+        // it — a re-export at a new size otherwise leaves the box behind, and
+        // `contain` letterboxes the difference rather than failing.
+        width: root.outcome == 0 ? 41px : 32px;
+        height: root.outcome == 1 ? 30px : 32px;
+        // ⚠ `contain`, NOT `fill` — the three are 41x32, 32x32 and 32x30, and one box
+        // for all of them would squash the checkmark by a fifth. With the boxes above
+        // matching the artwork it is a 1:1 blit for each; `contain` is what keeps that
+        // true rather than what makes it true.
         image-fit: contain;
     }
 

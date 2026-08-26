@@ -36,13 +36,19 @@
 #include <vector>
 
 #include "core/acf.h"
+#include "core/acf_attach.h"
 #include "core/progress.h"
 
 namespace photon {
 namespace patch_acf_screens {
 
-constexpr char kCountProp[] = "_obja/count";
-constexpr char kFileField[] = "_v10_att_file_stl";
+// ⚠ THE ROW ENGINE MOVED TO `core/acf_attach` (2026-08-24), when the integral
+// lighting feature became a second caller that appends and drops `_obja` rows.
+// Everything below is this feature's own half — which OBJ, which frame to copy,
+// and what to say when there is none — and the names are kept so the tests and
+// `wingmod.cpp` read the table through the spelling they always have.
+constexpr const char* kCountProp = acf_attach::kCountProp;
+constexpr const char* kFileField = acf_attach::kFileField;
 
 // Index of the row whose frame ours is copied from, or -1 if this file carries
 // none of the candidates in ScreensFrameTemplates(). Exposed for the tests and

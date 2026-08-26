@@ -56,19 +56,26 @@ set(PHOTON_CORE_SOURCES
     src/core/fsutil.cpp
     src/core/marker.cpp
     src/core/acf.cpp
+    src/core/acf_attach.cpp
     src/core/backup.cpp
     src/core/manifest.cpp
     src/core/patch_acf.cpp
     src/core/patch_acf_screens.cpp
+    src/core/patch_acf_integral.cpp
     src/core/patch_glow.cpp
+    src/core/patch_integral.cpp
     src/core/patch_intensity.cpp
     src/core/patch_realwings.cpp
     src/core/config.cpp
     src/core/detect.cpp
     src/core/wingmod.cpp
+    src/core/neomod.cpp
     src/core/payload.cpp
     src/core/progress.cpp
-    src/core/actions.cpp)
+    src/core/actions.cpp
+    src/core/lit_recolor.cpp
+    src/core/image_io.cpp
+    src/core/support.cpp)
 
 add_library(photoncore STATIC ${PHOTON_CORE_SOURCES})
 # ⚠ PIC, BECAUSE ONE CONSUMER IS A SHARED OBJECT. photoncore links into both
@@ -123,6 +130,7 @@ endif()
 add_executable(photoncore_tests
     tests/core_tests.cpp
     tests/install_tests.cpp
+    tests/lit_recolor_tests.cpp
     src/installer/tui.cpp
     src/installer/platform.cpp)
 target_link_libraries(photoncore_tests PRIVATE photoncore)
@@ -519,6 +527,60 @@ elseif(NOT MSVC)
         target_link_options(photon-installer PRIVATE "LINKER:--no-as-needed")
         target_link_libraries(photon-installer PRIVATE ${PHOTON_FONTCONFIG_LINK})
     endif()
+endif()
+
+# --- photon-lit-studio: the integral-lighting recolor bench (DEV ONLY) -------
+# ⚠ NEVER SHIPPED. Not staged by make_release.py, not referenced by the installer,
+# and OFF by default so CI and every ordinary build are untouched. It exists to
+# tune `core/lit_recolor`'s palettes by eye against a real aircraft texture and to
+# measure a result against Gus's own file; the color logic itself lives in
+# photoncore precisely so that the look approved here is the look that ships.
+#
+#   cmake -B build-tools -A x64 -DPHOTON_TOOLS=ON -DPHOTON_CORE_ONLY=ON
+#   cmake --build build-tools --config Release --target photon-lit-studio
+option(PHOTON_TOOLS "Build the dev-only texture tools (photon-lit-studio)" OFF)
+
+if(PHOTON_TOOLS)
+    set(PHOTON_LIT_STUDIO_SOURCES
+        src/tools/lit_studio/main.cpp
+        src/tools/lit_studio/reference_set.cpp)
+
+    # The window is Windows-only for now: it is a Win32 + legacy-GL Dear ImGui
+    # backend written against the same vendored 1.92.9 the plugin uses. Elsewhere
+    # the binary still builds and every subcommand still works — only the
+    # no-argument tuning window is absent, which is what PHOTON_LIT_STUDIO_GUI
+    # says. A dev tool that fails to CONFIGURE on a contributor's Mac would be
+    # worse than one that runs headless there.
+    if(WIN32)
+        list(APPEND PHOTON_LIT_STUDIO_SOURCES
+             src/tools/lit_studio/studio_gui.cpp
+             src/tools/lit_studio/imgui_win32_gl.cpp
+             third_party/imgui/imgui.cpp
+             third_party/imgui/imgui_draw.cpp
+             third_party/imgui/imgui_tables.cpp
+             third_party/imgui/imgui_widgets.cpp)
+    endif()
+
+    add_executable(photon-lit-studio ${PHOTON_LIT_STUDIO_SOURCES})
+    target_link_libraries(photon-lit-studio PRIVATE photoncore)
+    target_include_directories(photon-lit-studio PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
+
+    if(WIN32)
+        target_compile_definitions(photon-lit-studio PRIVATE
+            PHOTON_LIT_STUDIO_GUI=1)
+        # ⚠ opengl32 and gdi32 only — no GLEW, no GLFW, nothing fetched. The
+        # backend draws through GL 1.1 fixed-function, which is all an ImGui
+        # draw list needs and is guaranteed present on every Windows install.
+        target_link_libraries(photon-lit-studio PRIVATE opengl32 gdi32 comdlg32)
+        # ⚠ CONSOLE subsystem on purpose, even though it opens a window. This one
+        # binary is both the CLI and the GUI, and a WINDOWS-subsystem build would
+        # detach from the terminal and silently discard every subcommand's output
+        # — the exact trap documented for photon-installer's GUI/CLI split.
+        set_target_properties(photon-lit-studio PROPERTIES WIN32_EXECUTABLE OFF)
+    endif()
+
+    message(STATUS "photon-lit-studio: IN (dev tool; never staged into a bundle)")
 endif()
 
 if(PHOTON_CORE_ONLY)

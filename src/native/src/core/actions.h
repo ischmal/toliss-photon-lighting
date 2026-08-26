@@ -85,6 +85,13 @@ struct Options {
     std::string wing = "stock";
     std::string xplaneRoot;
     bool interior = false;
+    // Does this machine run a lighting mod that raises X-Plane's spill-light
+    // cutoff (BSS NEO and friends)? ⚠ NOT A FEATURE — it changes nothing about
+    // WHAT is installed, only how bright the cockpit lamps are built, and it is
+    // meaningless without `interior`. Auto-ticked from neomod::Detect; see
+    // core/neomod.h for why it is asked and core/patch_intensity.h for the
+    // compensation it selects.
+    bool neo = false;
     bool dryRun = false;
     bool removePlugin = false;   // uninstall only
     ProgressFn progress = nullptr;

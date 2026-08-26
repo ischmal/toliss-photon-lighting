@@ -13,14 +13,45 @@ Auto resolution (1 Hz), ToLiss detection, and the superseded-file sweep.
 
 ## The three CMake targets
 
-`src/native/CMakeLists.txt` builds four things, not one:
+`src/native/CMakeLists.txt` builds four things, not one — plus one opt-in dev tool:
 
 | Target | What | Needs the SDK? |
 |---|---|---|
 | `ToLissPhoton` | the shipping `.xpl` | yes |
-| `photoncore` | STATIC lib: constants, version, the file patchers, detection, the manifest | **no** |
+| `photoncore` | STATIC lib: constants, version, the file patchers, detection, the manifest, the `text_LIT` recolor | **no** |
 | `photon-installer` | the compiled end-user installer — TUI + headless CLI (`docs/installer_cpp_plan.md`) | **no** |
 | `photoncore_tests` | plain-`main()` assert exe over `photoncore` **and the TUI's string engine** | **no** |
+| `photon-lit-studio` | ⚠ **`-DPHOTON_TOOLS=ON` only, never shipped** — the integral-lighting recolor bench (`docs/lit_recolor.md`) | **no** |
+
+⚠ **`photon-lit-studio` is a DEV TOOL and nothing stages it.** It is OFF by default so CI
+and every ordinary build are untouched, it has its own build tree (`build-tools/`, since
+it is the only target that compiles Dear ImGui outside the plugin), and it owns no color
+math — the engine is `core/lit_recolor`, so a look approved in the window is what the
+headless subcommand and (later) an install produce. ⚠ It is a **CONSOLE**-subsystem
+binary even though it opens a window: one executable is both the CLI and the GUI, and a
+WINDOWS-subsystem build would detach from the terminal and silently discard every
+subcommand's output — the same trap `photon-installer`'s GUI/console split documents.
+Its window is a Win32 + GL 1.1 Dear ImGui backend (`imgui_win32_gl.cpp`), written because
+the repo vendors ImGui **without** its `backends/` folder and `imgui_xplm.cpp` is bound to
+an XPLM window; it follows that file's two rules — iterate `CmdLists` never
+`CmdListsCount`, and do not set `ImGuiBackendFlags_RendererHasTextures`. On non-Windows
+the binary still builds and every subcommand works; only the window is absent.
+
+```powershell
+cmake -B build-tools -A x64 -DPHOTON_CORE_ONLY=ON -DPHOTON_TOOLS=ON
+cmake --build build-tools --config Release --target photon-lit-studio
+# once, to collect each airframe's STOCK textures into reference/toliss/:
+build-tools\Release\photon-lit-studio.exe harvest --xplane "<X-Plane 12>"
+# from then on the window opens ready, with an aircraft dropdown:
+build-tools\Release\photon-lit-studio.exe
+```
+
+⚠ **`reference/toliss/` is gitignored and must stay that way** — those are ToLiss's
+payware textures, unlike `reference/gus/`, which is committed because Gus gave permission.
+Only its README is tracked; `harvest` regenerates the rest from a machine that owns the
+aircraft. See `reference/toliss/README.md` for the two traps it guards (harvest from
+`objects/` not the stale backup folder, and decide "already recolored?" from pixels rather
+than the install marker).
 
 ⚠ **`photoncore` MUST NOT INCLUDE AN XPLM HEADER OR LINK THE SDK.** The installer and
 the core tests build on machines and CI runners with no X-Plane SDK, and that
@@ -218,8 +249,8 @@ flag is a copy, not a full recompile. `deploy.ps1` always passes `-DPHOTON_DEV` 
 because a cached `ON` would otherwise be sticky.
 
 **The settings window** (Plugins ▸ ToLiss Photon ▸ … ) is the SHIPPING UI and is one tabbed
-window: Error / Exterior / Cockpit / Displays / Settings / About, and every menu path that
-opens it names a tab. The **performance tool is a separate window**, opened from a button on
+window: Error / Exterior / Cockpit / Displays / Settings / About / **Help**, and every menu
+path that opens it names a tab. The **performance tool is a separate window**, opened from a button on
 the Settings tab and one at the bottom of the Displays tab — a run is watched against the
 cockpit, so it has to be able to sit somewhere the settings window is not.
 
@@ -238,15 +269,68 @@ the one control on its page not answering "which era?". Two things to know befor
   the WIDGET** — the field keeps its one meaning everywhere else, prefs file included.
 - ⚠ **The simplified-flood row is HIDDEN without the cockpit mod, not grayed** — see
   `docs/interior_plan.md` §4.6.
+- ⚠ **`Advanced` is an ordinary `SeparatorText` section, not a `CollapsingHeader`**
+  (2026-08-24). Collapsed by default it hid the two controls a user actually comes to this
+  tab to find — the override you switch off to troubleshoot, and the reload you press
+  afterwards.
+- ⚠ **THERE IS NO RELOAD HERE ANY MORE, AND THE REASON IS WORTH THE PARAGRAPH**
+  (2026-08-24). The section ends in a sentence — *"Changes here take effect the next time
+  this aircraft is loaded. Reload it from X-Plane's Developer menu, or restart the
+  simulator."* It held a *Reload aircraft…* button with a Yes/No modal for a few hours, then
+  a Photon menu row for a few more, and **both crashed the simulator**. The two crashes have
+  different causes and the second one is the one that closes the question:
 
-⚠ **Two of those six tabs come and go, on two different questions**, and both used to be
+  ```
+  # 1, as a button, deferred to the window's next input callback:
+  E/PLG: Plugin assert: out == theWindow->visible (XPLM/legacy/XPLMDisplay.cpp:1018)
+
+  # 2, as a menu row — first reload fine, SECOND one:
+  Fault Module Name = AirbusFBW_A320_XP11.xpl_unloaded     (WER BEX64, c0000005)
+  ```
+
+  ⚠ **The mechanism is not which callback list is being walked — it is whose STACK the
+  teardown runs on.** `sim/operation/reload_aircraft` is synchronous, so the whole aircraft
+  teardown executes inside our call; X-Plane therefore sees **Photon** as the plugin doing
+  the work, and refuses the aircraft plugins' own cleanup. The log says so, identically on
+  both reloads, at the same record address and the same creation time:
+
+  ```
+  [ToLiss Photon]: XPLMDrawCallbackRecord at 0x000002B4119D67E0 is being deleted by a
+    different plugin.  - previously created by AirbusFBW - XP11 at 50.23967
+  ```
+
+  The record survives the unload; the module does not. Reload one left a live draw callback
+  pointing into freed code, reload two executed it. ⚠ **The leak is cumulative**, which is
+  the whole "worked once, then crashed" signature — and it is why a fourth choice of context
+  would not have helped either. A menu handler is genuinely better (it removed crash 1) but
+  it is not sufficient. `IssueAircraftReload` is `PHOTON_DEV`-only now, reached from the Dev
+  submenu and nowhere else; `PostInputAction` is deleted, with the note left in
+  `imgui_xplm.h` where it was declared.
+
+⚠ **Help is LAST in the bar and is present in both shapes** (2026-08-24). Two lines and two
+buttons: the .org page, and **Generate Log File**, which collects X-Plane's `Log.txt` plus the three
+rotated `Log.N.txt` beside it **and the newest installer log per airframe** out of the OS
+temp folder into one XML file next to `Log.txt`. The collection rules are
+`core/support.{h,cpp}` — core, so they are testable with no simulator, and because *which*
+installer log belongs to *which* aircraft is a fact about the installer's own output.
+⚠ It is deliberately reachable on a **reverted install**, beside the Error tab: that is the
+state most reports are written from, and the report is the one artifact that explains it.
+⚠ **The airframe attribution prefers the log's own `install target:` tag** (written by
+`actions::Install`/`Uninstall`) and falls back to the exterior-OBJ fingerprint — the fallback
+is not dead code, because every log already on a user's disk predates the tag; but it alone
+reads `ExternalLights_XP12.obj` as an A330-900, which is ToLiss's name for every newer
+airframe's lights OBJ.
+
+⚠ **Two of those seven tabs come and go, on two different questions**, and both used to be
 one bool:
 
 - **Error** appears when `gInstallStale` — a ToLiss update or a reinstall has put the stock
   exterior OBJ back — and when it does it **replaces** Exterior / Cockpit / Displays /
   Settings rather than joining them, because the plugin has switched every feature off and a
   grayed page beside the explanation invites trying it. The menu changes shape with it: one row,
-  *Reinstall required…*, and About. See CLAUDE.md §*A reverted install*.
+  *Reinstall required…*, and About — ⚠ **About there, where the ordinary menu now offers
+  Settings…**, because a reverted install has no Settings tab to open. See CLAUDE.md
+  §*A reverted install*.
 - **Cockpit** has THREE states, not two (2026-08-14): live where the mod is installed;
   **present but wholly disabled**, under a line naming the installer option, where the
   airframe supports the mod and it is not installed; and absent where the airframe has no

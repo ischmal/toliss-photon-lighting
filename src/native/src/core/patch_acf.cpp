@@ -148,7 +148,8 @@ RunResult Run(const std::string& aircraftDirUtf8, bool reverse, bool dryRun,
             // they are not identical, so one that cannot be patched must not abort
             // the other three.
             result.log.push_back("  ! " + fsutil::PathToUtf8(path.filename()) +
-                                 " refused: " + e.what());
+                                 ": " + (reverse ? "revert" : "patch") +
+                                 " failed — " + e.what());
             continue;
         }
         std::ostringstream line;
