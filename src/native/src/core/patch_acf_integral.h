@@ -45,14 +45,18 @@ struct RunResult {
     std::vector<std::string> log;
 };
 
-// Attach every fixture's twin, or (reversing) drop every row naming a file with
-// our suffix.
+// Attach every fixture's twins in era order, or (reversing) drop every row
+// naming a file with one of our suffixes.
 //
 // ⚠ REVERSING IGNORES `fixtures` AND WORKS BY SUFFIX. An uninstall runs after
 // the aircraft may have been half-restored, so the twin OBJs it is detaching may
 // already be gone from disk and cannot be re-derived by content. The rows,
-// however, still name them — and `integral::kLedSuffix` is the one thing every
-// file this feature writes has in common.
+// however, still name them — and `integral::IsEraName` is the one thing every
+// file this feature writes has in common. ⚠ ASK IT rather than testing for one
+// suffix: an aircraft installed before 2026-08-27 carries only `_photon_led`
+// twins, and one installed after carries `_photon_newhal` as well, so a
+// single-suffix test would leave half the rows behind on exactly the upgrade
+// path most users take.
 RunResult Run(const std::string& aircraftDirUtf8,
               const std::vector<integral::Fixture>& fixtures, bool reverse,
               bool dryRun, const progress::StepProgress& onProgress = {});

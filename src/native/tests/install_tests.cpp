@@ -2500,7 +2500,7 @@ TEST("detect: the hyphen rule admits Linux's suffix but not a space") {
 // ─────────────────────────────────────────────────────────────────────────────
 // integral lighting — the whole install, end to end
 // ─────────────────────────────────────────────────────────────────────────────
-TEST("integral: an install derives both eras, gates the OBJ and attaches the twin") {
+TEST("integral: an install derives EVERY era, gates the OBJ and attaches the twins") {
     TempDir tmp;
     FakePayload pay(tmp / "payload");
     FakeAircraft fa(tmp.path());
@@ -2510,30 +2510,42 @@ TEST("integral: an install derives both eras, gates the OBJ and attaches the twi
     o.interior = true;
     actions::Install(o, gLog);
 
-    // 1. Both eras exist as real, DIFFERENT files.
-    const fs::path inc = fa.objects() / "text_LIT.png";
-    const fs::path led = fa.objects() / "text_LIT_photon_led.png";
-    CHECK(Exists(inc));
-    CHECK(Exists(led));
-    lit::Image incImg, ledImg;
-    std::string err;
-    CHECK(image::LoadPng(inc, incImg, err));
-    CHECK(image::LoadPng(led, ledImg, err));
-    // ⚠ Both moved off stock, and off EACH OTHER. A profile that resolved to its
-    // neighbour would produce two identical files and a switch that does nothing
-    // — the same lie `ProfileIsDefined` exists to prevent.
-    CHECK(lit::LooksRecolored(incImg, lit::Texture::kPlacards));
-    CHECK(lit::LooksRecolored(ledImg, lit::Texture::kPlacards));
-    CHECK(incImg.pixels != ledImg.pixels);
+    // 1. EVERY era exists as a real file, and no two of them are the same file.
+    // ⚠ Looped over `kEraCount` rather than named one by one: an era the install
+    // silently skipped would leave the plugin offering a row whose branch draws
+    // nothing, and a test naming two of three would not see it.
+    std::vector<lit::Image> imgs;
+    for (int e = 0; e < integral::kEraCount; ++e) {
+        const std::string name = integral::EraNameFor(
+            "text_LIT.png", static_cast<integral::Era>(e));
+        const fs::path path = fa.objects() / name;
+        CHECK(Exists(path));
+        lit::Image img;
+        std::string err;
+        CHECK(image::LoadPng(path, img, err));
+        // ⚠ Moved off stock. A profile that resolved to its neighbour would
+        // produce identical files and a switch that does nothing — the same lie
+        // `ProfileIsDefined` exists to prevent.
+        CHECK(lit::LooksRecolored(img, lit::Texture::kPlacards));
+        imgs.push_back(img);
+    }
+    for (std::size_t a = 0; a < imgs.size(); ++a)
+        for (std::size_t b = a + 1; b < imgs.size(); ++b)
+            CHECK(imgs[a].pixels != imgs[b].pixels);
 
-    // 2. The stock OBJ is gated, in place, on the incandescent branch.
+    // 2. The stock OBJ is gated, in place, on the FIRST era — the fail-open one.
     const std::string lamps = Read(fa.objects() / "lamps.obj");
-    CHECK(Contains(lamps, "ANIM_hide\t1\t1\tToLissPhoton/interior/integral"));
+    CHECK(Contains(lamps, "ANIM_hide\t0.5\t2.5\tToLissPhoton/interior/integral"));
     CHECK(Contains(lamps, "TEXTURE_LIT\ttext_LIT.png"));
 
-    // 3. The twin is gated the other way and bound to the other texture.
+    // 3. Each twin is gated at every value but its own, and bound to its own
+    //    texture.
+    const std::string mid = Read(fa.objects() / "lamps_photon_newhal.obj");
+    CHECK(Contains(mid, "ANIM_hide\t-0.5\t0.5\tToLissPhoton/interior/integral"));
+    CHECK(Contains(mid, "ANIM_hide\t1.5\t2.5\tToLissPhoton/interior/integral"));
+    CHECK(Contains(mid, "TEXTURE_LIT\ttext_LIT_photon_newhal.png"));
     const std::string twin = Read(fa.objects() / "lamps_photon_led.obj");
-    CHECK(Contains(twin, "ANIM_hide\t0\t0\tToLissPhoton/interior/integral"));
+    CHECK(Contains(twin, "ANIM_hide\t-0.5\t1.5\tToLissPhoton/interior/integral"));
     CHECK(Contains(twin, "TEXTURE_LIT\ttext_LIT_photon_led.png"));
 
     // 4. …and attached, with the frame copied from its OWN source row — 20.75,
@@ -2554,8 +2566,12 @@ TEST("integral: an install derives both eras, gates the OBJ and attaches the twi
     // 5. The bookkeeping: the twins are DELETED on uninstall, the originals
     //    RESTORED.
     const manifest::Manifest m = manifest::Read(U8(fa.objects()));
-    CHECK(HasEntry(m.interior.added, "lamps_photon_led.obj"));
-    CHECK(HasEntry(m.interior.added, "text_LIT_photon_led.png"));
+    for (int e = 1; e < integral::kEraCount; ++e) {
+        const auto era = static_cast<integral::Era>(e);
+        CHECK(HasEntry(m.interior.added, integral::EraNameFor("lamps.obj", era)));
+        CHECK(HasEntry(m.interior.added,
+                       integral::EraNameFor("text_LIT.png", era)));
+    }
     CHECK(HasEntry(m.backedUp, "lamps.obj"));
     CHECK(HasEntry(m.backedUp, "text_LIT.png"));
 }
@@ -2661,18 +2677,31 @@ TEST("integral: a twin draws BESIDE its source, not at the end of the table") {
     const int lampsLed = acf_attach::FindObj(acf, "lamps_photon_led.obj");
     const int glass = acf_attach::FindObj(acf, "GlassInterior.obj");
 
-    // 1. Each twin sits immediately after the object it twins.
-    CHECK_EQ(knobsLed, knobs + 1);
-    CHECK_EQ(lampsLed, lamps + 1);
+    // 1. ⚠ THE TWINS RUN IN ERA ORDER, CONTIGUOUSLY AFTER THEIR SOURCE. Each
+    //    is inserted after the PREVIOUS era's object rather than after the
+    //    source, which is what keeps them in order; inserting both after the
+    //    source would reverse them, invisibly, since only one branch ever draws.
+    for (const std::string& base : {std::string("lamps.obj"),
+                                    std::string("knobs.obj")}) {
+        const int src = acf_attach::FindObj(acf, base);
+        CHECK(src >= 0);
+        for (int e = 1; e < integral::kEraCount; ++e) {
+            const std::string twinName =
+                integral::EraNameFor(base, static_cast<integral::Era>(e));
+            CHECK_EQ(acf_attach::FindObj(acf, twinName), src + e);
+        }
+    }
 
-    // 2. ⚠ BOTH BRANCHES DRAW BEFORE THE GLASS. This is the assertion that fails
-    //    on an appended twin, and the one the user actually saw.
+    // 2. ⚠ EVERY BRANCH DRAWS BEFORE THE GLASS. This is the assertion that
+    //    fails on an appended twin, and the one the user actually saw.
     CHECK(lampsLed < glass);
     CHECK(knobsLed < glass);
+    CHECK(acf_attach::FindObj(acf, "lamps_photon_newhal.obj") < glass);
+    CHECK(acf_attach::FindObj(acf, "knobs_photon_newhal.obj") < glass);
 
     // 3. ⚠ AND THE PAIR'S OWN ORDER IS PRESERVED. Stock draws knobs before
-    //    lamps; two twins appended to the end came out lamps before knobs, which
-    //    silently inverted the sort between them in the LED branch alone.
+    //    lamps; twins appended to the end came out lamps before knobs, which
+    //    silently inverted the sort between them in the twin branches alone.
     CHECK(knobs < lamps);
     CHECK(knobsLed < lampsLed);
 }
@@ -2706,7 +2735,11 @@ TEST("integral: a reinstall MOVES a twin that an older build appended") {
 
     const std::string acf = Read(fa.folder() / "ToLissA320.acf");
     const int lamps = acf_attach::FindObj(acf, "lamps.obj");
-    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_led.obj"), lamps + 1);
+    // ⚠ `lamps + 2`, behind the New Halogen twin: the eras are contiguous and
+    // in order, so repairing a misplaced LED row means landing it after its
+    // predecessor rather than after the source.
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_newhal.obj"), lamps + 1);
+    CHECK_EQ(acf_attach::FindObj(acf, "lamps_photon_led.obj"), lamps + 2);
     CHECK(acf_attach::FindObj(acf, "lamps_photon_led.obj") <
           acf_attach::FindObj(acf, "GlassInterior.obj"));
     // ⚠ Moved, not duplicated — two rows naming one OBJ would draw it twice.
@@ -2823,7 +2856,7 @@ TEST("integral: a gated OBJ backup heals from an un-gated objects/ copy") {
     GiveIntegralCockpit(fa);
     const std::string stockObj = Read(fa.objects() / "lamps.obj");
     std::string gated, gerr;
-    CHECK(integral::PatchText(stockObj, integral::Era::kIncandescent, "",
+    CHECK(integral::PatchText(stockObj, integral::Era::kOldHalogen, "",
                               "0.0.0", gated, gerr));
     std::error_code ec;
     fs::create_directories(fa.backupDir(), ec);

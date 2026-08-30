@@ -852,14 +852,24 @@ class PluginSideValueSpaceTests(unittest.TestCase):
         """⚠ Bump kIntPrefsSchema whenever a category's value space changes, not
         merely when a category is added. A clamp cannot undo a meaning change: a
         v2 `dome: 1` was LED and a v3 `dome: 1` is new halogen, and both are in
-        range."""
+        range — and a v3 `integral: 1` was LED where a v4 one is new halogen.
+
+        TWO categories have now moved, and each needs its own migration line:
+        the dome at v2, `integral` at v4."""
         import re
         m = re.search(r"kIntPrefsSchema\s*=\s*(\d+)", self.cpp)
         self.assertIsNotNone(m)
-        self.assertEqual(int(m.group(1)), 3)
-        # v1 and v3 are the same space, so ONLY v2 is migrated. `schema < 3` here
-        # would move a v1 file that is already correct.
+        self.assertEqual(int(m.group(1)), 4)
+        # v1 and v3 are the same space, so ONLY v2 is migrated for the dome.
+        # `schema < 3` here would move a v1 file that is already correct.
         self.assertIn("if (schema == 2)", self.cpp)
+        # ⚠ `integral` is the opposite shape: EVERY schema below 4 needs moving,
+        # because the key simply did not exist before v3 (reads 0, which is right
+        # on both scales) and meant LED at v3. Written as `<= 3` rather than
+        # `== 3` so a version inserted between them cannot slip past.
+        self.assertIn(
+            "if (schema <= 3 && out.intCats[kIntIntegralIndex] == 1)", self.cpp)
+        self.assertIn("out.intCats[kIntIntegralIndex] = 2;", self.cpp)
 
     #: Interior categories that are NOT gated in `lights_inn.obj` and so have no
     #: DSL branches to compare against. ⚠ `integral` switches which `text_LIT.png`
@@ -905,16 +915,21 @@ class PluginSideValueSpaceTests(unittest.TestCase):
                 self.assertEqual(int(values), INT_VALUES[key])
                 self.assertEqual(len(em.profiles_of(key)), INT_VALUES[key])
 
-    def test_the_integral_row_is_two_valued_and_shares_its_dataref_name(self):
-        """⚠ Integral lighting is the FIRST two-valued interior category that has
-        ever shipped, and three separate things have to agree about it.
+    def test_the_integral_row_is_ternary_and_shares_its_dataref_name(self):
+        """⚠ Integral lighting shipped TWO-valued for three days (2026-08-24 to
+        2026-08-27) and is ternary again, and three separate things have to agree
+        about it.
 
-        1. Two values, so `IntValueForProfile` folds both halogen profiles onto
-           Incandescent and LED onto LED — which is the default asked for. At 2 a
-           two-valued gate hides NEITHER branch and both draw at once.
-        2. "Incandescent", not "Halogen": the row sits beside others offering
-           "Old Halogen" and "New Halogen", and a third, contradictory answer to
-           the same question is worse than a longer word.
+        1. Three values, like its five neighbours. It was two while one value had
+           to cover both halogen eras — a filament behind a placard was taken not
+           to read as two looks — and Gus settled that by sending finished artwork
+           for all three. ⚠ At 2 a two-valued gate hides NEITHER branch and
+           both draw at once, so the row's `values` and the OBJ's ANIM_hide ranges
+           are one contract.
+        2. The grid's own words. The row sits beside five offering "Old Halogen",
+           "New Halogen" and "LED", and anything else here reads as a different
+           question. It said "Incandescent" while it was two-valued, which was the
+           honest name for a fold and is the wrong name without one.
         3. Its dataref comes from `photon::integral::kDataRef`, the same constant
            the installer writes into the OBJ's ANIM_hide. A literal here would
            compile, run, and gate nothing — the branch would simply never draw."""
@@ -922,19 +937,42 @@ class PluginSideValueSpaceTests(unittest.TestCase):
         table = re.search(r"kIntCategories\[NINT\] = \{(.*?)\n\};", self.cpp, re.S)
         row = re.search(
             r'\{"integral",\s*([\w:]+),\s*"([^"]+)",\s*(\d+),\s*'
-            r'\{"([^"]+)",\s*"([^"]+)",\s*nullptr\}\}',
+            r'\{"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\}\}',
             table.group(1))
         self.assertIsNotNone(row, "the integral row is not in its expected shape")
-        dataref, label, values, first, second = row.groups()
+        dataref, label, values, first, second, third = row.groups()
         self.assertEqual(dataref, "photon::integral::kDataRef")
         self.assertEqual(label, "Integral Lights")
-        self.assertEqual(int(values), 2)
-        self.assertEqual((first, second), ("Incandescent", "LED"))
-        # ⚠ And the row is HIDDEN where the LED twin OBJs are not installed, not
+        self.assertEqual(int(values), 3)
+        self.assertEqual((first, second, third),
+                         ("Old Halogen", "New Halogen", "LED"))
+        # ⚠ And the row is HIDDEN where the twin OBJs are not installed, not
         # shown inert: one dead row in a grid of five reads as a broken look
         # rather than an absent one.
         self.assertIn("if (row == kIntIntegralIndex) return gIntegralInstalled;",
                       self.cpp)
+
+    def test_detection_demands_every_era_twin_not_merely_one(self):
+        """⚠ THE UPGRADE GUARD. An aircraft installed before the row went ternary
+        carries only the `_photon_led` twin, gated the TWO-valued way — the stock
+        OBJ hides at exactly 1, the twin at exactly 0. Read on the ternary scale,
+        value 2 hides NEITHER and both copies of the flight deck draw at once,
+        while value 1 draws the LED branch under the label "New Halogen". Both
+        failures are silent in the log and loud in the cockpit.
+
+        So detection has to demand the FULL set and let such an aircraft read as
+        not-installed until a reinstall writes the missing twin."""
+        import re
+        fn = re.search(r"static bool DetectIntegral\(.*?\n\}", self.cpp, re.S)
+        self.assertIsNotNone(fn, "DetectIntegral is no longer a single function")
+        body = fn.group(0)
+        # It walks the era table rather than testing one spelled-out suffix.
+        self.assertIn("EraSuffixes()", body)
+        self.assertIn("kEraCount", body)
+        self.assertNotIn("kLedSuffix", body)
+        # And it answers false unless every era was seen — an `any` would be the
+        # bug above.
+        self.assertIn("if (!seen[e]) return false;", body)
 
     def test_a_row_button_is_named_the_same_as_the_profile_that_sets_it(self):
         """The Custom rows and the profile dropdown are two lists of the same

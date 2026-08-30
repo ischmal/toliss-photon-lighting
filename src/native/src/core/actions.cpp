@@ -304,11 +304,14 @@ constexpr double kMsWingObjs = 15.0;
 // 4096² placard atlas, 1.31 s end to end, i.e. 16.78 Mpx in 1310 ms.
 constexpr double kMsPerMegapixelRecolor = 78.0;
 
-// What one texture's two eras cost, from the atlas size the spec is authored
+// What one texture's eras cost, from the atlas size the spec is authored
 // against — known without opening the file, which is what planning needs.
+// ⚠ SCALED BY `kEraCount`, never by a literal: the run derives every era, so a
+// hard-coded 2 here would under-price the step by a third the moment a third era
+// arrived — which is exactly what happened on 2026-08-27.
 double RecolorMs(lit::Texture texture) {
     const double side = static_cast<double>(lit::TextureReferenceSize(texture));
-    return 2.0 * kMsPerMegapixelRecolor * (side * side) / 1.0e6;
+    return integral::kEraCount * kMsPerMegapixelRecolor * (side * side) / 1.0e6;
 }
 
 // A wing token in a SENTENCE. ⚠ Not `WingLabel`, which renders `stock` as
@@ -515,12 +518,14 @@ progress::Plan BuildInstallPlan(const Options& opts, const fs::path& aircraftDir
         for (const integral::Fixture& f : integral::FixturesIn(objects)) {
             recolorMs += RecolorMs(f.texture);
             twinBytes += progress::FileSizeOrZero(
-                fsutil::PathToUtf8(objects / fsutil::PathFromUtf8(f.obj)));
+                fsutil::PathToUtf8(objects / fsutil::PathFromUtf8(f.StockObj())));
         }
         plan.Add(kStepIntegralTex, recolorMs);
-        // Read the stock OBJ, write it back gated, write the twin: three passes.
-        plan.Add(kStepIntegralObj, CopyMs(3 * twinBytes, dry) +
-                                       progress::MsForAcfAttach(AcfBytes(aircraftDir)));
+        // Read the stock OBJ, write it back gated, then write one twin per later
+        // era: 2 + (kEraCount - 1) passes over the same bytes.
+        plan.Add(kStepIntegralObj,
+                 CopyMs((1 + integral::kEraCount) * twinBytes, dry) +
+                     progress::MsForAcfAttach(AcfBytes(aircraftDir)));
     }
 
     plan.Add(kStepManifest, kMsManifest);
@@ -782,13 +787,13 @@ std::vector<std::string> InstallIntegral(const Options& opts,
         // The stock LIT is about to be overwritten, so it is backed up like any
         // other replaced file — and `nullptr` is wrong here: we WRITE over it,
         // so a missing original must be recorded as ours to delete.
-        BackupOnce(objects / fsutil::PathFromUtf8(f.stockLit), backupDir, m,
+        BackupOnce(objects / fsutil::PathFromUtf8(f.StockLit()), backupDir, m,
                    &m.interior.added, log, dryRun);
 
         lit::Image stock;
         std::string err;
-        const fs::path inObjects = objects / fsutil::PathFromUtf8(f.stockLit);
-        const fs::path inBackup = backupDir / fsutil::PathFromUtf8(f.stockLit);
+        const fs::path inObjects = objects / fsutil::PathFromUtf8(f.StockLit());
+        const fs::path inBackup = backupDir / fsutil::PathFromUtf8(f.StockLit());
         std::string source;
         if (image::LoadPng(inObjects, stock, err) &&
             !lit::LooksRecolored(stock, f.texture)) {
@@ -801,10 +806,10 @@ std::vector<std::string> InstallIntegral(const Options& opts,
                 // anywhere and every era we could derive would be a second pass
                 // over a first one. Leaving the aircraft as it is beats baking a
                 // compounded curve in permanently.
-                log.Write("both " + f.stockLit + " and its backup are already "
+                log.Write("both " + f.StockLit() + " and its backup are already "
                           "recolored — no stock source left to derive from",
                           "WARN");
-                steps.push_back("! " + f.stockLit +
+                steps.push_back("! " + f.StockLit() +
                                 " has no stock copy left (neither in objects/ "
                                 "nor in " + BackupLabel(aircraftDir, backupDir) +
                                 ") — left as it is");
@@ -812,13 +817,13 @@ std::vector<std::string> InstallIntegral(const Options& opts,
                 continue;
             }
         } else {
-            log.Write("cannot read a stock " + f.stockLit + ": " + err, "WARN");
-            steps.push_back("! Could not read " + f.stockLit +
+            log.Write("cannot read a stock " + f.StockLit() + ": " + err, "WARN");
+            steps.push_back("! Could not read " + f.StockLit() +
                             " — integral lighting skipped for it");
             ready.push_back(r);
             continue;
         }
-        log.Write("integral: deriving " + f.stockLit + " from " + source);
+        log.Write("integral: deriving " + f.StockLit() + " from " + source);
 
         // ⚠ The DAY texture is only read by a PROMOTE region, which the placards
         // have (PEDAL DISC) and the knobs do not. A missing one must cost the
@@ -829,17 +834,16 @@ std::vector<std::string> InstallIntegral(const Options& opts,
             objects / fsutil::PathFromUtf8(lit::TextureDayName(f.texture)),
             albedo, aerr);
 
-        bool wroteBoth = true;
-        for (const integral::Era era :
-             {integral::Era::kIncandescent, integral::Era::kLed}) {
+        bool wroteAll = true;
+        for (int e = 0; e < integral::kEraCount; ++e) {
+            const auto era = static_cast<integral::Era>(e);
             lit::Image work = stock;   // each era derives from STOCK, never from
-                                       // the other era's output
+                                       // another era's output
             const std::size_t changed =
                 lit::Apply(work, haveAlbedo ? &albedo : nullptr,
                            lit::SpecForProfile(integral::ProfileFor(era),
                                                f.texture));
-            const std::string name =
-                (era == integral::Era::kLed) ? f.ledLit : f.stockLit;
+            const std::string& name = f.lit[e];
             const fs::path dest = objects / fsutil::PathFromUtf8(name);
             log.Write("integral: " + std::string(integral::EraKey(era)) + " " +
                       name + " — " + std::to_string(changed) + " px changed");
@@ -848,24 +852,27 @@ std::vector<std::string> InstallIntegral(const Options& opts,
                 if (!image::SavePng(dest, work, werr)) {
                     log.Write("cannot write " + fsutil::PathToUtf8(dest) + ": " +
                               werr, "WARN");
-                    wroteBoth = false;
+                    wroteAll = false;
                     break;
                 }
             }
-            // The LED file has no stock counterpart, so uninstall DELETES it.
-            if (era == integral::Era::kLed && !Contains(m.interior.added, name)) {
+            // ⚠ EVERY ERA BUT THE FIRST is a file with no stock counterpart, so
+            // uninstall DELETES it rather than restoring one. The first IS the
+            // stock name — written over, and already backed up above.
+            if (era != integral::Era::kOldHalogen &&
+                !Contains(m.interior.added, name)) {
                 m.interior.added.push_back(name);
             }
         }
-        r.ok = wroteBoth;
+        r.ok = wroteAll;
         ready.push_back(r);
     }
     std::size_t okCount = 0;
     for (const Ready& r : ready) {
         if (r.ok) ++okCount;
     }
-    steps.push_back("Derived Incandescent and LED integral lighting for " +
-                    std::to_string(okCount) + " of " +
+    steps.push_back("Derived Old Halogen, New Halogen and LED integral lighting "
+                    "for " + std::to_string(okCount) + " of " +
                     std::to_string(drawn.size()) + " cockpit texture(s)");
     rep.Finish(kStepIntegralTex);
 
@@ -901,14 +908,14 @@ std::vector<std::string> InstallIntegral(const Options& opts,
         const integral::Fixture& f = ready[i].fixture;
         rep.Sub(kStepIntegralObj)(static_cast<double>(i) / (ready.size() + 1));
 
-        const fs::path objPath = objects / fsutil::PathFromUtf8(f.obj);
+        const fs::path objPath = objects / fsutil::PathFromUtf8(f.StockObj());
         BackupOnce(objPath, backupDir, m, nullptr, log, dryRun);
 
         // ⚠ SOURCE THE STOCK TEXT THE SAME WAY THE TEXTURE IS SOURCED, for the
         // same reason: on a reinstall the file in `objects/` already carries the
         // gate, and `PatchText` refuses a wrapped file rather than nesting one.
         std::string stockText;
-        const fs::path backupObj = backupDir / fsutil::PathFromUtf8(f.obj);
+        const fs::path backupObj = backupDir / fsutil::PathFromUtf8(f.StockObj());
         if (fsutil::ReadFileBytes(objPath, stockText) &&
             !integral::IsPatched(stockText)) {
             // stock, as found. Same healing rule as the texture above: a
@@ -920,7 +927,7 @@ std::vector<std::string> InstallIntegral(const Options& opts,
             if (fs::exists(backupObj, bec) && !bec &&
                 (!fsutil::ReadFileBytes(backupObj, backupText) ||
                  integral::IsPatched(backupText))) {
-                log.Write("the backed-up " + f.obj + " is not a stock file — "
+                log.Write("the backed-up " + f.StockObj() + " is not a stock file — "
                           "refreshing it from the stock copy in objects/",
                           "WARN");
                 if (!dryRun) {
@@ -934,27 +941,45 @@ std::vector<std::string> InstallIntegral(const Options& opts,
             }
         } else if (!fsutil::ReadFileBytes(backupObj, stockText) ||
                    integral::IsPatched(stockText)) {
-            log.Write("no un-gated copy of " + f.obj + " to derive from", "WARN");
-            steps.push_back("! No stock " + f.obj +
+            log.Write("no un-gated copy of " + f.StockObj() + " to derive from", "WARN");
+            steps.push_back("! No stock " + f.StockObj() +
                             " to gate — integral lighting skipped for it");
             continue;
         }
 
-        std::string incText, ledText, err;
-        if (!integral::PatchText(stockText, integral::Era::kIncandescent, "",
-                                 kPhotonVersion, incText, err) ||
-            !integral::PatchText(stockText, integral::Era::kLed, f.ledLit,
-                                 kPhotonVersion, ledText, err)) {
-            log.Write("cannot gate " + f.obj + ": " + err, "WARN");
-            steps.push_back("! Could not gate " + f.obj + " (" + err + ")");
+        // ⚠ GATE EVERY ERA BEFORE WRITING ANY OF THEM. A failure halfway would
+        // otherwise leave the stock OBJ gated to an era whose twin was never
+        // written — a branch that draws nothing, which reads in the cockpit as
+        // the whole flight deck disappearing on one setting.
+        std::string gated[integral::kEraCount];
+        std::string err;
+        bool gatedAll = true;
+        for (int e = 0; e < integral::kEraCount && gatedAll; ++e) {
+            const auto era = static_cast<integral::Era>(e);
+            // ⚠ THE FIRST ERA KEEPS THE STOCK `TEXTURE_LIT` LINE — its recolor
+            // was written over the stock texture's own name, so there is nothing
+            // to repoint. Passing its name would be harmless but says something
+            // false about which files this feature adds.
+            const std::string litName =
+                (era == integral::Era::kOldHalogen) ? std::string() : f.lit[e];
+            gatedAll = integral::PatchText(stockText, era, litName,
+                                           kPhotonVersion, gated[e], err);
+        }
+        if (!gatedAll) {
+            log.Write("cannot gate " + f.StockObj() + ": " + err, "WARN");
+            steps.push_back("! Could not gate " + f.StockObj() + " (" + err + ")");
             continue;
         }
         if (!dryRun) {
-            WriteOrThrow(objPath, incText);
-            WriteOrThrow(objects / fsutil::PathFromUtf8(f.ledObj), ledText);
+            WriteOrThrow(objPath, gated[0]);
+            for (int e = 1; e < integral::kEraCount; ++e) {
+                WriteOrThrow(objects / fsutil::PathFromUtf8(f.obj[e]), gated[e]);
+            }
         }
-        if (!Contains(m.interior.added, f.ledObj)) {
-            m.interior.added.push_back(f.ledObj);
+        for (int e = 1; e < integral::kEraCount; ++e) {
+            if (!Contains(m.interior.added, f.obj[e])) {
+                m.interior.added.push_back(f.obj[e]);
+            }
         }
         attach.push_back(f);
     }
@@ -968,12 +993,13 @@ std::vector<std::string> InstallIntegral(const Options& opts,
         LogLines(log, "acf integral", res.log);
         if (!res.changed.empty() || !res.touched.empty()) {
             steps.push_back(
-                "Installed switchable integral lighting (Incandescent / LED) — " +
+                "Installed switchable integral lighting (Old Halogen / New "
+                "Halogen / LED) — " +
                 std::to_string(attach.size()) + " cockpit object(s), attached in " +
                 std::to_string(res.touched.size()) + " .acf file(s)");
         } else {
-            steps.push_back("! Could not attach the LED cockpit object(s) — "
-                            "integral lighting will stay on Incandescent");
+            steps.push_back("! Could not attach the cockpit object twin(s) — "
+                            "integral lighting will stay on Old Halogen");
         }
     }
     rep.Finish(kStepIntegralObj);
@@ -1825,8 +1851,10 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
         if (!dryRun) fsutil::RemoveDirIfEmpty(backupDir / "liveries");
         rep.Finish(kStepInteriorAcf);
 
-        // 4. ⚠ The LED twins' attachment rows, found BY SUFFIX rather than from
-        //    the manifest. The twin OBJs themselves were just deleted by the
+        // 4. ⚠ Every era twin's attachment rows, found BY SUFFIX rather than
+        //    from the manifest — and by EVERY suffix, which is what lets one
+        //    uninstall clean up both an aircraft installed before the third era
+        //    (only `_photon_led`) and one installed after. The twin OBJs themselves were just deleted by the
         //    `added[]` loop above, so a row left behind would name a file that is
         //    gone — and X-Plane logs a missing attachment on every load. Working
         //    by suffix also means an uninstall still cleans up when the manifest
@@ -1843,7 +1871,7 @@ std::vector<std::string> Uninstall(const Options& opts, Log& log) {
                 rep.Sub(kStepIntegralObj));
             LogLines(log, "acf integral", res.log);
             if (!res.changed.empty()) {
-                steps.push_back("Detached the LED cockpit object(s) from " +
+                steps.push_back("Detached the cockpit object twin(s) from " +
                                 std::to_string(res.changed.size()) +
                                 " .acf file(s)");
             }

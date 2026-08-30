@@ -223,6 +223,40 @@ class MasterGateTests(unittest.TestCase):
         self.assertNotIn("/disabled", inn)
 
 
+class NeoCompensationTests(unittest.TestCase):
+    """⚠ THE SCREEN GLOWS ARE SPILL LIGHTS, so a lighting mod that raises
+    X-Plane's spill cutoff culls them exactly as it culls the cockpit lamps —
+    sooner, in fact, since they are the dimmest wide-cone lights Photon ships.
+
+    ⚠ The cockpit's compensation is core/patch_intensity rewriting the OBJ and it
+    CANNOT reach here: CanPatch is gated on the interior needle and
+    lights_screens.obj does not carry it. So the screens compensate on the
+    per-frame size factor instead. Both halves must move together, or one tick of
+    one checkbox brightens half of what the user is looking at."""
+
+    def test_the_screen_size_factor_carries_the_neo_boost(self):
+        """The whole contract. It is a single term in an arithmetic expression,
+        which is exactly the kind of thing a tidy-up drops silently — the lights
+        keep working, they are just back to being culled."""
+        m = re.search(r"gScreenSizeFactor\[i\] = .*?: 0\.0f;", PLUGIN_CPP, re.S)
+        self.assertIsNotNone(m, "the per-frame size factor moved")
+        self.assertIn("neoBoost", m.group(0))
+
+    def test_the_boost_is_the_cockpits_constant_and_not_a_literal(self):
+        """⚠ ONE SEED, TWO READERS. kNeoBoost is unmeasured and pending the in-sim
+        sweep (docs/neo_compat_plan.md §7). A literal here would agree with the
+        cockpit only until the day someone retunes it, and the disagreement would
+        show up as the displays and the lamps compensating by different amounts —
+        which reads as a tuning problem, not as a dropped constant."""
+        m = re.search(r"const float neoBoost =[^;]*;", PLUGIN_CPP)
+        self.assertIsNotNone(m, "the boost is no longer hoisted out of the loop")
+        self.assertIn("intensity::kNeoBoost", m.group(0))
+        self.assertIn("gCockpit.neo", m.group(0))
+        self.assertIn(
+            "1.0f", m.group(0),
+            "the flag being off must be exact identity, never a second factor")
+
+
 class FixtureProfileSyntaxTests(unittest.TestCase):
     """`profile:` is the new un-gated fixture form that makes the screens target
     expressible without inventing a category. A fixture takes exactly one of

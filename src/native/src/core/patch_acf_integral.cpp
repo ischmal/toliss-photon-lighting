@@ -17,7 +17,7 @@ std::vector<std::string> OurRows(const std::string& text) {
         const auto it = row.second.find(acf_attach::kFileField);
         if (it == row.second.end()) continue;
         const std::string name = fsutil::Trim(it->second);
-        if (name.find(integral::kLedSuffix) != std::string::npos) {
+        if (integral::IsEraName(name)) {
             names.push_back(name);
         }
     }
@@ -38,7 +38,7 @@ std::vector<integral::Fixture> DrawnFixtures(
             if (!fsutil::ReadFileBytes(fsutil::PathFromUtf8(pathUtf8), text)) {
                 continue;
             }
-            if (acf_attach::FindObj(text, f.obj) >= 0) {
+            if (acf_attach::FindObj(text, f.StockObj()) >= 0) {
                 drawn.push_back(f);
                 break;   // one XP12 variant drawing it is enough
             }
@@ -89,44 +89,57 @@ RunResult Run(const std::string& aircraftDirUtf8,
                 }
             } else {
                 for (const integral::Fixture& f : fixtures) {
-                    const int tmplIdx = acf_attach::FindObj(out, f.obj);
-                    if (tmplIdx < 0) {
+                    if (acf_attach::FindObj(out, f.StockObj()) < 0) {
                         // Not drawn in THIS variant. Not an error — the caller
                         // already established it is drawn in at least one.
                         result.log.push_back(
-                            "  - " + fsutil::PathToUtf8(path.filename()) +
-                            ": " + f.obj + " not attached here, skipping " +
-                            f.ledObj);
+                            "  - " + fsutil::PathToUtf8(path.filename()) + ": " +
+                            f.StockObj() + " not attached here, skipping its " +
+                            std::to_string(integral::kEraCount - 1) + " twin(s)");
                         continue;
                     }
-                    // ⚠ A MISPLACED TWIN IS DROPPED FIRST, and without this a
-                    // reinstall could not repair one. `InsertAfter` is
-                    // idempotent on an ALREADY-ATTACHED file — it returns the
-                    // text unchanged — so an aircraft carrying a twin appended
-                    // at the end by the 2026-08-24 build would have had the
-                    // installer report success and move nothing.
-                    const int existing = acf_attach::FindObj(out, f.ledObj);
-                    if (existing >= 0 && existing != tmplIdx + 1) {
-                        int drop = 0;
-                        out = acf_attach::Detach(out, f.ledObj, drop);
-                        changed += drop;
-                        result.log.push_back(
-                            "  - " + fsutil::PathToUtf8(path.filename()) + ": " +
-                            f.ledObj + " was at row " + std::to_string(existing) +
-                            ", moving it beside " + f.obj);
+                    // ⚠ EACH TWIN GOES AFTER THE PREVIOUS ERA'S OBJECT, so the
+                    // table ends up in era order: lamps, lamps_photon_newhal,
+                    // lamps_photon_led. Inserting both after the SOURCE would put
+                    // them in reverse, which is the same class of mistake as
+                    // appending them — see below — and just as invisible, since
+                    // only one branch ever draws.
+                    for (int e = 1; e < integral::kEraCount; ++e) {
+                        const std::string& prev = f.obj[e - 1];
+                        const std::string& twin = f.obj[e];
+                        const int afterIdx = acf_attach::FindObj(out, prev);
+                        if (afterIdx < 0) break;   // previous era went missing
+                        // ⚠ A MISPLACED TWIN IS DROPPED FIRST, and without this a
+                        // reinstall could not repair one. `InsertAfter` is
+                        // idempotent on an ALREADY-ATTACHED file — it returns the
+                        // text unchanged — so an aircraft carrying a twin
+                        // appended at the end by the 2026-08-24 build would have
+                        // had the installer report success and move nothing.
+                        const int existing = acf_attach::FindObj(out, twin);
+                        if (existing >= 0 && existing != afterIdx + 1) {
+                            int drop = 0;
+                            out = acf_attach::Detach(out, twin, drop);
+                            changed += drop;
+                            result.log.push_back(
+                                "  - " + fsutil::PathToUtf8(path.filename()) +
+                                ": " + twin + " was at row " +
+                                std::to_string(existing) + ", moving it beside " +
+                                prev);
+                        }
+                        // ⚠ INSERTED BESIDE ITS SOURCE, NOT APPENDED. X-Plane
+                        // walks `_obja` in index order and neither of these OBJs
+                        // declares `ATTR_no_blend`, so a twin at the end of the
+                        // table draws after ToLiss's transparent glass instead of
+                        // with the rest of the flight deck. See
+                        // acf_attach::InsertAfter.
+                        //
+                        // ⚠ Re-resolved: the drop above renumbers, and a stale
+                        // index would insert beside the wrong object.
+                        int one = 0;
+                        out = acf_attach::InsertAfter(
+                            out, twin, acf_attach::FindObj(out, prev), one);
+                        changed += one;
                     }
-                    // ⚠ INSERTED BESIDE ITS SOURCE, NOT APPENDED. X-Plane walks
-                    // `_obja` in index order and neither of these OBJs declares
-                    // `ATTR_no_blend`, so a twin at the end of the table draws
-                    // after ToLiss's transparent glass instead of with the rest
-                    // of the flight deck. See acf_attach::InsertAfter.
-                    //
-                    // ⚠ Re-resolved: the drop above renumbers, and a stale
-                    // template index would insert beside the wrong object.
-                    int one = 0;
-                    out = acf_attach::InsertAfter(
-                        out, f.ledObj, acf_attach::FindObj(out, f.obj), one);
-                    changed += one;
                 }
             }
         } catch (const acf::AcfError& e) {

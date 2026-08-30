@@ -94,7 +94,7 @@ TEST("lit: red is identity in the shipped incandescent look") {
     // ⚠ Measured bit-exact across all 100 red values present in Gus's file. If a
     // refit ever nudges red off identity, every amber on the atlas shifts hue
     // and the fit is wrong, not the aircraft.
-    const Spec s = lit::GusIncandescent();
+    const Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     CHECK(s.palette.r.IsIdentity());
     std::uint8_t lut[256];
     lit::BuildLut(s.palette.r, lut);
@@ -104,7 +104,7 @@ TEST("lit: red is identity in the shipped incandescent look") {
 TEST("lit: the incandescent look drives stock amber to Gus's deep amber") {
     // ToLiss's washed-out placard amber, and what his file makes of it.
     Image img = Solid(8, 8, 255, 150, 89);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.promote.clear();
     lit::Apply(img, nullptr, s);
@@ -117,7 +117,7 @@ TEST("lit: the incandescent look drives stock amber to Gus's deep amber") {
 }
 
 TEST("lit: blue below the black point clips to zero, above it survives") {
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.promote.clear();
     Image low = Solid(4, 4, 255, 150, 80);
@@ -133,7 +133,7 @@ TEST("lit: alpha is roughness and is never touched outside a promote region") {
     // and left 16.7 M others byte-identical. Alpha here is a roughness map
     // (NORMAL_METALNESS), so writing it changes how the panel reflects.
     Image img = Solid(16, 16, 255, 150, 89, 37);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.promote.clear();
     lit::Apply(img, nullptr, s);
@@ -143,7 +143,7 @@ TEST("lit: alpha is roughness and is never touched outside a promote region") {
 
 TEST("lit: a preserve rect is left exactly as it was") {
     Image img = Solid(64, 64, 255, 150, 89);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.promote.clear();
     s.preserve.clear();
     // In reference-atlas coords; the image is 64 px, so this scales to the
@@ -160,7 +160,7 @@ TEST("lit: preserve rects scale with the atlas rather than being pixel-absolute"
     // ever does is a mask sitting across the middle of the texture.
     const int half = lit::kReferenceSize / 2;
     Image img = Solid(half, half, 255, 150, 89);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.promote.clear();
     lit::Apply(img, nullptr, s);
     // The first preserve rect is the upper-right legend block; its scaled
@@ -177,7 +177,7 @@ TEST("lit: a Viewport places the rects for a crop") {
     const Rect& r = lit::PreserveRects(lit::Texture::kPlacards)[0];
     const int cropX = r.x0 + 16, cropY = r.y0 + 16, edge = 64;
     Image crop = Solid(edge, edge, 255, 150, 89);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.promote.clear();
     lit::Viewport vp;
     vp.originX = cropX;
@@ -203,7 +203,7 @@ TEST("lit: promotion reads the day texture's ALPHA, not its color") {
     // ⚠ In the PEDAL DISC rect the albedo's RGB is flat white on every glyph
     // pixel — the letterform lives entirely in alpha. A luminance mask yields a
     // rectangle of ink.
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     const Rect pr = s.promote.at(0).rect;
     Image lit_ = Solid(lit::kReferenceSize, lit::kReferenceSize, 0, 0, 0, 1);
@@ -228,7 +228,7 @@ TEST("lit: a missing day texture costs the promotion and nothing else") {
     // A null albedo must never abort the recolor — the promoted label is a
     // nicety, the recolor is the product.
     Image img = Solid(256, 256, 255, 150, 89);
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     const std::size_t n = lit::Apply(img, nullptr, s);
     CHECK(n > 0);
     CHECK_EQ(static_cast<int>(At(img, 2, 2).b), 0);
@@ -242,122 +242,244 @@ TEST("lit: the stock passthrough changes nothing at all") {
     CHECK(img.pixels == before.pixels);
 }
 
-TEST("lit: BOTH profiles are defined, and a choice between them MOVES pixels") {
-    // ⚠ THE PREDICATE AND THE SPEC ARE ONE CHANGE. `ProfileIsDefined` was false
-    // for as long as LED resolved to incandescent, precisely so no surface could
-    // offer a choice that did nothing; it went true in the same commit that gave
-    // LED real numbers (2026-08-24). This case is what stops the two drifting
-    // apart again in either direction — a defined profile that changes nothing
-    // is the same lie as an undefined one that silently substitutes.
-    CHECK(lit::ProfileIsDefined(lit::Profile::kIncandescent));
-    CHECK(lit::ProfileIsDefined(lit::Profile::kLed));
+TEST("lit: EVERY profile is defined, and each pair MOVES pixels") {
+    // ⚠ THE PREDICATE AND THE SPECS ARE ONE CHANGE. `ProfileIsDefined` was false
+    // for as long as LED resolved to the halogen fit, precisely so no surface
+    // could offer a choice that did nothing. This case is what stops a predicate
+    // and a spec drifting apart again in either direction — a defined profile
+    // that changes nothing is the same lie as an undefined one that silently
+    // substitutes — and it now checks every PAIR, so a third era that resolved
+    // to one of its neighbours cannot slip through either.
+    for (int i = 0; i < lit::kProfileCount; ++i)
+        CHECK(lit::ProfileIsDefined(static_cast<lit::Profile>(i)));
 
     for (int t = 0; t < lit::kTextureCount; ++t) {
         const auto tex = static_cast<lit::Texture>(t);
-        const Spec h = lit::SpecForProfile(lit::Profile::kIncandescent, tex);
-        const Spec l = lit::SpecForProfile(lit::Profile::kLed, tex);
         // The stock colors each texture's job is about.
-        Image a = tex == lit::Texture::kKnobs ? Solid(2048, 64, 204, 130, 101)
-                                              : Solid(1024, 64, 255, 150, 89);
-        Image b = a;
-        lit::Apply(a, nullptr, h);
-        lit::Apply(b, nullptr, l);
-        CHECK(!(a.pixels == b.pixels));
+        const Image seed = tex == lit::Texture::kKnobs
+                               ? Solid(2048, 64, 204, 130, 101)
+                               : Solid(1024, 64, 255, 150, 89);
+        std::vector<Image> out;
+        for (int i = 0; i < lit::kProfileCount; ++i) {
+            Image img = seed;
+            lit::Apply(img, nullptr,
+                       lit::SpecForProfile(static_cast<lit::Profile>(i), tex));
+            out.push_back(img);
+        }
+        for (std::size_t a = 0; a < out.size(); ++a)
+            for (std::size_t b = a + 1; b < out.size(); ++b)
+                CHECK(!(out[a].pixels == out[b].pixels));
     }
 }
 
-TEST("lit: LED shares the measured curve and differs ONLY in the stack") {
-    // ⚠ This is what makes "LED" a statement about the LAMP rather than a second
-    // unrelated recolor — and it is what lets a future refit of Gus's curve
-    // reach both eras for free. If a future LED wants its own curve, that is a
-    // real decision and this case is where it gets argued.
-    for (int t = 0; t < lit::kTextureCount; ++t) {
-        const auto tex = static_cast<lit::Texture>(t);
-        const Spec h = lit::SpecForProfile(lit::Profile::kIncandescent, tex);
-        const Spec l = lit::SpecForProfile(lit::Profile::kLed, tex);
-        CHECK_EQ(h.palette.r.black, l.palette.r.black);
-        CHECK_EQ(h.palette.r.white, l.palette.r.white);
-        CHECK_EQ(h.palette.r.gamma, l.palette.r.gamma);
-        CHECK_EQ(h.palette.g.white, l.palette.g.white);
-        CHECK_EQ(h.palette.g.gamma, l.palette.g.gamma);
-        CHECK_EQ(h.palette.b.black, l.palette.b.black);
-        CHECK_EQ(h.palette.b.white, l.palette.b.white);
-        CHECK_EQ(h.palette.b.gamma, l.palette.b.gamma);
-        CHECK(l.palette.r.IsIdentity());
+TEST("lit: the two later eras move RED ONLY, and the first moves red not at all") {
+    // ⚠ THE MEASURED SIGNATURE, AND IT IS AN INVERSION. Gus's incandescent file
+    // leaves red bit-exact and moves green and blue; both files he sent on
+    // 2026-08-27 leave green and blue bit-exact and move red. Fitting either one
+    // the other way round would look plausible and be wrong, so both halves are
+    // pinned — this is the case that would fail if a refit swapped them.
+    const Spec first = lit::PlacardsFor(lit::Profile::kOldHalogen);
+    CHECK(first.palette.r.IsIdentity());
+    CHECK(!first.palette.g.IsIdentity());
+    CHECK(!first.palette.b.IsIdentity());
+
+    for (const lit::Profile p :
+         {lit::Profile::kNewHalogen, lit::Profile::kLed}) {
+        const Spec s = lit::PlacardsFor(p);
+        CHECK(!s.palette.r.IsIdentity());
+        CHECK(s.palette.g.IsIdentity());
+        CHECK(s.palette.b.IsIdentity());
     }
 }
 
-TEST("lit: the LED look is pinned by value on both textures") {
-    // ⚠ AUTHORED, NOT FITTED — there is no LED reference file, so these came
-    // from a bench session signed off by eye (2026-08-24). Pinned by value for
-    // exactly that reason: nothing else can catch them drifting.
-    const Spec p = lit::SpecForProfile(lit::Profile::kLed,
-                                       lit::Texture::kPlacards);
-    CHECK_EQ(p.palette.hsl.size(), static_cast<std::size_t>(1));
-    CHECK(std::abs(p.palette.hsl[0].hue - 5.0) < 1e-9);
-    CHECK(std::abs(p.palette.hsl[0].saturation) < 1e-9);
-    CHECK(std::abs(p.palette.hsl[0].lightness - 10.0) < 1e-9);
+TEST("lit: each era's placard amber is pinned by value") {
+    // ⚠ THE ACCEPTANCE TEST FOR ALL THREE FITS, end to end and in one place: run
+    // stock placard amber rgb(255,150,89) through the era's palette and land on
+    // the color Gus's own file carries. Old Halogen is his 2026-07 file, the
+    // other two his 2026-08-27 pair. A refit that moved any of these numbers
+    // changed the shipped cockpit, and that should be a decision rather than a
+    // diff nobody read.
+    struct Want { lit::Profile p; int r, g, b; };
+    const Want kWant[] = {
+        {lit::Profile::kOldHalogen, 255, 124, 0},
+        {lit::Profile::kNewHalogen, 219, 150, 89},
+        {lit::Profile::kLed, 176, 150, 89},
+    };
+    for (const Want& w : kWant) {
+        const Spec s = lit::PlacardsFor(w.p);
+        std::uint8_t lutR[256], lutG[256], lutB[256];
+        lit::BuildLut(s.palette.r, lutR);
+        lit::BuildLut(s.palette.g, lutG);
+        lit::BuildLut(s.palette.b, lutB);
+        std::uint8_t amber[3] = {lutR[255], lutG[150], lutB[89]};
+        lit::ApplyHslStack(s.palette.hsl, amber);
+        CHECK_EQ(static_cast<int>(amber[0]), w.r);
+        CHECK_EQ(static_cast<int>(amber[1]), w.g);
+        CHECK_EQ(static_cast<int>(amber[2]), w.b);
+    }
+}
 
-    const Spec k = lit::SpecForProfile(lit::Profile::kLed, lit::Texture::kKnobs);
-    CHECK_EQ(k.palette.hsl.size(), static_cast<std::size_t>(1));
-    CHECK(std::abs(k.palette.hsl[0].hue - 13.0) < 1e-9);
-    CHECK(std::abs(k.palette.hsl[0].saturation - (-40.0)) < 1e-9);
-    CHECK(std::abs(k.palette.hsl[0].lightness - 17.0) < 1e-9);
+TEST("lit: the placards ship on the measured curve alone, in every era") {
+    // ⚠ A STACK HERE IS A DEPARTURE FROM THE FIT. Each era's placard palette is a
+    // measurement of a file Gus sent — 95.7% within 2 levels on the first, within
+    // ONE level everywhere on the other two — and an HSL op on top is a
+    // deliberate move away from that. If this fails, the question to answer is
+    // whether the fidelity was knowingly given up.
+    for (int i = 0; i < lit::kProfileCount; ++i) {
+        const Spec s = lit::PlacardsFor(static_cast<lit::Profile>(i));
+        CHECK(s.palette.hsl.empty());
+    }
+}
 
-    // ⚠ EXACTLY ONE OP, not incandescent's plus another. The knobs incandescent spec
-    // already carries one, so an LED built by APPENDING would compound the two
-    // and an incandescent retune would silently drag LED along with it.
-    const Spec kh = lit::SpecForProfile(lit::Profile::kIncandescent,
-                                        lit::Texture::kKnobs);
-    CHECK_EQ(kh.palette.hsl.size(), static_cast<std::size_t>(1));
+TEST("lit: the PEDAL DISC ink moves with the era") {
+    // ⚠ OR IT IS THE ONE THING ON THE PEDESTAL STILL WEARING THE OLD ERA, inches
+    // from placards that changed. Gus's later files carry no PEDAL DISC at all —
+    // their lit footprint is byte-identical to stock — so there is nothing to fit
+    // here; the rule is that the era's own red ramp runs over his measured
+    // incandescent ink, which is exact because those eras ARE only a red ramp.
+    const Spec o = lit::PlacardsFor(lit::Profile::kOldHalogen);
+    const Spec n = lit::PlacardsFor(lit::Profile::kNewHalogen);
+    const Spec l = lit::PlacardsFor(lit::Profile::kLed);
+    CHECK_EQ(static_cast<int>(o.palette.ink[0]), 250);
+    CHECK_EQ(static_cast<int>(n.palette.ink[0]), 214);
+    CHECK_EQ(static_cast<int>(l.palette.ink[0]), 172);
+    // Green and blue are identity in the later eras, so his ink's own green and
+    // blue survive untouched — that is what keeps it REDDER than the amber around
+    // it, which is why it was stated rather than derived in the first place.
+    for (const Spec* s : {&o, &n, &l}) {
+        CHECK_EQ(static_cast<int>(s->palette.ink[1]), 73);
+        CHECK_EQ(static_cast<int>(s->palette.ink[2]), 32);
+    }
+    // And each later ink is exactly its era's ramp over the measured one.
+    for (const Spec* s : {&n, &l}) {
+        std::uint8_t lut[256];
+        lit::BuildLut(s->palette.r, lut);
+        CHECK_EQ(static_cast<int>(s->palette.ink[0]),
+                 static_cast<int>(lut[o.palette.ink[0]]));
+    }
+}
 
-    // The signed-off colors, end to end.
+TEST("lit: the knobs carry ONE tuning op, the same one in every era") {
+    // ⚠ IT USED TO GAIN A `saturation -40` ON LED, and that op was doing the era
+    // separation back when all three eras shared one curve. They no longer do:
+    // the era is the red ramp now, which desaturates the markings' salmon on its
+    // own, so keeping the -40 on top would compound two desaturations and take a
+    // pointer stripe to flat gray.
+    for (int i = 0; i < lit::kProfileCount; ++i) {
+        const Spec k = lit::KnobsFor(static_cast<lit::Profile>(i));
+        CHECK_EQ(k.palette.hsl.size(), static_cast<std::size_t>(1));
+        CHECK(std::abs(k.palette.hsl[0].hue - 13.0) < 1e-9);
+        CHECK(std::abs(k.palette.hsl[0].saturation) < 1e-9);
+        CHECK(std::abs(k.palette.hsl[0].lightness - 17.0) < 1e-9);
+    }
+    // The incandescent marking, pinned end to end — the one number here that was
+    // signed off by eye rather than fitted.
+    const Spec k = lit::KnobsFor(lit::Profile::kOldHalogen);
     std::uint8_t lutR[256], lutG[256], lutB[256];
-    lit::BuildLut(p.palette.r, lutR);
-    lit::BuildLut(p.palette.g, lutG);
-    lit::BuildLut(p.palette.b, lutB);
-    std::uint8_t amber[3] = {lutR[255], lutG[150], lutB[89]};
-    lit::ApplyHslStack(p.palette.hsl, amber);
-    CHECK_EQ(static_cast<int>(amber[0]), 255);
-    CHECK_EQ(static_cast<int>(amber[1]), 156);
-    CHECK_EQ(static_cast<int>(amber[2]), 26);
-
+    lit::BuildLut(k.palette.r, lutR);
+    lit::BuildLut(k.palette.g, lutG);
+    lit::BuildLut(k.palette.b, lutB);
     std::uint8_t mark[3] = {lutR[204], lutG[130], lutB[101]};
     lit::ApplyHslStack(k.palette.hsl, mark);
-    CHECK_EQ(static_cast<int>(mark[0]), 188);
-    CHECK_EQ(static_cast<int>(mark[1]), 152);
-    CHECK_EQ(static_cast<int>(mark[2]), 95);
+    CHECK_EQ(static_cast<int>(mark[0]), 219);
+    CHECK_EQ(static_cast<int>(mark[1]), 158);
+    CHECK_EQ(static_cast<int>(mark[2]), 64);
 }
 
-TEST("lit: both profiles carry the same geometry, so one serves every airframe") {
+TEST("lit: the knobs share the placards' curve, era for era") {
+    // ⚠ THE MARKINGS MUST SIT IN THE SAME ERA AS THE PLACARDS. That is the whole
+    // point of recoloring them, and the way it is guaranteed is structural:
+    // `KnobsFor` copies `PlacardPaletteFor` and only then appends its own op.
+    for (int i = 0; i < lit::kProfileCount; ++i) {
+        const auto profile = static_cast<lit::Profile>(i);
+        const Spec p = lit::PlacardsFor(profile);
+        const Spec k = lit::KnobsFor(profile);
+        CHECK_EQ(p.palette.r.black, k.palette.r.black);
+        CHECK_EQ(p.palette.r.white, k.palette.r.white);
+        CHECK_EQ(p.palette.r.gamma, k.palette.r.gamma);
+        CHECK_EQ(p.palette.g.white, k.palette.g.white);
+        CHECK_EQ(p.palette.b.white, k.palette.b.white);
+    }
+}
+
+TEST("lit: the icy-blue knob's override takes the era's red ramp") {
+    // ⚠ OR IT IS THE ONE KNOB THAT HOLDS STILL WHEN THE COCKPIT CHANGES ERA. Its
+    // override exists because that lamp is authored blue rather than pale amber,
+    // so it needs a harder blue crush — a statement about the LAMP. The era is a
+    // statement about RED, and the two compose.
+    for (int i = 0; i < lit::kProfileCount; ++i) {
+        const auto profile = static_cast<lit::Profile>(i);
+        const Spec k = lit::KnobsFor(profile);
+        bool sawOverride = false;
+        for (const lit::Region& r : k.region) {
+            if (!r.ownPalette) continue;
+            sawOverride = true;
+            CHECK_EQ(r.palette.r.black, k.palette.r.black);
+            CHECK_EQ(r.palette.r.white, k.palette.r.white);
+            CHECK_EQ(r.palette.r.gamma, k.palette.r.gamma);
+            // ...and keeps its OWN blue, which is what makes it an override.
+            CHECK(!(r.palette.b.black == k.palette.b.black &&
+                    r.palette.b.white == k.palette.b.white));
+        }
+        CHECK(sawOverride);
+    }
+    // On old halogen the composition must be a no-op: both the era's red and the
+    // fitted knob red are identity, so this rides on the measurement rather than
+    // changing it.
+    const Spec first = lit::KnobsFor(lit::Profile::kOldHalogen);
+    for (const lit::Region& r : first.region)
+        if (r.ownPalette) CHECK(r.palette.r.IsIdentity());
+}
+
+TEST("lit: every profile carries the same geometry, so one serves every airframe") {
     // The A319/A320 and A321 stock atlases hold byte-identical artwork inside
     // every preserve rect and the promote region (measured 2026-08-24, and
     // re-checked by `harvest`). That is what lets a profile be a palette only —
-    // so neither profile may carry airframe-specific geometry.
-    const Spec h = lit::SpecForProfile(lit::Profile::kIncandescent, lit::Texture::kPlacards);
-    const Spec l = lit::SpecForProfile(lit::Profile::kLed, lit::Texture::kPlacards);
-    CHECK_EQ(h.preserve.size(), lit::PreserveRects(lit::Texture::kPlacards).size());
-    CHECK_EQ(l.preserve.size(), lit::PreserveRects(lit::Texture::kPlacards).size());
-    CHECK_EQ(h.promote.size(), lit::PromoteRegions(lit::Texture::kPlacards).size());
-    for (std::size_t i = 0; i < h.preserve.size(); ++i) {
-        CHECK_EQ(h.preserve[i].x0, l.preserve[i].x0);
-        CHECK_EQ(h.preserve[i].y1, l.preserve[i].y1);
+    // so no profile may carry airframe-specific geometry.
+    for (int t = 0; t < lit::kTextureCount; ++t) {
+        const auto tex = static_cast<lit::Texture>(t);
+        const Spec ref = lit::SpecForProfile(lit::Profile::kOldHalogen, tex);
+        CHECK_EQ(ref.preserve.size(), lit::PreserveRects(tex).size());
+        CHECK_EQ(ref.promote.size(), lit::PromoteRegions(tex).size());
+        CHECK_EQ(ref.blackout.size(), lit::BlackoutRects(tex).size());
+        for (int i = 1; i < lit::kProfileCount; ++i) {
+            const Spec s = lit::SpecForProfile(static_cast<lit::Profile>(i), tex);
+            CHECK_EQ(s.preserve.size(), ref.preserve.size());
+            CHECK_EQ(s.promote.size(), ref.promote.size());
+            CHECK_EQ(s.blackout.size(), ref.blackout.size());
+            CHECK_EQ(s.region.size(), ref.region.size());
+            CHECK_EQ(s.referenceSize, ref.referenceSize);
+            for (std::size_t j = 0; j < ref.preserve.size(); ++j) {
+                CHECK_EQ(s.preserve[j].x0, ref.preserve[j].x0);
+                CHECK_EQ(s.preserve[j].y1, ref.preserve[j].y1);
+            }
+        }
     }
 }
 
-// ⚠ "Incandescent", not "Halogen" — pinned by value because this string is what
-// the sim's Integral Lights row offers, and it has to stay distinct from the
-// "Old Halogen"/"New Halogen" labels on the five interior rows beside it. See
-// the enum's comment for why the superset is the honest word here.
-TEST("lit: every profile has a name") {
-    CHECK_EQ(std::string(lit::ProfileName(lit::Profile::kIncandescent)),
-             std::string("Incandescent"));
+// ⚠ THE GRID'S OWN WORDS, pinned by value: this string is what the sim's Integral
+// Lights row offers, and the row sits in a grid of five whose every other row
+// says exactly these three things. It read "Incandescent" for the three days the
+// row was two-valued and one value had to cover both halogen eras.
+TEST("lit: every profile has a name and a stable key") {
+    CHECK_EQ(std::string(lit::ProfileName(lit::Profile::kOldHalogen)),
+             std::string("Old Halogen"));
+    CHECK_EQ(std::string(lit::ProfileName(lit::Profile::kNewHalogen)),
+             std::string("New Halogen"));
     CHECK_EQ(std::string(lit::ProfileName(lit::Profile::kLed)),
              std::string("LED"));
+    for (int i = 0; i < lit::kProfileCount; ++i) {
+        const auto p = static_cast<lit::Profile>(i);
+        lit::Profile back = lit::Profile::kLed;
+        CHECK(lit::ProfileFromKey(lit::ProfileKey(p), back));
+        CHECK(back == p);
+    }
+    lit::Profile ignored = lit::Profile::kOldHalogen;
+    CHECK(!lit::ProfileFromKey("incandescent", ignored));
 }
 
 TEST("lit: a spec survives a JSON round trip") {
-    const Spec original = lit::GusIncandescent();
+    const Spec original = lit::PlacardsFor(lit::Profile::kOldHalogen);
     Spec back;
     std::string err;
     CHECK(lit::FromJson(lit::ToJson(original), back, err));
@@ -488,7 +610,7 @@ TEST("lit: an empty region means the whole atlas, a filled one confines it") {
     // ⚠ The placards recolor everything minus exceptions; the knobs recolor one
     // 30 px knob and must not touch the other 4.19 M pixels. If "empty" ever
     // stopped meaning "everywhere", every placard would go stock in silence.
-    Spec whole = lit::GusIncandescent();
+    Spec whole = lit::PlacardsFor(lit::Profile::kOldHalogen);
     whole.preserve.clear();
     whole.promote.clear();
     CHECK(whole.region.empty());
@@ -533,8 +655,8 @@ TEST("lit: the knobs markings take the SAME palette the placards do") {
     // from the placards beside them; they were added to the spec so one era
     // palette moves both textures together. If these two ever drift apart,
     // tuning the placards would silently stop reaching the markings.
-    const Spec p = lit::GusIncandescent();
-    const Spec k = lit::GusKnobs();
+    const Spec p = lit::PlacardsFor(lit::Profile::kOldHalogen);
+    const Spec k = lit::KnobsFor(lit::Profile::kOldHalogen);
     CHECK_EQ(k.palette.r.black, p.palette.r.black);
     CHECK_EQ(k.palette.g.white, p.palette.g.white);
     CHECK_EQ(k.palette.g.gamma, p.palette.g.gamma);
@@ -548,7 +670,7 @@ TEST("lit: exactly one knobs region carries its own curve, and it is the knob") 
     // that curve alone leaves it blue. Everything else on this atlas must follow
     // the palette, so a second override appearing here means something was
     // special-cased that should not have been.
-    const Spec k = lit::GusKnobs();
+    const Spec k = lit::KnobsFor(lit::Profile::kOldHalogen);
     std::size_t own = 0, first = 0;
     for (std::size_t i = 0; i < k.region.size(); ++i)
         if (k.region[i].ownPalette) {
@@ -594,7 +716,7 @@ TEST("lit: switching profile changes the blue knob too, not just its neighbours"
     // rather than the mechanism is what keeps this case honest across that kind
     // of redesign; the old form would have gone green on a knob that was in fact
     // frozen.
-    const Spec h = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec h = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kKnobs);
     const Spec l = lit::SpecForProfile(lit::Profile::kLed, lit::Texture::kKnobs);
     CHECK(h.region[0].ownPalette);
@@ -623,11 +745,11 @@ TEST("lit: the knobs spec is authored against its own 2048 atlas") {
     // ⚠ The reference size travels in the SPEC. Scaling a 2048-authored rect as
     // though it were 4096 would put every knobs region on a quarter of the
     // atlas — geometry that still "works", silently, on the wrong pixels.
-    const Spec k = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec k = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kKnobs);
     CHECK_EQ(k.referenceSize, 2048);
     CHECK_EQ(lit::TextureReferenceSize(lit::Texture::kKnobs), 2048);
-    const Spec p = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec p = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kPlacards);
     CHECK_EQ(p.referenceSize, lit::kReferenceSize);
     // And the two carry genuinely different geometry.
@@ -641,7 +763,7 @@ TEST("lit: the knobs spec is authored against its own 2048 atlas") {
 TEST("lit: red stays bit-exact identity on the knobs too") {
     // The same signature as the placard fit, and the main reason to believe it
     // is the same author doing the same kind of edit.
-    CHECK(lit::GusKnobs().palette.r.IsIdentity());
+    CHECK(lit::KnobsFor(lit::Profile::kOldHalogen).palette.r.IsIdentity());
 }
 
 TEST("lit: passthrough drops the blackouts, or 'stock' would have holes in it") {
@@ -676,7 +798,7 @@ TEST("lit: every texture has a name, a stable key and its two file names") {
 TEST("lit: a knobs spec survives JSON with its size and both new rect lists") {
     // ⚠ referenceSize is part of the recipe. A spec that lost it would come back
     // as a 4096 one and land every rect in the wrong place.
-    const Spec original = lit::GusKnobs();
+    const Spec original = lit::KnobsFor(lit::Profile::kOldHalogen);
     Spec back;
     std::string err;
     CHECK(lit::FromJson(lit::ToJson(original), back, err));
@@ -745,7 +867,7 @@ TEST("lit: the placards ship on the measured curve alone, with NO stack") {
     // takes placard amber from rgb(255,124,0) to rgb(255,192,43). If this case
     // ever fails, the question to ask is whether the fidelity number was
     // knowingly given up, not whether the test is stale.
-    const Spec s = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec s = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kPlacards);
     CHECK(s.palette.hsl.empty());
     CHECK(lit::StockPassthrough(lit::Texture::kPlacards).palette.hsl.empty());
@@ -762,7 +884,7 @@ TEST("lit: the knobs ship the shared curve PLUS exactly one tuning op") {
     // index markings are Photon's extension, so there is no Gus file to measure
     // them against. Pinned by value so a retune is a visible diff and not a
     // drift. hue +13 / brightness +17.
-    const Spec s = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec s = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kKnobs);
     CHECK_EQ(s.palette.hsl.size(), static_cast<std::size_t>(1));
     const lit::HslOp& op = s.palette.hsl[0];
@@ -777,7 +899,7 @@ TEST("lit: the knobs ship the shared curve PLUS exactly one tuning op") {
     // markings in the same era as the placards; the stack is only where "a
     // pointer stripe is not a placard" gets said. Diverging on both would make
     // this a second look rather than a tuned one.
-    const Spec p = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec p = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kPlacards);
     CHECK_EQ(s.palette.g.white, p.palette.g.white);
     CHECK_EQ(s.palette.g.gamma, p.palette.g.gamma);
@@ -805,7 +927,7 @@ TEST("lit: the knobs tuning reaches the icy-blue knob rather than skipping it") 
     // The override states no stack of its own, so it inherits — see the
     // inherit rule. Left behind it would be the one lamp on the panel still on
     // the untuned look, which is the failure the whole rule exists for.
-    const Spec s = lit::SpecForProfile(lit::Profile::kIncandescent,
+    const Spec s = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                        lit::Texture::kKnobs);
     bool sawOverride = false;
     for (const auto& rg : s.region) {
@@ -835,7 +957,7 @@ TEST("lit: an op at zero is SKIPPED, not computed, so it cannot cost a byte") {
     // ⚠ rgb -> hsl -> rgb through doubles is not guaranteed to land back on the
     // same byte. That is the entire reason identity ops are skipped rather than
     // run, and this is the case that would catch it being "simplified" away.
-    Spec plain = lit::GusIncandescent();
+    Spec plain = lit::PlacardsFor(lit::Profile::kOldHalogen);
     plain.preserve.clear();
     plain.promote.clear();
     Spec zeroed = plain;
@@ -900,7 +1022,7 @@ TEST("lit: BLACK STAYS BLACK under every op, which the whole atlas rests on") {
         }
     }
     // And through the real pipeline, on the real background color.
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.promote.clear();
     lit::HslOp op;
@@ -980,7 +1102,7 @@ TEST("lit: colorize forces one hue and is never treated as identity") {
 TEST("lit: the stack runs AFTER the curve, not instead of it or before it") {
     // Order is the whole contract. Computing it by hand — curve first, then the
     // stack on the result — must equal what Apply does to the same pixel.
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.promote.clear();
     lit::HslOp op;
@@ -1025,7 +1147,7 @@ TEST("lit: the promote ink travels through the stack with everything else") {
     // ⚠ PEDAL DISC is painted artwork sitting among recolored artwork. An ink
     // that held its own hue through a hue shift would be the one thing on the
     // pedestal still wearing the old era, inches from placards that moved.
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.region.clear();
     s.promote.clear();
@@ -1049,7 +1171,7 @@ TEST("lit: the promote ink travels through the stack with everything else") {
 }
 
 TEST("lit: a stack survives JSON with its kind, its switch and its numbers") {
-    Spec s = lit::GusKnobs();
+    Spec s = lit::KnobsFor(lit::Profile::kOldHalogen);
     lit::HslOp a;
     a.hue = -12.5;
     a.saturation = 33.0;
@@ -1112,7 +1234,7 @@ TEST("lit: an unrecognized op kind falls back to adjust, never to colorize") {
 }
 
 TEST("lit: a region's stack applies to it and to nothing else") {
-    Spec s = lit::GusKnobs();
+    Spec s = lit::KnobsFor(lit::Profile::kOldHalogen);
     s.blackout.clear();
     s.preserve.clear();
     // Two regions far apart, one of them carrying an override with a stack.
@@ -1147,7 +1269,7 @@ TEST("lit: an override region inherits the spec's stack when it states none") {
     // it is a different look — so a tuning move has to reach it, or it is the
     // one lamp on the panel that holds still while everything around it warms.
     // Same rule the studio's profile copy follows.
-    Spec s = lit::GusKnobs();
+    Spec s = lit::KnobsFor(lit::Profile::kOldHalogen);
     s.blackout.clear();
     s.preserve.clear();
     s.referenceSize = 64;
@@ -1186,7 +1308,7 @@ TEST("lit: an override region inherits the spec's stack when it states none") {
 TEST("lit: a blackout is not reachable by the stack, however bright it goes") {
     // Blackout means "this must not glow" and it wins over everything — a
     // +100 brightness op must not resurrect the loudspeaker.
-    Spec s = lit::GusKnobs();
+    Spec s = lit::KnobsFor(lit::Profile::kOldHalogen);
     s.preserve.clear();
     s.region.clear();
     s.blackout = {Rect{0, 0, 32, 32}};
@@ -1205,7 +1327,7 @@ TEST("lit: a blackout is not reachable by the stack, however bright it goes") {
 }
 
 TEST("lit: a preserve rect is not reachable by the stack either") {
-    Spec s = lit::GusIncandescent();
+    Spec s = lit::PlacardsFor(lit::Profile::kOldHalogen);
     s.promote.clear();
     s.preserve = {Rect{0, 0, 32, 32}};
     s.referenceSize = 64;
@@ -1296,22 +1418,28 @@ lit::Image FlatAmber(int side) {
 
 }  // namespace
 
-TEST("lit: stock reads as stock, and BOTH eras read as ours") {
-    // ⚠ THE SECOND HALF IS THE ONE THAT BROKE. The threshold was tuned when
-    // incandescent was the only look there was, so LED — which leaves blue at
-    // 26/255 of red where incandescent leaves 0 — read as STOCK. That is the
-    // expensive direction: a caller that believes our output is stock derives
-    // from it, and the curve compounds silently, because blue is already clipped
-    // and the second pass looks like a no-op.
+TEST("lit: stock reads as stock, and EVERY era reads as ours") {
+    // ⚠ THIS IS THE CASE THAT HAS BROKEN TWICE, BOTH TIMES THE SAME WAY: a new
+    // era whose output the test could not see, read back as STOCK. First LED in
+    // 2026-08-24 (blue at 26/255 of red where the halogen fit leaves 0, under a
+    // threshold tuned to the latter). Then both later eras in 2026-08-27, far
+    // more sharply — they do not touch blue at all and pull RED down, so their
+    // blue-against-red ratio comes out ABOVE stock's, and no threshold on that
+    // one statistic can ever see them.
+    //
+    // ⚠ IT IS THE EXPENSIVE DIRECTION. A caller that believes our output is stock
+    // derives from it, and the ramp compounds SILENTLY — the second pass looks
+    // like a no-op while freezing the result in as though it were stock. Add a
+    // fourth era and this case is the one to run first.
     for (int t = 0; t < lit::kTextureCount; ++t) {
         const auto texture = static_cast<lit::Texture>(t);
         const lit::Image stock = FlatAmber(512);
         CHECK(!lit::LooksRecolored(stock, texture));
 
-        for (const lit::Profile p : {lit::Profile::kIncandescent,
-                                     lit::Profile::kLed}) {
+        for (int i = 0; i < lit::kProfileCount; ++i) {
             lit::Image work = stock;
-            lit::Apply(work, nullptr, lit::SpecForProfile(p, texture));
+            lit::Apply(work, nullptr,
+                       lit::SpecForProfile(static_cast<lit::Profile>(i), texture));
             CHECK(lit::LooksRecolored(work, texture));
         }
     }

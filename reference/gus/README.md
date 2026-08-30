@@ -41,6 +41,31 @@ tablet lights carry old-halogen orange `1.00 0.37 0.16`, while every comparable
 small directed lamp goes warm white. Treated as an oversight and normalized to
 `1.00 0.89 0.81` in the DSL. Everything else is transcribed verbatim.
 
+### `new-a319/` — the two later integral-lighting eras (2026-08-27)
+
+`new-halogen.png` and `led.png`, both 4096² — finished `text_LIT.png` variants for the two
+cockpit eras after his original. They are the **input** to `lit::PlacardsFor`, not build
+output; the installer derives the shipped atlas per aircraft rather than copying either
+file (`docs/lit_recolor.md` §8). There is no `knobs_LIT.png` counterpart, so the knobs
+follow the placards' curve, era for era.
+
+Both are derived from **ToLiss stock**, not from his own earlier file: their lit footprint
+is byte-identical to stock, so neither carries the `PEDAL DISC` artwork he hand-added.
+
+⚠ **HIS LATER EDIT IS THE EXACT INVERSE OF HIS FIRST.** The original moves green and blue
+and leaves **red** bit-exact; both of these leave **green and blue** bit-exact and move
+**red**, and nothing else — with zero ambiguity across all 28,540 distinct stock colors.
+Photon reproduces each with a single red Levels curve, to within one level everywhere
+(99.86% and 99.65% bit-exact).
+
+⚠ **THREE THINGS IN THEM ARE DELIBERATELY NOT REPRODUCED**, all recorded in
+`docs/lit_recolor.md` §8 with their measurements: they carry **no regional mask** (so the
+signal-coloured lamp legends he masked in his first file would be recoloured here — the red
+`PUSH` dimmed, `EVAC` browned, the boxed amber `DISCH` turned yellow-green), **no
+`PEDAL DISC`**, and a **global alpha compression** (max 255 → 142) that is byte-identical in
+both files and therefore belongs to no era. Photon keeps its own mask and promote region and
+leaves alpha alone. If any of those was intended, it is worth raising with him.
+
 ### `textures/` — the canonical set (11 files, ~57 MB)
 
 Resolves the per-package packaging drift (decision #4) into one union set:

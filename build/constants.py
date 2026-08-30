@@ -65,9 +65,13 @@ INTERIOR_AIRFRAMES = ("a319", "a320", "a321")
 # come back. They are no longer SHIPPED at all: the installer DERIVES them, once
 # per era, from whatever stock file the aircraft actually has
 # (core/lit_recolor + core/patch_integral), which is what lets the user switch
-# Incandescent/LED in the sim and what stopped the A321 wearing the A319/A320
-# trim-scale artwork. Putting them back here would stage two 8 MB files the
-# installer never reads and grow every bundle by 24 MB.
+# era in the sim and what stopped the A321 wearing the A319/A320 trim-scale
+# artwork. Putting them back here would stage two 8 MB files the installer never
+# reads and grow every bundle by 24 MB.
+#
+# ⚠ AND THE COST OF PUTTING THEM BACK ROSE ON 2026-08-27, when the era count went
+# from two to three: shipping them would now mean SIX atlases rather than four,
+# and they would still be the A319/A320 artwork on every airframe.
 #
 # ⚠ Pinned against core/constants.cpp by tests/test_version.py, so a change on
 # either side without the other fails the suite rather than shipping a bundle

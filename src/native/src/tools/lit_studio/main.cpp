@@ -62,7 +62,7 @@ void Usage() {
 
 struct Args {
     std::string cmd;
-    std::string lit, albedo, out, a, b, spec, preset = "incandescent", aircraft;
+    std::string lit, albedo, out, a, b, spec, preset = "old-halogen", aircraft;
     std::string xplane, reference, airframe;
     // Which cockpit texture the single-file commands work on. `apply`/`revert`
     // always do every texture; this narrows `recolor`, `compare --rects` and the
@@ -213,37 +213,45 @@ bool SpecFor(const Args& args, photon::lit::Texture texture, Spec& spec) {
         }
         return true;
     }
-    // ⚠ `halogen` and `gus` STAY as aliases. The profile was called Halogen
-    // until 2026-08-24 and the name is in saved scripts, shell history and the
-    // spec JSONs of every tuning session so far; the rename is about what the
-    // *user* is offered in the sim, and breaking a dev tool's spelling buys
-    // nothing. `incandescent` is the canonical one and the only one advertised.
+    // ⚠ OLD SPELLINGS STAY AS ALIASES. The first era has been called `halogen`,
+    // `gus` and `incandescent` in turn — the names are in saved scripts, shell
+    // history and the spec JSONs of every tuning session so far, and each rename
+    // was about what the *user* is offered in the sim, not about what a dev tool
+    // accepts. `old-halogen` is the canonical one and the only one advertised.
+    if (args.preset == "stock") {
+        spec = photon::lit::StockPassthrough(texture);
+        return true;
+    }
     if (args.preset == "incandescent" || args.preset == "halogen" ||
         args.preset == "gus") {
-        spec = photon::lit::SpecForProfile(photon::lit::Profile::kIncandescent, texture);
-    } else if (args.preset == "led") {
-        spec = photon::lit::SpecForProfile(photon::lit::Profile::kLed, texture);
-        if (!photon::lit::ProfileIsDefined(photon::lit::Profile::kLed) &&
-            !args.quiet) {
-            // ⚠ Kept, though it is unreachable while both profiles are defined.
+        spec = photon::lit::SpecForProfile(photon::lit::Profile::kOldHalogen,
+                                           texture);
+        return true;
+    }
+    // The canonical keys, straight off the enum — so a fourth era needs no line
+    // here.
+    photon::lit::Profile profile = photon::lit::Profile::kOldHalogen;
+    if (photon::lit::ProfileFromKey(args.preset, profile)) {
+        spec = photon::lit::SpecForProfile(profile, texture);
+        if (!photon::lit::ProfileIsDefined(profile) && !args.quiet) {
+            // ⚠ Kept, though it is unreachable while every profile is defined.
             // It is the guard for the state this tool spent weeks in, and the
             // cost of a branch that never fires is nothing against a silent
             // substitution reading as the profile having been applied.
             std::fprintf(stderr,
-                         "note: the LED profile is not defined yet - using "
-                         "Incandescent\n");
+                         "note: the %s profile is not defined yet - using "
+                         "Old Halogen\n",
+                         photon::lit::ProfileName(profile));
         }
-    } else if (args.preset == "stock") {
-        spec = photon::lit::StockPassthrough(texture);
-    } else {
-        // ⚠ `led-seed` is GONE (2026-08-24). It was scaffolding for defining the
-        // LED look, and now that `led` IS that look a second, untuned LED beside
-        // it is a trap rather than a convenience.
-        std::fprintf(stderr, "unknown preset '%s' (incandescent|led|stock)\n",
-                     args.preset.c_str());
-        return false;
+        return true;
     }
-    return true;
+    // ⚠ `led-seed` is GONE (2026-08-24). It was scaffolding for defining the
+    // LED look, and now that `led` IS that look a second, untuned LED beside
+    // it is a trap rather than a convenience.
+    std::fprintf(stderr,
+                 "unknown preset '%s' (old-halogen|new-halogen|led|stock)\n",
+                 args.preset.c_str());
+    return false;
 }
 
 int CmdHarvest(const Args& args, const char* argv0) {

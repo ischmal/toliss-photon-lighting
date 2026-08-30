@@ -655,7 +655,7 @@ bool ScreenNeo(const std::string& xplaneRoot) {
     mo.index = n.Detected() ? 0 : 1;
     const int choice =
         tui::Menu(kStageConfigure,
-                  "Step 3e.  (Optional) Compensate for a spill-dimming lighting mod?",
+                  "Step 3e.  (Optional) Compensate for a lighting mod?",
                   body, options, mo);
     LogLine(std::string("neo opt-in: ") + (choice == 0 ? "true" : "false"));
     return choice == 0;

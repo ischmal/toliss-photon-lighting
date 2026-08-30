@@ -182,40 +182,98 @@ constexpr std::size_t kKnobsRegionCount =
 // and running it all the way down to placard amber lost it against the knob.
 //
 // ⚠ IT LIVES ON THE KNOBS PALETTE ALONE AND THE PLACARDS DO NOT GET IT. The two
-// textures still share the CURVE — that is what `GusKnobs` copying
-// `GusIncandescent().palette` is for, and it is what stops the markings reading as a
-// different era — but the same stack over the placards takes their amber from
-// rgb(255,124,0) to rgb(255,192,43), which is a long way off the file that
-// measures 95.7% within 2 levels of Gus. Sharing the curve and diverging on the
-// tuning is the whole reason the two are separate things.
+// textures share whatever curve the ERA states — that is what `KnobsFor` copying
+// `PlacardsFor(profile).palette` is for, and it is what stops the markings
+// reading as a different era from the placards beside them — but the same stack
+// over the placards takes their incandescent amber from rgb(255,124,0) to
+// rgb(255,192,43), which is a long way off the file that measures 95.7% within 2
+// levels of Gus. Sharing the curve and diverging on the tuning is the whole
+// reason the two are separate things.
+//
+// ⚠ AND IT IS THE SAME OP IN ALL THREE ERAS SINCE 2026-08-27. It used to gain a
+// `saturation -40` on LED, which was doing the era separation back when all three
+// eras shared one curve. They no longer do: Gus's own later files separate the
+// eras by pulling RED down, which desaturates the markings' salmon on its own
+// (stock rgb(204,130,101) -> rgb(140,130,101) at LED), so keeping the -40 on top
+// would compound two desaturations and take a pointer stripe to flat gray. The
+// op is now one statement about knobs-versus-placards and nothing about era.
 constexpr double kKnobsTuneHue = 13.0;
 constexpr double kKnobsTuneBrightness = 17.0;
 
-// --- the LED era -------------------------------------------------------------
-// ⚠ AUTHORED, NOT FITTED. There is no LED reference file anywhere — these were
-// tuned in the bench against the cockpit and signed off by eye (2026-08-24), so
-// unlike every other number in this file they are a judgement and a retune is
-// the honest way to change them, not a refit.
+// --- the two later eras ------------------------------------------------------
+// ⚠ MEASURED, LIKE THE INCANDESCENT FIT ABOVE — AND MEASURED OFF A FILE THAT DOES
+// SOMETHING COMPLETELY DIFFERENT. Gus sent finished `text_LIT.png` variants for
+// both later eras on 2026-08-27 (`reference/gus/new-a319/`), and fitting them
+// produced a result worth stating plainly, because it reverses what this file
+// said for the three days LED was an authored look:
 //
-// ⚠ THE CURVE IS THE SAME MEASURED ONE; ONLY THE STACK DIFFERS. That is what
-// makes LED a statement about the lamp rather than a second unrelated recolor,
-// and it is why a future refit of Gus's curve reaches both eras for free.
+//   * His INCANDESCENT file leaves RED bit-exact and moves green and blue.
+//   * Both LATER files leave GREEN AND BLUE bit-exact and move RED, and nothing
+//     else. Over all 16.7 M pixels of the 4096 atlas the stock -> new mapping has
+//     ZERO ambiguity: 28,540 distinct stock colors map to 28,540 outputs, and each
+//     channel is a pure function of its own input.
 //
-// Placards go warmer and up: rgb(255,124,0) -> rgb(255,156,26), which reads as
-// the cooler, less deeply saturated wash an LED backlight gives a placard.
-constexpr double kLedPlacardHue = 5.0;
-constexpr double kLedPlacardBrightness = 10.0;
-// ⚠ The knobs keep the INCANDESCENT hue and brightness and change only SATURATION.
-// The index markings are white artwork over a lit panel, so what separates an
-// LED marking from an incandescent one is how much color the lamp pushes into it,
-// where that color sits: rgb(219,158,64) -> rgb(188,152,95).
-constexpr double kLedKnobsHue = kKnobsTuneHue;
-constexpr double kLedKnobsSaturation = -40.0;
-constexpr double kLedKnobsBrightness = kKnobsTuneBrightness;
+// So the three eras do NOT share one curve with a stack on top. Each carries its
+// own, and the LED HSL stack that stood here until 2026-08-27 is gone — the era
+// separation moved into the curve, which is where Gus put it.
+//
+// Fitted to within ONE level everywhere (99.86% and 99.65% bit-exact, max error
+// 1), which is a tighter fit than the incandescent one and unsurprising: a
+// single-channel near-linear ramp is a much smaller thing to fit than three
+// independent Levels curves.
+//
+// ⚠ WHAT WE DELIBERATELY DO **NOT** REPRODUCE, and why the shipped files are not
+// byte-identical to his:
+//
+//   1. HIS FILES CARRY NO REGIONAL MASK. Inside `kPreserveTable` his
+//      incandescent file changed 717 of 283,914 lit pixels (0.3%); these change
+//      264,587 (93.2%). That runs the red ramp over the annunciator and warning
+//      legends — the red `PUSH` / `ENG 1 2` / `PULL UP` go visibly dimmer, `EVAC`
+//      goes brown and the boxed amber `DISCH` turns yellow-green — which is
+//      exactly what the preserve table exists to prevent and what he himself
+//      masked in the era he masked. We keep the mask (decided 2026-08-27).
+//   2. HIS FILES CARRY NO `PEDAL DISC`. Their lit footprint is byte-identical to
+//      stock, so they are derived from stock rather than from his own earlier
+//      file, and the artwork he hand-added is simply not in them. We keep the
+//      promote region, for the same reason: it is his work, and dropping it in
+//      two eras of three would make the pedestal placard vanish on two settings.
+//   3. THEY ALSO COMPRESS THE ALPHA CHANNEL globally (max 255 -> 142, mean 37.7
+//      -> 19.6) — IDENTICALLY in both files, so it is not part of either era's
+//      look. Alpha is roughness here (see the header), `Apply` writes it only
+//      inside a promote region, and a change that belongs to no era has no era
+//      to ride on. Not reproduced.
+//
+// New halogen: rgb(255,150,89) -> rgb(219,150,89).
+constexpr double kNewHalRedBlack = 1.40;
+constexpr double kNewHalRedWhite = 296.75;
+constexpr double kNewHalRedGamma = 1.004;
+// LED: rgb(255,150,89) -> rgb(176,150,89).
+constexpr double kLedRedBlack = 4.30;
+constexpr double kLedRedWhite = 366.75;
+constexpr double kLedRedGamma = 1.010;
 
-// Fitted over that knob's 745 pixels. Red came out bit-exact identity again —
-// the same signature as the placard fit, which is the main reason to believe
-// this is the same author doing the same kind of edit.
+// The `PEDAL DISC` ink, per era. ⚠ IT HAS TO MOVE WITH THE ERA or it is the one
+// thing on the pedestal still wearing the filament look, inches from placards
+// that changed — the rule `Palette::ink` already states for the stack.
+//
+// ⚠ AND THE RULE THAT MOVES IT IS THE ERA'S OWN RED RAMP, applied to Gus's
+// measured old-halogen ink. That is exact rather than approximate here: both
+// later eras ARE nothing but a red reduction, so "his ink, one era later" is
+// literally his ink with that ramp run over its red. Green and blue are identity
+// in both, so they do not move — which is also why this is stated as three
+// constants rather than derived from an invented stock pre-image. Gus's file has
+// no PEDAL DISC to measure, so there is nothing here to fit against.
+constexpr std::uint8_t kInkOldHalogen[3] = {250, 73, 32};   // Gus's, measured
+constexpr std::uint8_t kInkNewHalogen[3] = {214, 73, 32};
+constexpr std::uint8_t kInkLed[3] = {172, 73, 32};
+
+// The icy-blue knob's own curve, fitted over its 745 pixels. Red came out
+// bit-exact identity again — the same signature as the placard fit, which is the
+// main reason to believe this is the same author doing the same kind of edit.
+// ⚠ ONLY GREEN AND BLUE ARE USED. `KnobsFor` overwrites this override's RED with
+// the era's ramp, because "authored blue rather than amber" is a statement about
+// the lamp and the era is a statement about red. On old halogen the two are the
+// same thing — both identity — so that composition changes nothing there.
 constexpr double kKnobGreenBlack = 99.5;
 constexpr double kKnobGreenWhite = 259.5;
 constexpr double kKnobGreenGamma = 1.34;
@@ -852,36 +910,84 @@ void FillGeometry(Spec& s, Texture texture) {
 
 }  // namespace
 
-Spec GusIncandescent() {
+// ⚠ ONE FUNCTION PER TEXTURE, TAKING THE ERA — not one function per era. The
+// three eras differ ONLY in the palette, and every one of them wants the same
+// preserve rects, the same regions, the same blackouts and the same promote
+// geometry. Splitting by era instead would put three copies of that geometry in
+// the file and let them drift, which is what `lit: every profile carries the same
+// geometry` exists to catch.
+Palette PlacardPaletteFor(Profile profile) {
+    Palette p;
+    switch (profile) {
+        case Profile::kNewHalogen:
+            // Green and blue bit-exact identity — see the constants above.
+            p.r = Curve{kNewHalRedBlack, kNewHalRedWhite, kNewHalRedGamma};
+            p.ink[0] = kInkNewHalogen[0];
+            p.ink[1] = kInkNewHalogen[1];
+            p.ink[2] = kInkNewHalogen[2];
+            return p;
+        case Profile::kLed:
+            p.r = Curve{kLedRedBlack, kLedRedWhite, kLedRedGamma};
+            p.ink[0] = kInkLed[0];
+            p.ink[1] = kInkLed[1];
+            p.ink[2] = kInkLed[2];
+            return p;
+        case Profile::kOldHalogen:
+            break;
+    }
+    // Old halogen — red identity, measured bit-exact. Spelled as the default
+    // Curve rather than as three fitted numbers so a future refit cannot nudge
+    // it off identity by rounding.
+    p.r = Curve{};
+    p.g = Curve{0.0, kGusGreenWhite, kGusGreenGamma};
+    p.b = Curve{kGusBlueBlack, kGusBlueWhite, kGusBlueGamma};
+    p.ink[0] = kInkOldHalogen[0];
+    p.ink[1] = kInkOldHalogen[1];
+    p.ink[2] = kInkOldHalogen[2];
+    return p;
+}
+
+Spec PlacardsFor(Profile profile) {
     Spec s;
-    s.palette.r = Curve{};  // identity, measured bit-exact
-    s.palette.g = Curve{0.0, kGusGreenWhite, kGusGreenGamma};
-    s.palette.b = Curve{kGusBlueBlack, kGusBlueWhite, kGusBlueGamma};
-    s.palette.ink[0] = 250;
-    s.palette.ink[1] = 73;
-    s.palette.ink[2] = 32;
+    s.palette = PlacardPaletteFor(profile);
     FillGeometry(s, Texture::kPlacards);
     return s;
 }
 
-Spec GusKnobs() {
+Spec KnobsFor(Profile profile) {
     Spec s;
-    // ⚠ THE PLACARD PALETTE, DELIBERATELY. Ten of the eleven regions here are
-    // index markings that must take the same transformation the placards get —
-    // that is the entire point of recoloring them — so tuning the era look moves
-    // both textures together. Only the icy-blue knob departs, and it says so on
-    // its own region.
-    s.palette = GusIncandescent().palette;
-    // ⚠ AND THEN DIVERGES, BY EXACTLY ONE OP. See kKnobsTuneHue: the curve is
-    // shared so the markings sit in the same era as the placards, and the stack
-    // is where "but a pointer stripe is not a placard" gets said. Copying the
-    // palette first and appending after is the order that keeps a future placard
-    // retune flowing through to here.
+    // ⚠ THE PLACARD PALETTE OF THE SAME ERA, DELIBERATELY. Ten of the eleven
+    // regions here are index markings that must take the same transformation the
+    // placards get — that is the entire point of recoloring them — so an era
+    // change moves both textures together. Only the icy-blue knob departs, and it
+    // says so on its own region.
+    s.palette = PlacardPaletteFor(profile);
+    // ⚠ AND THEN DIVERGES, BY EXACTLY ONE OP, IN EVERY ERA. See kKnobsTuneHue:
+    // the curve is shared so the markings sit in the same era as the placards,
+    // and the stack is where "but a pointer stripe is not a placard" gets said.
+    // Copying the palette first and appending after is the order that keeps a
+    // future placard retune flowing through to here.
     HslOp warm;
     warm.hue = kKnobsTuneHue;
     warm.lightness = kKnobsTuneBrightness;
     s.palette.hsl.push_back(warm);
     FillGeometry(s, Texture::kKnobs);
+
+    // ⚠ THE ICY-BLUE KNOB'S OVERRIDE TAKES THE ERA'S RED RAMP AND KEEPS ITS OWN
+    // GREEN AND BLUE. Its override exists because that one lamp is authored blue
+    // rather than pale amber, so it needs a harder blue crush to land where its
+    // neighbours land — that is a statement about the LAMP. The era, since
+    // 2026-08-27, is a statement about RED. Leaving the override's red at the
+    // fitted identity would make this the one knob on the panel that held still
+    // when the cockpit changed era, which is precisely the failure `Region`'s own
+    // comment warns about for the stack.
+    //
+    // ⚠ BIT-EXACT UNCHANGED ON OLD HALOGEN, because both that era's red ramp and
+    // the fitted knob red are identity — so this composes without touching the
+    // measurement it rides on.
+    for (Region& r : s.region) {
+        if (r.ownPalette) r.palette.r = s.palette.r;
+    }
     return s;
 }
 
@@ -896,30 +1002,6 @@ Spec StockPassthrough(Texture texture) {
     return s;
 }
 
-Spec Led(Texture texture) {
-    // ⚠ START FROM THE INCANDESCENT SPEC OF THE SAME TEXTURE, then replace the
-    // stack.
-    // Starting from the *fit* is what keeps the two eras on one curve — see the
-    // constants above — and taking the whole spec (rather than assembling a new
-    // one) is what keeps their geometry identical, which
-    // `lit: both profiles carry the same geometry` depends on.
-    Spec s = texture == Texture::kKnobs ? GusKnobs() : GusIncandescent();
-    HslOp op;
-    if (texture == Texture::kKnobs) {
-        op.hue = kLedKnobsHue;
-        op.saturation = kLedKnobsSaturation;
-        op.lightness = kLedKnobsBrightness;
-    } else {
-        op.hue = kLedPlacardHue;
-        op.lightness = kLedPlacardBrightness;
-    }
-    // ⚠ ASSIGNED, NOT APPENDED. The knobs incandescent spec already carries an op,
-    // and appending would make LED "incandescent and then some" — two compounding,
-    // where a retune of the incandescent one would silently drag LED with it.
-    s.palette.hsl = {op};
-    return s;
-}
-
 namespace {
 
 bool CoversPx(const std::vector<Rect>& rects, int x, int y) {
@@ -930,29 +1012,50 @@ bool CoversPx(const std::vector<Rect>& rects, int x, int y) {
 
 bool PixelIsLit(const std::uint8_t* p) { return p[0] + p[1] + p[2] > 24; }
 
-// Blue as a fraction of red, x255, at or below which the placards have been
-// recolored. ⚠ IT HAS TO CLEAR **BOTH** SHIPPED ERAS, and until 2026-08-24 it did
-// not. Measured on the placard amber each look produces:
+// ⚠ THE PLACARD TEST NEEDS **TWO** SIGNALS, BECAUSE THE THREE SHIPPED ERAS MOVE
+// TWO DIFFERENT CHANNELS (2026-08-27). This used to be one number — blue as a
+// fraction of red — which worked while every era drove blue toward zero. Gus's
+// later files do not touch blue at all; they pull RED down and leave green and
+// blue bit-exact. Measured over the sampled population (see below):
 //
-//     stock         rgb(255,150,89)  ->  89
-//     Incandescent  rgb(255,124,0)   ->   0
-//     LED           rgb(255,156,26)  ->  26
+//     look                     median blue*255/r     peak red
+//     stock (A319/A320, A321)         89                255
+//     Old Halogen                      0                255
+//     New Halogen                    103                219
+//     LED                            126                176
 //
-// The old value was 20 — set when incandescent was the only look there was — so
-// our OWN LED output read as stock. That is the expensive direction: a caller
-// that believes our output is stock derives from it, and the curve compounds
-// SILENTLY, because blue is already clipped and the second pass looks like a
-// no-op. 48 is the geometric mean of 26 and 89, which is the most margin
-// available on both sides at once (1.8x from LED, 1.9x from stock).
-constexpr int kPlacardRecoloredRatio = 48;
+// ⚠ NOTE WHICH WAY THE RATIO GOES ON THE LATER ERAS: **UP**, past stock's 89, and
+// that is not a quirk to be tuned around — dividing an untouched blue by a
+// reduced red can only raise it. A ratio test alone therefore reads our own New
+// Halogen and LED output as STOCK, which is the expensive direction: the caller's
+// answer to "not recolored" is to derive from this file, and a second pass over a
+// first one compounds SILENTLY. That is the bug this pair of thresholds exists to
+// prevent, and it is why adding an era means coming back here and checking the
+// new look actually trips one of them.
+//
+// The two are OR'd: red identifies the later eras, blue the first.
+constexpr int kPlacardRecoloredRatio = 48;   // geometric mean of 0..89's midpoint
+constexpr int kPlacardRecoloredRed = 236;    // geometric mean of 219 and 255
 
-// The placard test. Stock placard amber is rgb(255,150,89) — blue at 35% of red
-// — and every recolor drives blue to zero. Sampled OUTSIDE the preserve rects,
-// which keep their stock colors either way and would drag the median back up.
+// The placard test. Stock placard amber is rgb(255,150,89) — blue at 35% of red,
+// red saturated. Sampled OUTSIDE the preserve rects, which keep their stock
+// colors under every era and would drag both statistics back to stock.
 bool PlacardsLookRecolored(const Image& img) {
-    const std::vector<Rect>& keep = PreserveRects(Texture::kPlacards);
+    // ⚠ SCALED TO THIS BUFFER, exactly as `Apply` scales them. They are authored
+    // against the 4096 atlas, and comparing an unscaled rect against a smaller
+    // buffer's coordinates excludes NOTHING — every rect starts past its right
+    // edge. `Apply` meanwhile does scale, so on such a buffer the preserved area
+    // really is there, still stock, and unexcluded: its saturated red then sets
+    // the high percentile and the file reads as stock. Harmless while the only
+    // caller passed a full atlas, and a silent wrong answer the moment one did
+    // not — which is exactly what the tests do.
+    std::vector<Rect> keep = PreserveRects(Texture::kPlacards);
+    for (Rect& r : keep)
+        r = ScaleRect(r, img.width, img.height, kReferenceSize);
     std::vector<int> ratios;
+    std::vector<int> reds;
     ratios.reserve(1 << 16);
+    reds.reserve(1 << 16);
     // A coarse stride: this is a population statistic, not a pixel audit.
     for (int y = 0; y < img.height; y += 3) {
         for (int x = 0; x < img.width; x += 3) {
@@ -960,17 +1063,29 @@ bool PlacardsLookRecolored(const Image& img) {
             const std::size_t o = (static_cast<std::size_t>(y) * img.width + x) * 4;
             const int r = img.pixels[o], g = img.pixels[o + 1],
                       b = img.pixels[o + 2];
-            // The placard-amber family, stated in RELATIVE terms: red leads,
+            // Amber-ish and bright enough to carry the signal: red leads, and
             // green is a middling fraction of it, blue trails green.
             if (r < 64 || g <= b) continue;
             if (g * 100 < r * 30 || g * 100 > r * 90) continue;
             ratios.push_back(b * 255 / r);
+            reds.push_back(r);
         }
     }
     if (ratios.size() < 500) return false;  // too little amber to judge
-    std::nth_element(ratios.begin(), ratios.begin() + ratios.size() / 2,
-                     ratios.end());
-    return ratios[ratios.size() / 2] <= kPlacardRecoloredRatio;
+    const std::size_t mid = ratios.size() / 2;
+    std::nth_element(ratios.begin(), ratios.begin() + mid, ratios.end());
+    if (ratios[mid] <= kPlacardRecoloredRatio) return true;
+
+    // ⚠ A HIGH PERCENTILE, NOT THE MAXIMUM. Every non-preserve pixel of a
+    // recolored file has gone through the era's red ramp, so its true peak IS the
+    // ramp's ceiling — but a single stray bright pixel (a hand edit, a bad
+    // rescale) would put a maximum back at 255 and answer "stock" about a file
+    // that is ours, which is the direction that compounds. 99.9% is far enough
+    // out to read the ceiling and far enough in to ignore an outlier; on all four
+    // measured files it equals the maximum exactly.
+    const std::size_t hi = reds.size() - 1 - reds.size() / 1000;
+    std::nth_element(reds.begin(), reds.begin() + hi, reds.end());
+    return reds[hi] <= kPlacardRecoloredRed;
 }
 
 // The knobs test: stock glows on 82,761 pixels inside the blackout rects and a
@@ -1009,29 +1124,45 @@ bool LooksRecolored(const Image& img, Texture texture) {
 
 const char* ProfileName(Profile profile) {
     switch (profile) {
-        case Profile::kIncandescent: return "Incandescent";
+        case Profile::kOldHalogen: return "Old Halogen";
+        case Profile::kNewHalogen: return "New Halogen";
         case Profile::kLed: return "LED";
     }
-    return "Incandescent";
+    return "Old Halogen";
+}
+
+const char* ProfileKey(Profile profile) {
+    switch (profile) {
+        case Profile::kOldHalogen: return "old-halogen";
+        case Profile::kNewHalogen: return "new-halogen";
+        case Profile::kLed: return "led";
+    }
+    return "old-halogen";
+}
+
+bool ProfileFromKey(const std::string& key, Profile& out) {
+    for (int i = 0; i < kProfileCount; ++i) {
+        const auto p = static_cast<Profile>(i);
+        if (key == ProfileKey(p)) {
+            out = p;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ProfileIsDefined(Profile profile) {
-    // ⚠ BOTH, since 2026-08-24, and this line moved in the SAME change that gave
-    // kLed a real spec. It was false while LED resolved to incandescent: a
-    // defined-but-identical profile tells the user a choice took effect when
-    // nothing moved. Do not flip it back without also removing `Led`.
+    // ⚠ ALL THREE, since 2026-08-27, and every one of them is now a MEASUREMENT
+    // of a file Gus sent rather than a look tuned here. The predicate exists
+    // because a defined-but-identical profile tells the user a choice took effect
+    // when nothing moved — so it flips in the same change that gives an era real
+    // numbers, never before it.
     (void)profile;
     return true;
 }
 
 Spec SpecForProfile(Profile profile, Texture texture) {
-    switch (profile) {
-        case Profile::kLed:
-            return Led(texture);
-        case Profile::kIncandescent:
-            break;
-    }
-    return texture == Texture::kKnobs ? GusKnobs() : GusIncandescent();
+    return texture == Texture::kKnobs ? KnobsFor(profile) : PlacardsFor(profile);
 }
 
 std::string ToJson(const Spec& spec) {

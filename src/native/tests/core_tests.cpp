@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
+#include <utility>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -1829,6 +1831,41 @@ std::size_t At(const std::string& text, const std::string& needle) {
     return text.find(needle);
 }
 
+std::size_t CountOccurrences(const std::string& text, const std::string& needle) {
+    std::size_t n = 0, pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        ++n;
+        pos += needle.size();
+    }
+    return n;
+}
+
+// Every `ANIM_hide` range in a gated OBJ, as the INTEGER values it covers. The
+// emitted bounds are half-unit (-0.5, 0.5, 1.5, 2.5) precisely so no integer
+// ever lands on an edge, which is what lets this round to a closed int range and
+// ask "does era e draw at value v" without float comparisons.
+std::vector<std::pair<int, int>> HideRangesOf(const std::string& text) {
+    std::vector<std::pair<int, int>> out;
+    std::size_t pos = 0;
+    const std::string needle = "	ANIM_hide	";
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        pos += needle.size();
+        const std::size_t eol = text.find('\n', pos);
+        const std::string line = text.substr(pos, eol - pos);
+        // ⚠ OURS ONLY. `lamps.obj` carries ToLiss's own ANIM_hide blocks on its
+        // own datarefs, and folding those in would answer this question about
+        // some switch in the cockpit rather than about the era gate.
+        if (line.find(integral::kDataRef) == std::string::npos) continue;
+        std::istringstream in(line);
+        double lo = 0.0, hi = 0.0;
+        if (in >> lo >> hi) {
+            out.emplace_back(static_cast<int>(std::ceil(lo)),
+                             static_cast<int>(std::floor(hi)));
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 TEST("integral: the gate opens after the vertex tables, never above them") {
@@ -1837,12 +1874,12 @@ TEST("integral: the gate opens after the vertex tables, never above them") {
     // block, it is a malformed file — and it would fail at load, silently, on a
     // 300 k-line file nobody is going to read.
     std::string out, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kOldHalogen,
                               "", kPhotonVersion, out, err));
     CHECK(err.empty());
     CHECK(At(out, "POINT_COUNTS") < At(out, "VT\t0 0 0"));
-    CHECK(At(out, "IDX10") < At(out, "ANIM_begin\r\n\tANIM_hide\t1"));
-    CHECK(At(out, "ANIM_begin\r\n\tANIM_hide\t1") <
+    CHECK(At(out, "IDX10") < At(out, "ANIM_begin\r\n\tANIM_hide\t0.5"));
+    CHECK(At(out, "ANIM_begin\r\n\tANIM_hide\t0.5") <
           At(out, "ATTR_light_level"));
     // …and it closes past everything, exporter comment included. ⚠ `rfind`: the
     // file already contains ToLiss's own ANIM_end blocks, so the first one says
@@ -1851,62 +1888,110 @@ TEST("integral: the gate opens after the vertex tables, never above them") {
     CHECK(fsutil::EndsWith(out, "ANIM_end\r\n"));
 }
 
-TEST("integral: each branch hides at the OTHER branch's value") {
-    // Two-valued gating, the exterior form: one hide per branch, at the value
-    // that is not its own. Get this backwards and BOTH branches draw at once —
-    // two cockpits of placards in the same place, which reads as a broken mod
-    // rather than as an inverted comparison.
-    std::string inc, led, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
-                              "", kPhotonVersion, inc, err));
+TEST("integral: each branch hides at every value that is NOT its own") {
+    // ⚠ TERNARY GATING, and the middle era is the whole reason this case exists.
+    // A hide acts only while its range matches, so a branch with neighbours on
+    // BOTH sides needs two of them — one below, one above. Give New Halogen a
+    // single hide and it draws on top of whichever neighbour it failed to hide
+    // at: two cockpits of placards in the same place, which reads as a broken
+    // mod rather than as a missing line.
+    std::string old_, mid, led, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kOldHalogen, "",
+                              kPhotonVersion, old_, err));
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kNewHalogen,
+                              "text_LIT_photon_newhal.png", kPhotonVersion, mid,
+                              err));
     CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed,
                               "text_LIT_photon_led.png", kPhotonVersion, led,
                               err));
-    CHECK(HasLine(inc, "ANIM_hide\t1\t1\tToLissPhoton/interior/integral"));
-    CHECK(HasLine(led, "ANIM_hide\t0\t0\tToLissPhoton/interior/integral"));
+    const std::string dref = "\tToLissPhoton/interior/integral";
+    CHECK(HasLine(old_, "ANIM_hide\t0.5\t2.5" + dref));
+    CHECK(HasLine(mid, "ANIM_hide\t-0.5\t0.5" + dref));
+    CHECK(HasLine(mid, "ANIM_hide\t1.5\t2.5" + dref));
+    CHECK(HasLine(led, "ANIM_hide\t-0.5\t1.5" + dref));
+
+    // ⚠ COUNTED, not merely present. The failure this guards is an EXTRA hide as
+    // much as a missing one: hides in one block AND together, so a stray fourth
+    // range would hide a branch at its own value and that era would draw
+    // nothing at all.
+    CHECK_EQ(CountOccurrences(old_, "\tANIM_hide\t"),
+             CountOccurrences(LampsObjFixture(), "\tANIM_hide\t") + 1);
+    CHECK_EQ(CountOccurrences(mid, "\tANIM_hide\t"),
+             CountOccurrences(LampsObjFixture(), "\tANIM_hide\t") + 2);
+    CHECK_EQ(CountOccurrences(led, "\tANIM_hide\t"),
+             CountOccurrences(LampsObjFixture(), "\tANIM_hide\t") + 1);
 }
 
-TEST("integral: a missing plugin fails OPEN to incandescent") {
+TEST("integral: every era's ranges cover the other two values and not its own") {
+    // The property the literals above are FOR, stated independently of them: at
+    // dataref value v, exactly one era draws. Written as a loop over the value
+    // space so a fourth era cannot be added without this failing.
+    for (int v = 0; v < integral::kEraCount; ++v) {
+        int drawn = 0;
+        for (int e = 0; e < integral::kEraCount; ++e) {
+            std::string text, err;
+            CHECK(integral::PatchText(LampsObjFixture(),
+                                      static_cast<integral::Era>(e), "",
+                                      kPhotonVersion, text, err));
+            bool hidden = false;
+            for (const auto& range : HideRangesOf(text)) {
+                if (v >= range.first && v <= range.second) hidden = true;
+            }
+            if (!hidden) ++drawn;
+        }
+        CHECK_EQ(drawn, 1);
+    }
+}
+
+TEST("integral: a missing plugin fails OPEN to the first era") {
     // An OBJ binds dataref NAMES at load and an unresolved one reads 0 forever.
     // So the branch that must survive a plugin that did not start is the one
-    // whose hide does NOT match 0 — incandescent. This is the same fail-open
-    // argument as `interior/optimized`, and it is why the polarity is not
-    // arbitrary: reversed, an older plugin would give a cockpit nobody chose.
-    std::string inc, led, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
-                              "", kPhotonVersion, inc, err));
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed, "",
-                              kPhotonVersion, led, err));
-    // hide bounds are [v v]; at a dataref reading 0, incandescent's [1 1] does
-    // not match (drawn) and LED's [0 0] does (hidden).
-    CHECK(HasLine(inc, "ANIM_hide\t1\t1\t"));
-    CHECK(HasLine(led, "ANIM_hide\t0\t0\t"));
+    // whose hides do NOT match 0 — Old Halogen, which is also the look Photon
+    // has always installed. This is the same fail-open argument as
+    // `interior/optimized`, and it is why the polarity is not arbitrary:
+    // reversed, an older plugin would give a cockpit nobody chose.
+    for (int e = 0; e < integral::kEraCount; ++e) {
+        std::string text, err;
+        CHECK(integral::PatchText(LampsObjFixture(),
+                                  static_cast<integral::Era>(e), "",
+                                  kPhotonVersion, text, err));
+        bool hiddenAtZero = false;
+        for (const auto& range : HideRangesOf(text)) {
+            if (0 >= range.first && 0 <= range.second) hiddenAtZero = true;
+        }
+        CHECK_EQ(hiddenAtZero, e != 0);
+    }
 }
 
-TEST("integral: only the LED copy is repointed, and only its TEXTURE_LIT") {
-    std::string inc, led, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
-                              "", kPhotonVersion, inc, err));
+TEST("integral: only the TWINS are repointed, and only their TEXTURE_LIT") {
+    std::string old_, mid, led, err;
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kOldHalogen, "",
+                              kPhotonVersion, old_, err));
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kNewHalogen,
+                              "text_LIT_photon_newhal.png", kPhotonVersion, mid,
+                              err));
     CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kLed,
                               "text_LIT_photon_led.png", kPhotonVersion, led,
                               err));
-    // The in-place branch keeps the stock name — that file now holds the
-    // incandescent recolor, so repointing it would orphan the recolor.
-    CHECK(HasLine(inc, "TEXTURE_LIT\ttext_LIT.png\r\n"));
+    // The in-place branch keeps the stock name — that file now holds the first
+    // era's recolor, so repointing it would orphan the recolor.
+    CHECK(HasLine(old_, "TEXTURE_LIT\ttext_LIT.png\r\n"));
+    CHECK(HasLine(mid, "TEXTURE_LIT\ttext_LIT_photon_newhal.png\r\n"));
     CHECK(HasLine(led, "TEXTURE_LIT\ttext_LIT_photon_led.png\r\n"));
-    // ⚠ The DAY texture is shared by both copies and must not be touched: it is
+    // ⚠ The DAY texture is shared by every copy and must not be touched: it is
     // one file on disk and duplicating it would double 5 MB for no difference.
     CHECK(HasLine(led, "TEXTURE\ttext.png\r\n"));
+    CHECK(HasLine(mid, "TEXTURE\ttext.png\r\n"));
 }
 
 TEST("integral: an already-gated OBJ is refused, never wrapped twice") {
     // A double wrap is invisible in a diff of a 300 k-line file and shows up in
     // the cockpit as the branch never drawing at all.
     std::string once, twice, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kOldHalogen,
                               "", kPhotonVersion, once, err));
     CHECK(integral::IsPatched(once));
-    CHECK(!integral::PatchText(once, integral::Era::kIncandescent, "",
+    CHECK(!integral::PatchText(once, integral::Era::kOldHalogen, "",
                                kPhotonVersion, twice, err));
     CHECK(!err.empty());
     CHECK(twice.empty());
@@ -1929,7 +2014,7 @@ TEST("integral: the marker lands in the header, where a head-scan finds it") {
 
 TEST("integral: newline flavor survives the wrap") {
     std::string crlf, lf, err;
-    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kIncandescent,
+    CHECK(integral::PatchText(LampsObjFixture(), integral::Era::kOldHalogen,
                               "", kPhotonVersion, crlf, err));
     CHECK(crlf.find("ANIM_begin\r\n") != std::string::npos);
 
@@ -1937,7 +2022,7 @@ TEST("integral: newline flavor survives the wrap") {
     for (char c : LampsObjFixture()) {
         if (c != '\r') noCr.push_back(c);
     }
-    CHECK(integral::PatchText(noCr, integral::Era::kIncandescent, "",
+    CHECK(integral::PatchText(noCr, integral::Era::kNewHalogen, "",
                               kPhotonVersion, lf, err));
     CHECK(lf.find('\r') == std::string::npos);
 }
@@ -1953,37 +2038,87 @@ TEST("integral: TextureLitOf reads the binding and stops at POINT_COUNTS") {
     CHECK(integral::TextureLitOf(noBinding).empty());
 }
 
-TEST("integral: the LED name goes before the extension, OBJ and PNG alike") {
-    CHECK_EQ(integral::LedNameFor("lamps.obj"),
+TEST("integral: an era's suffix goes before the extension, OBJ and PNG alike") {
+    // ⚠ THE FIRST ERA IS THE STOCK NAME, UNSUFFIXED. It is written over the file
+    // it came from, because that is the one a plugin-less aircraft draws.
+    CHECK_EQ(integral::EraNameFor("lamps.obj", integral::Era::kOldHalogen),
+             std::string("lamps.obj"));
+    CHECK_EQ(integral::EraNameFor("lamps.obj", integral::Era::kNewHalogen),
+             std::string("lamps_photon_newhal.obj"));
+    CHECK_EQ(integral::EraNameFor("lamps.obj", integral::Era::kLed),
              std::string("lamps_photon_led.obj"));
-    CHECK_EQ(integral::LedNameFor("text_LIT.png"),
+    CHECK_EQ(integral::EraNameFor("text_LIT.png", integral::Era::kLed),
              std::string("text_LIT_photon_led.png"));
-    CHECK_EQ(integral::LedNameFor("knobs_LIT.png"),
-             std::string("knobs_LIT_photon_led.png"));
+    CHECK_EQ(integral::EraNameFor("knobs_LIT.png", integral::Era::kNewHalogen),
+             std::string("knobs_LIT_photon_newhal.png"));
+}
+
+TEST("integral: _photon_led KEEPS its spelling, or an upgrade strands files") {
+    // ⚠ NOT COSMETIC. Aircraft installed before 2026-08-27 carry
+    // `lamps_photon_led.obj` and `text_LIT_photon_led.png` on disk and an
+    // `interior.added[]` manifest naming them. Rename the suffix and an
+    // uninstall no longer recognizes either, leaving both in the aircraft
+    // forever — the same class of orphan `BackupOnce`'s tri-state exists to
+    // prevent.
+    CHECK_EQ(std::string(integral::EraSuffix(integral::Era::kLed)),
+             std::string("_photon_led"));
+    CHECK(std::string(integral::EraSuffix(integral::Era::kOldHalogen)).empty());
+}
+
+TEST("integral: IsEraName knows EVERY suffix, not just the newest") {
+    // ⚠ THE UPGRADE PATH IS THE FAILURE. An aircraft installed before the third
+    // era carries only `_photon_led` twins; one installed after carries
+    // `_photon_newhal` too. A scan that tested one spelling would take the other
+    // for a stock OBJ and generate a twin OF A TWIN, or leave its `.acf` row
+    // behind at uninstall.
+    CHECK(integral::IsEraName("lamps_photon_led.obj"));
+    CHECK(integral::IsEraName("lamps_photon_newhal.obj"));
+    CHECK(integral::IsEraName("knobs_LIT_photon_newhal.png"));
+    CHECK(!integral::IsEraName("lamps.obj"));
+    CHECK(!integral::IsEraName("text_LIT.png"));
+    // Every suffix a name can be built with is one this recognizes.
+    for (int e = 0; e < integral::kEraCount; ++e) {
+        const auto era = static_cast<integral::Era>(e);
+        const std::string name = integral::EraNameFor("lamps.obj", era);
+        CHECK_EQ(integral::IsEraName(name), e != 0);
+    }
 }
 
 TEST("integral: a file that is not an OBJ8 is refused rather than mangled") {
     std::string out, err;
     CHECK(!integral::PatchText("not an obj at all\r\n",
-                               integral::Era::kIncandescent, "", kPhotonVersion,
+                               integral::Era::kOldHalogen, "", kPhotonVersion,
                                out, err));
     CHECK(!err.empty());
     // And an OBJ with a header but no drawing — every line a table line.
     CHECK(!integral::PatchText("I\r\n800\r\nOBJ\r\nPOINT_COUNTS\t1 0 0 0\r\n"
                                "VT\t0 0 0\t0 1 0\t0 0\r\n",
-                               integral::Era::kIncandescent, "", kPhotonVersion,
+                               integral::Era::kOldHalogen, "", kPhotonVersion,
                                out, err));
     CHECK(!err.empty());
 }
 
-TEST("integral: an era names one profile, and LED is not incandescent") {
-    CHECK(integral::ProfileFor(integral::Era::kIncandescent) ==
-          lit::Profile::kIncandescent);
+TEST("integral: each era names exactly one profile, in order") {
+    // ⚠ THE MAPPING THAT READS AS OBVIOUS AND GETS WRITTEN BACKWARDS ONCE. The
+    // dataref value, the era and the palette all have to agree, and nothing in
+    // the sim complains if they do not — the wrong branch simply draws.
+    CHECK(integral::ProfileFor(integral::Era::kOldHalogen) ==
+          lit::Profile::kOldHalogen);
+    CHECK(integral::ProfileFor(integral::Era::kNewHalogen) ==
+          lit::Profile::kNewHalogen);
     CHECK(integral::ProfileFor(integral::Era::kLed) == lit::Profile::kLed);
-    CHECK_EQ(std::string(integral::EraKey(integral::Era::kLed)),
-             std::string("led"));
-    CHECK_EQ(std::string(integral::EraLabel(integral::Era::kIncandescent)),
-             std::string("Incandescent"));
+    // The two enums are the same value space, so a fourth era added to one and
+    // not the other is a compile-time-clean mistake this catches.
+    CHECK_EQ(integral::kEraCount, lit::kProfileCount);
+    for (int i = 0; i < integral::kEraCount; ++i) {
+        CHECK_EQ(static_cast<int>(
+                     integral::ProfileFor(static_cast<integral::Era>(i))),
+                 i);
+        CHECK_EQ(std::string(integral::EraLabel(static_cast<integral::Era>(i))),
+                 std::string(lit::ProfileName(static_cast<lit::Profile>(i))));
+        CHECK_EQ(std::string(integral::EraKey(static_cast<integral::Era>(i))),
+                 std::string(lit::ProfileKey(static_cast<lit::Profile>(i))));
+    }
 }
 
 int main(int argc, char** argv) { return photontest::RunAll(argc, argv); }

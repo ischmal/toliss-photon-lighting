@@ -173,12 +173,12 @@ struct App {
     lit::Spec specs[lit::kTextureCount];
     bool edited[lit::kTextureCount] = {false, false};
     lit::Texture texture = lit::Texture::kPlacards;
-    lit::Profile profile = lit::Profile::kIncandescent;
+    lit::Profile profile = lit::Profile::kOldHalogen;
     bool dirty = true;
 
     App() {
         for (int i = 0; i < lit::kTextureCount; ++i)
-            specs[i] = lit::SpecForProfile(lit::Profile::kIncandescent,
+            specs[i] = lit::SpecForProfile(lit::Profile::kOldHalogen,
                                            static_cast<lit::Texture>(i));
     }
 
@@ -775,15 +775,21 @@ int RunStudioGui(const std::string& litPath, const std::string& albedoPath,
         ImGui::SeparatorText("Profile");
         {
             int p = static_cast<int>(app.profile);
-            const char* names[] = {"Incandescent", "LED"};
+            // ⚠ BUILT FROM THE ENUM, not a literal array. A hand-written list
+            // that fell one short of `kProfileCount` would silently make the
+            // last era unreachable in the one tool that can look at it.
+            const char* names[lit::kProfileCount];
+            for (int i = 0; i < lit::kProfileCount; ++i)
+                names[i] = lit::ProfileName(static_cast<lit::Profile>(i));
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##profile", &p, names, 2))
+            if (ImGui::Combo("##profile", &p, names, lit::kProfileCount))
                 app.ApplyProfile(static_cast<lit::Profile>(p));
             // ⚠ Say the fallback out loud. A silent substitution would read as
-            // the LED profile having been applied and looking identical.
+            // the profile having been applied and looking identical.
             if (!lit::ProfileIsDefined(app.profile))
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                                   "LED is not defined yet - showing Incandescent");
+                                   "%s is not defined yet - showing Old Halogen",
+                                   lit::ProfileName(app.profile));
             else if (app.editedHere())
                 ImGui::TextDisabled("edited - no longer the stock %s palette",
                                     lit::ProfileName(app.profile));

@@ -42,9 +42,54 @@ def _read(p: Path) -> str:
 
 def _code(text: str) -> str:
     """The source minus its comments, so a comment that NAMES the trap does not
-    trip the test that forbids it."""
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    trip the test that forbids it.
+
+    WARNING: ONE PASS, NOT TWO REGEXES (2026-08-29). Stripping `/*...*/` first
+    lets a `/*` written inside a LINE comment open a block that closes thousands
+    of lines later and takes real code with it. That is not hypothetical:
+    plugin.cpp's `sim/private/*` note swallowed 144,850 characters and three
+    `PathFromXplm(` call sites, so the COUNT-based assertion below failed while
+    every call site was present and correct -- a false alarm that outlived the
+    0.9.3 release. String literals hide both spellings too ("http://..."), so the
+    scan has to know about them as well, and comments are recognized BEFORE
+    quotes are, or an apostrophe in English prose opens a string.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        c = text[i]
+        if c == '"' or c == "'":
+            # A raw string R"(...)" ends at the matching )" -- screens.cpp has six.
+            if c == '"' and i and text[i - 1] == "R":
+                j = text.find(')"', i + 1)
+                if j >= 0:
+                    out.append(text[i:j + 2])
+                    i = j + 2
+                    continue
+            out.append(c)
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                out.append(text[i])
+                ended = text[i] == c or text[i] == "\n"  # unterminated: stop at EOL
+                i += 1
+                if ended:
+                    break
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 CORE_CPP = sorted((NATIVE / "core").glob("*.cpp"))

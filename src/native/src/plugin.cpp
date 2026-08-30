@@ -201,11 +201,13 @@ static ExteriorSettings gExterior;
 // exception (grouped by fixture role). panel[1],[2] is FLOOD LT MAIN PNL, not
 // the map lights; that pair shipped the wrong way round once, and the `mainpnl`
 // assignment still rests on a single in-sim observation. See CLAUDE.md.
-// ⚠ SIX SINCE 2026-08-24, AND THE SIXTH IS THE FIRST TWO-VALUED ONE THAT HAS
-// EVER SHIPPED. `integral` is the backlit placards and knob markings, and it has
-// two looks where the other five have three, because a filament lamp behind a
-// placard does not read as two eras — see `values` below, which has carried this
-// case since the dome briefly used it in 2026.
+// ⚠ SIX SINCE 2026-08-24, AND ALL SIX ARE TERNARY AGAIN SINCE 2026-08-27.
+// `integral` — the backlit placards and knob markings — shipped two-valued for
+// three days, on the reading that a filament lamp behind a placard does not read
+// as two eras. Gus settled that by sending finished artwork for both later eras.
+// The two-valued machinery below (`values`, IntValueForProfile's fold,
+// ClampIntValue) stays and is unused, exactly as it was between the dome leaving
+// it on 2026-08-03 and `integral` briefly arriving on it.
 static const int NINT = 6;
 struct IntCategory {
     const char* key;
@@ -231,19 +233,16 @@ static const IntCategory kIntCategories[NINT] = {
     // bound to (core/patch_integral). That makes it the one row whose look lives
     // in a FILE the installer computed rather than in a light line.
     //
-    // ⚠ TWO VALUES, AND "INCANDESCENT" RATHER THAN "HALOGEN" BECAUSE OF IT. The
-    // value space folds both halogen eras onto 0, so a label reading "Halogen"
-    // beside rows offering "Old Halogen" and "New Halogen" would read as a third
-    // and contradictory answer to the same question. Incandescent is the honest
-    // superset: a halogen lamp is an incandescent one, so the word says "the
-    // filament era" without claiming which half of it.
-    //
-    // ⚠ `IntValueForProfile` ALREADY DOES THE FOLD — both halogen profiles map to
-    // 0 and LED to 1 — which is exactly the default asked for and needs no
-    // special case here. That machinery has been live and unused since the dome
-    // stopped being two-valued on 2026-08-03; this is its first real user.
-    {"integral", photon::integral::kDataRef,       "Integral Lights",   2,
-     {"Incandescent", "LED", nullptr}},
+    // ⚠ TERNARY SINCE 2026-08-27, AND "OLD HALOGEN" RATHER THAN "INCANDESCENT"
+    // BECAUSE OF IT. It shipped two-valued for three days, folding both halogen
+    // eras onto 0 — a filament behind a placard was taken not to read as two
+    // eras — and "Incandescent" was the honest name for that fold, since a label
+    // saying "Halogen" beside rows offering "Old Halogen" and "New Halogen" would
+    // have read as a third and contradictory answer. Gus then sent finished
+    // artwork for all three eras (reference/gus/new-a319/), so the fold is gone
+    // and the row says exactly what its five neighbours say.
+    {"integral", photon::integral::kDataRef,       "Integral Lights",   3,
+     {"Old Halogen", "New Halogen", "LED"}},
 };
 
 // Index of the row above, for the availability gate. ⚠ Named rather than spelled
@@ -310,7 +309,7 @@ static bool  gSpillCutoffHigh = false;
 // amounts. Too high: no hint — and the installer's content scan still names the
 // mod on its own, the checkbox still works, nothing is lost but a nudge. Too
 // low — anywhere at or below the UNMEASURED stock value — and every clean
-// install shows "a spill-dimming add-on appears to be active, tick the box",
+// install shows "a lighting mod appears to be active, tick the box",
 // i.e. Photon itself talks users into doubling a cockpit nothing is dimming:
 // the exact harm this feature exists to end, now self-inflicted at scale. So
 // this sits just under the one value a mod is KNOWN to write, not at half of
@@ -353,7 +352,14 @@ static int ClampIntValue(int idx, int v) {
 //   v2  TWO-valued 0 fluorescent / 1 LED          (2026-07-28 .. 2026-08-03)
 //   v3  ternary again, i.e. v1's value space exactly — so only a v2 file needs
 //       moving, and a v1 one is read as it stands.
-static const int kIntPrefsSchema = 3;
+//
+// ⚠ AND `integral` HAS NOW DONE THE SAME THING, WHICH IS WHY v4 EXISTS. It
+// arrived TWO-valued at v3 (0 incandescent / 1 LED) and went ternary on
+// 2026-08-27 (0 old halogen / 1 new halogen / 2 LED). A stored `integral: 1` is
+// in range on both scales and means LED on one and NEW HALOGEN on the other —
+// exactly the case the marker exists for, and exactly the case no clamp can see.
+//   v4  `integral` ternary. Everything else unchanged from v3.
+static const int kIntPrefsSchema = 4;
 
 // The one custom light in the interior OBJ: the re-added map light spot, and the
 // only light on the map rheostat. Its brightness comes from ToLiss's
@@ -1401,13 +1407,15 @@ static bool gInteriorInstalled = false;
 static bool gInteriorSupported = false;
 
 // Whether THIS aircraft carries the switchable integral lighting — the gated
-// cockpit OBJs and, crucially, their LED twins.
+// cockpit OBJs and, crucially, EVERY later era's twin.
 //
-// ⚠ DETECTED FROM THE TWIN'S PRESENCE, NOT FROM THE GATE IN `lamps.obj`, and the
+// ⚠ DETECTED FROM THE TWINS' PRESENCE, NOT FROM THE GATE IN `lamps.obj`, and the
 // difference is the half-installed aircraft. A gated `lamps.obj` whose twin is
-// missing or unattached draws NOTHING at all in the LED branch: the row would be
-// offering a look that turns the placards off. The twin is what has to exist for
-// the choice to be real, so it is what detection asks about.
+// missing or unattached draws NOTHING at all in that branch: the row would be
+// offering a look that turns the placards off. The twins are what have to exist
+// for the choice to be real, so they are what detection asks about — ALL of
+// them; see DetectIntegral for why an aircraft carrying only the older
+// `_photon_led` twin has to read as not installed.
 //
 // ⚠ An install from before this feature has neither, and the row is HIDDEN
 // there rather than shown inert — unlike the Cockpit TAB, which is shown
@@ -2060,21 +2068,31 @@ static bool EntryFromJson(const json::Value& v, Entry& out) {
             // cockpit looking exactly as the user left it; defaulting to 0 would
             // silently reset their MAIN PNL flood to old halogen.
             if (!haveMainPnl) out.intCats[kIntMainPnlIndex] = out.intCats[kIntMapIndex];
-            // ⚠ `integral` NEEDS NO SUCH MIGRATION, and the difference from
+            // ⚠ `integral` NEEDS NO *ABSENCE* MIGRATION, and the difference from
             // `mainpnl` is worth stating so nobody adds one. `mainpnl` was SPLIT
             // out of an existing category, so its value already existed under
             // another name and defaulting it to 0 would have silently reset a
             // choice the user had made. `integral` is genuinely new: before it
-            // existed the placards were always Gus's incandescent look, so 0 is
+            // existed the placards were always Gus's old-halogen look, so 0 is
             // not a fallback, it is what this aircraft has actually been showing.
-            // Nor is the SCHEMA bumped — that marks a value space CHANGING, and
-            // adding a category changes none.
+            // It DOES have a value-space migration, below — that is the other
+            // question, and adding a category is not what bumps the schema.
             // MIGRATION schema 2 -> 3, the dome going back to ternary: on the v2
             // scale 0 was fluorescent and 1 was LED, so a stored 1 read on the
             // ternary scale would come back as NEW HALOGEN. Only v2 moves — v1 is
             // the same value space as v3 and is read as it stands.
             if (schema == 2)
                 out.intCats[kIntDomeIndex] = out.intCats[kIntDomeIndex] >= 1 ? 2 : 0;
+            // MIGRATION schema <= 3 -> 4, `integral` going ternary: on the v3
+            // scale 1 was LED, and on the ternary scale 1 is NEW HALOGEN. Only a
+            // stored 1 moves — a stored 0 is the first era on both scales.
+            //
+            // ⚠ EVERY schema BELOW 4, not `schema == 3`. `integral` did not exist
+            // before v3, so a v1 or v2 file has no key for it and reads 0, which
+            // this leaves alone; writing the bound as `<= 3` is what keeps that
+            // true if a v3.5 ever appears between them.
+            if (schema <= 3 && out.intCats[kIntIntegralIndex] == 1)
+                out.intCats[kIntIntegralIndex] = 2;
             // Whatever the file said, nothing leaves here out of range.
             for (int i = 0; i < NINT; ++i)
                 out.intCats[i] = ClampIntValue(i, out.intCats[i]);
@@ -3262,21 +3280,22 @@ static void BuildSettingsTab() {
         // would fight the checkbox they had deliberately cleared. The probe's
         // job is the HINT below — say what was seen, let them decide.
         bool neo = gCockpit.neo;
-        if (ImGui::Checkbox("Compensate for BSS NEO / spill-dimming mods", &neo))
+        if (ImGui::Checkbox("Compensate for BSS NEO and other lighting mods", &neo))
             SetCockpitNeo(neo);
         UiHelpMarker(
             "Some global lighting add-ons raise X-Plane's spill-light cutoff, "
-            "which makes this cockpit's lamps look faint however high you set "
-            "the brightness above. This rebuilds them brighter to compensate. "
-            "Leave it off if you do not run such an add-on.");
+            "which makes this cockpit's lamps and the display glow look faint "
+            "however high you set the brightness above. This builds them "
+            "brighter to compensate. Leave it off if you do not run such an "
+            "add-on.");
         // ⚠ Only when the probe DISAGREES with the setting, in either direction.
         // A hint that merely restated a correct setting would be noise on every
         // frame of every session that had this right.
         if (gSpillCutoffHigh && !gCockpit.neo) {
-            UiHint("A spill-dimming lighting add-on appears to be active on this "
-                   "install. Ticking the box above should restore the cockpit.");
+            UiHint("A lighting mod appears to be active on this install. "
+                   "Ticking the box above should restore the cockpit.");
         } else if (!gSpillCutoffHigh && gCockpit.neo && gSpillCutoffSeen >= 0.0f) {
-            UiHint("No spill-dimming add-on was detected on this install. If the "
+            UiHint("No lighting mod was detected on this install. If the "
                    "cockpit looks too bright, untick the box above.");
         }
     }
@@ -4057,13 +4076,24 @@ static ObjScan ScanObj(const fs::path& obj, const char* needle) {
     return text.find(needle) != std::string::npos ? kObjModded : kObjStock;
 }
 
-// Is the LED half of the integral-lighting switch actually here? See
-// gIntegralInstalled for why the TWIN is the thing asked about.
+// Are ALL the later-era halves of the integral-lighting switch actually here?
+// See gIntegralInstalled for why the TWINS are the thing asked about.
+//
+// ⚠ EVERY LATER ERA, NOT ANY ONE OF THEM, and that is an UPGRADE guard rather
+// than pedantry (2026-08-27). An aircraft installed before the row went ternary
+// carries only the `_photon_led` twin, gated the TWO-valued way — the stock OBJ
+// hides at exactly 1, the twin hides at exactly 0 — so on the ternary scale
+// value 2 hides NEITHER and both copies of the flight deck draw at once, while
+// value 1 draws the LED branch under the label "New Halogen". Both failures are
+// silent in the log and loud in the cockpit. Requiring the full set means such
+// an aircraft reads as not-installed and the row is hidden until a reinstall
+// writes the missing twin, which is the same answer this codebase gives every
+// other half-installed state.
 //
 // ⚠ A DIRECTORY LISTING, NOT A CONTENT SCAN, and that is the exception rather
 // than a lapse: everywhere else identification is by content because the files
 // belong to ToLiss and their names are their convention. These files are OURS —
-// `integral::kLedSuffix` is a name this codebase invents and writes — so the
+// `integral::EraSuffixes()` are names this codebase invents and writes — so the
 // name IS the content test. Reading 26 MB of `knobs_photon_led.obj` to learn
 // what its filename already says would cost a second of every aircraft load.
 //
@@ -4073,18 +4103,27 @@ static ObjScan ScanObj(const fs::path& obj, const char* needle) {
 static bool DetectIntegral(const fs::path& objects) {
     std::error_code ec;
     if (!fs::is_directory(objects, ec) || ec) return false;
-    const std::string suffix =
-        std::string(photon::integral::kLedSuffix) + ".obj";
+    const char* const* suffixes = photon::integral::EraSuffixes();
+    // One flag per LATER era; era 0 is the stock file and has no twin.
+    bool seen[photon::integral::kEraCount] = {};
+    seen[0] = true;
     for (const auto& entry : fs::directory_iterator(objects, ec)) {
         if (ec) break;
         const std::string name =
             photon::fsutil::PathToUtf8(entry.path().filename());
-        if (name.size() >= suffix.size() &&
-            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            return true;
+        for (int e = 1; e < photon::integral::kEraCount; ++e) {
+            if (seen[e]) continue;
+            const std::string tail = std::string(suffixes[e]) + ".obj";
+            if (name.size() >= tail.size() &&
+                name.compare(name.size() - tail.size(), tail.size(), tail) == 0) {
+                seen[e] = true;
+            }
         }
     }
-    return false;
+    for (int e = 0; e < photon::integral::kEraCount; ++e) {
+        if (!seen[e]) return false;
+    }
+    return true;
 }
 
 // Everything the plugin needs to know about the install on THIS aircraft, from
@@ -4189,9 +4228,9 @@ static void DetectInstall() {
     // twins, and folding the two would make "Integral Lights row missing" read
     // as "the cockpit mod is missing" in every report that follows.
     Log(gIntegralInstalled
-            ? "switchable integral lighting detected (LED twin objects present)"
-            : "switchable integral lighting NOT installed - Integral Lights row "
-              "hidden (reinstall to add it)");
+            ? "switchable integral lighting detected (all era twin objects present)"
+            : "switchable integral lighting NOT installed or incomplete - Integral "
+              "Lights row hidden (reinstall to add it)");
 }
 
 // Defined far below, with the panel-FX drivers, and called from the aircraft-load
@@ -4503,6 +4542,28 @@ static float EngineLoop(float, float, int, void*) {
         // zone ends. Off writes 0 rather than skipping the loop: a stale factor
         // left in the array would keep the lights lit at whatever they last were.
         const float userGain = DisplayFeatureOn(gDisplays.spill) ? gDisplays.spillGain : 0.0f;
+        // ⚠ THE SCREEN GLOWS ARE SPILL LIGHTS TOO, so the raised cutoff that
+        // eats the cockpit lamps eats these as well — and it reaches them FIRST,
+        // because they are the dimmest wide-cone lights Photon ships. The
+        // cockpit's answer is intensity::PatchText rewriting the OBJ, which
+        // cannot help here: CanPatch is gated on the interior needle and
+        // lights_screens.obj does not carry it.
+        //
+        // ⚠ AND IT MUST NOT. This factor is already written every frame, so the
+        // compensation belongs here rather than in a second file patcher: it
+        // lands on the frame like every other display switch, needs no
+        // reinstall and no aircraft reload, and leaves the shipped OBJ byte-identical.
+        //
+        // ⚠ THE SAME kNeoBoost THE COCKPIT USES, deliberately — one seed, so the
+        // §7 in-sim sweep that replaces the guess retunes both halves at once. A
+        // second constant here would drift from the first the moment either moved.
+        //
+        // ⚠ A "$cockpit" FLAG DRIVING A SCREENS NUMBER IS NOT A LAYERING SLIP:
+        // gCockpit.neo states a fact about the INSTALL — something is raising
+        // this sim's spill cutoff — not a preference about the cockpit axis. It
+        // lives under that prefs key because the brightness it multiplies does.
+        const float neoBoost =
+            gCockpit.neo ? (float)photon::intensity::kNeoBoost : 1.0f;
         // ⚠ THE BUS GATE IS NOT A MULTIPLIER, it is a hard zero, and it is read
         // ONCE for all six rather than per light — every one of them is on the
         // same bus, and this is the per-frame path. A dead bus means the screens
@@ -4515,7 +4576,8 @@ static float EngineLoop(float, float, int, void*) {
             // a pool of no radius, i.e. the light contributes nothing — the same
             // "off" a zero alpha used to mean.
             gScreenSizeFactor[i] = (busLive && idx >= 0 && idx < got)
-                ? BrightnessResponse((float)ClampBrightness(du[idx])) * kScreenGain * userGain
+                ? BrightnessResponse((float)ClampBrightness(du[idx])) * kScreenGain *
+                      userGain * neoBoost
                 : 0.0f;
         }
     }

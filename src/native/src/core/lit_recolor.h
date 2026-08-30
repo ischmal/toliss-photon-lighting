@@ -334,18 +334,20 @@ std::size_t Apply(Image& lit, const Image* albedo, const Spec& spec,
 // stock. A PNG has nowhere to put a `# ToLissPhoton orig` marker, so the artwork
 // is the only honest witness.
 //
-// ⚠ AND IT IS A RATIO, NOT A LEVEL. It used to test the placard amber for
-// `r >= 200 && blue <= 20` — true of the shipped palette and of nothing else —
-// so a tuning session that pulled red down to 180 made our OWN output read as
-// stock. Stock amber is rgb(255,150,89), i.e. blue at 35% of red, and every
-// recolor pulls blue far below that whatever it does to red. On the knobs the
-// test is structural instead and needs no palette knowledge at all: are the
-// blackout rects already dark?
+// ⚠ AND ON THE PLACARDS IT IS **TWO** TESTS, OR'D, BECAUSE THE THREE ERAS MOVE
+// TWO DIFFERENT CHANNELS. Old Halogen drives blue toward zero and leaves red
+// alone; New Halogen and LED do the exact opposite. So a single statistic cannot
+// see all three: the blue-against-red ratio catches the first era, and a high
+// percentile of red catches the other two. On the knobs the test is structural
+// instead and needs no palette knowledge at all: are the blackout rects already
+// dark?
 //
-// ⚠ THE RATIO HAS TO CLEAR BOTH ERAS, and the threshold moved on 2026-08-24 when
-// LED became a shipped profile: LED's amber leaves blue at 26/255 of red where
-// incandescent leaves 0, so a bound tuned to incandescent alone read our own LED
-// output as stock. See `kPlacardRecoloredRatio` for the three measured points.
+// ⚠ THE LATER ERAS PUSH THE BLUE RATIO **UP**, PAST STOCK — 103 and 126 against
+// stock's 89 — because dividing an untouched blue by a reduced red can only raise
+// it. That is why the ratio alone is not merely imprecise here but backwards, and
+// it is the trap to remember when adding a fourth era: check the new look
+// actually trips one of the two thresholds. See `kPlacardRecoloredRatio` and
+// `kPlacardRecoloredRed` for all four measured points.
 //
 // ⚠ IT NEVER ANSWERS "YES" ON A FILE IT CANNOT JUDGE. Too little amber to
 // sample, or too small a blackout area, reads FALSE — "not recolored" — because
@@ -354,86 +356,97 @@ std::size_t Apply(Image& lit, const Image* albedo, const Spec& spec,
 bool LooksRecolored(const Image& img, Texture texture);
 
 // --- the user-facing profiles ------------------------------------------------
-// The two looks an install offers. ⚠ ONE PROFILE SERVES ALL THREE A3xx
-// AIRFRAMES, and that is a measured property rather than an assumption: the
-// preserve rects and the promote region contain byte-identical artwork in the
-// A319/A320 and A321 stock textures (checked 2026-08-24, and re-checked by
-// `photon-lit-studio harvest` every time it runs). The airframes differ only in
-// the trim-scale ruling and the flap placard, neither of which any rect touches
-// — so the profile is a palette, and the artwork comes from the aircraft.
-// ⚠ `kIncandescent` WAS `kHalogen` UNTIL 2026-08-24, and the rename is not
-// cosmetic. This profile is now offered to the user as one of TWO choices on the
-// Integral Lights row, where it has to cover both of the cockpit's halogen eras
-// — the interior categories beside it still say "Old Halogen" and "New Halogen",
-// and a row reading "Halogen / LED" next to them would read as a third,
-// contradictory answer to the same question. "Incandescent" is the honest
-// superset: a halogen lamp IS an incandescent one, so the name says "this is the
-// filament era" without claiming which. The *fit* is unchanged — `GusIncandescent`
-// is still a measurement of Gus's file, only its name follows the profile.
+// The three looks an install offers, and the same three eras the other five
+// interior categories offer. ⚠ ONE PROFILE SERVES ALL THREE A3xx AIRFRAMES, and
+// that is a measured property rather than an assumption: the preserve rects and
+// the promote region contain byte-identical artwork in the A319/A320 and A321
+// stock textures (checked 2026-08-24, and re-checked by `photon-lit-studio
+// harvest` every time it runs). The airframes differ only in the trim-scale
+// ruling and the flap placard, neither of which any rect touches — so the profile
+// is a palette, and the artwork comes from the aircraft.
+//
+// ⚠ THREE SINCE 2026-08-27, AND THE MIDDLE ONE IS NOT AN INTERPOLATION. Gus sent
+// finished `text_LIT.png` variants for both later eras
+// (`reference/gus/new-a319/`), so all three are now measurements of files that
+// exist rather than one measurement and one authored look.
+//
+// ⚠ `kOldHalogen` WAS `kIncandescent`, AND BEFORE THAT `kHalogen` — the name has
+// tracked what the value space could say, twice. `kHalogen` became
+// `kIncandescent` on 2026-08-24 because the row was TWO-valued and one value had
+// to cover both halogen eras, so a "Halogen" label beside the grid's own "Old
+// Halogen" and "New Halogen" read as a third, contradictory answer. The row is
+// ternary now and that fold is gone: this value means the first era and only the
+// first, so it takes the grid's own word for it. The *fit* is unchanged.
 enum class Profile {
-    kIncandescent,  // Gus's deep amber
-    kLed,      // paler and cooler; authored, not fitted. See Led().
+    kOldHalogen,  // Gus's deep amber — rgb(255,124,0)
+    kNewHalogen,  // rgb(219,150,89)
+    kLed,         // rgb(176,150,89)
 };
 
-// ⚠ The knobs atlas is byte-identical on all three A3xx too (A319/A320/A321 all
-// hash the same stock `knobs_LIT.png`, checked 2026-08-24), so the same
-// statement holds for both textures and `harvest` re-checks both.
+constexpr int kProfileCount = 3;
 
-const char* ProfileName(Profile profile);
+const char* ProfileName(Profile profile);  // "Old Halogen" / ... / "LED"
 
-// ⚠ TRUE FOR BOTH SINCE 2026-08-24, and it became true in the SAME change that
-// gave kLed a real spec — that pairing is the whole point of the predicate. It
-// was false for as long as LED resolved to incandescent, because a defined-but-
-// identical profile tells the user a choice took effect when nothing moved,
-// and every surface offering the choice was expected to say it was substituting.
-// Do not flip it back without also removing the spec, or vice versa.
+// The stable spelling used in files and on the command line — unlike
+// `ProfileName`, which is a label and may be reworded.
+const char* ProfileKey(Profile profile);  // "old-halogen" / "new-halogen" / "led"
+bool ProfileFromKey(const std::string& key, Profile& out);
+
+// ⚠ TRUE FOR ALL THREE, and each became true in the SAME change that gave that
+// era real numbers — that pairing IS the predicate's purpose. It was false for as
+// long as LED resolved to the halogen fit bit-for-bit, because a
+// defined-but-identical profile is the same lie as an undefined one that silently
+// substitutes. Do not flip one on without also giving it a spec, or vice versa.
 bool ProfileIsDefined(Profile profile);
 
-// The spec an install would apply for `profile` on `texture`, fallback included.
+// The spec an install would apply for `profile` on `texture`.
 //
-// ⚠ AN INSTALL MUST DO EVERY TEXTURE. They are separate files with separate
-// geometry, so there is no single call that covers the cockpit; iterate
-// `kTextureCount`. Doing one and not the other leaves a cockpit half converted,
-// which reads in-sim as the mod being broken rather than half-applied.
+// ⚠ AN INSTALL MUST DO EVERY TEXTURE **AND** EVERY ERA. They are separate files
+// with separate geometry, so there is no single call that covers the cockpit;
+// iterate `kTextureCount` and `kProfileCount`. Doing one and not the other leaves
+// a cockpit half converted, which reads in-sim as the mod being broken rather
+// than half-applied.
 Spec SpecForProfile(Profile profile, Texture texture);
 
 // --- the raw specs -----------------------------------------------------------
+// ⚠ ONE BUILDER PER TEXTURE, TAKING THE ERA — deliberately not one per era. The
+// three eras differ ONLY in the palette; the preserve rects, palette regions,
+// blackouts and promote geometry are identical across them, and splitting by era
+// would put three copies of that geometry in the file and let them drift.
 
-// Gus's own placard look, fitted to his file. Reproduces it within 2 levels on
-// 95.7% of comparable pixels and within 8 on 99.6%.
-Spec GusIncandescent();
-
-// Gus's knobs look: the two blackouts, plus a curve over the one knob whose
-// stock backlight is icy blue.
+// The placard atlas, in one era. Old halogen is Gus's own look, fitted to his
+// file: reproduced within 2 levels on 95.7% of comparable pixels and within 8 on
+// 99.6%. The two later eras are fitted to the files he sent on 2026-08-27 and
+// land within ONE level everywhere (99.86% and 99.65% bit-exact) — a tighter fit,
+// because each is a single near-linear ramp on red where his first was three
+// independent Levels curves.
 //
-// ⚠ THE BLACKOUTS ARE EXACT AND THE CURVE IS NOT. Inside both blackout rects
-// stock has 58,482 and 24,279 lit pixels and Gus has zero, so a rect reproduces
-// them bit for bit. The knob curve is an approximation: unlike the placards —
-// where 838 of 840 colors map 1:1 and Levels fits with no ambiguity — the knob's
-// 745 pixels do form a per-channel LUT (red again bit-exact identity) but not a
-// clean Levels one, fitting to within 11 levels on green and 16 on blue. It is a
-// specular highlight 30 px across, so that is invisible; it is recorded here so
-// nobody later reads it as measured to the placards' standard.
-Spec GusKnobs();
+// ⚠ THE SHIPPED FILE IS NOT BYTE-IDENTICAL TO HIS IN THE TWO LATER ERAS, ON
+// PURPOSE. His later files carry no regional mask and no `PEDAL DISC`, so running
+// them as sent would recolor the annunciator and warning legends — the red `PUSH`
+// / `PULL UP` dimmed, `EVAC` browned, the boxed amber `DISCH` turned yellow-green
+// — and drop the pedestal placard he himself hand-added. We keep both. The full
+// measurement and the third difference (a global alpha compression that belongs
+// to no era) are in the .cpp, above the constants.
+Spec PlacardsFor(Profile profile);
+
+// The knobs atlas, in one era: the two blackouts, the index markings on the
+// era's own palette plus the knobs tuning op, and the one knob whose stock
+// backlight is icy blue on a curve of its own.
+//
+// ⚠ THE BLACKOUTS ARE EXACT AND THE BLUE KNOB'S CURVE IS NOT. Inside both
+// blackout rects stock has 58,482 and 24,279 lit pixels and Gus has zero, so a
+// rect reproduces them bit for bit. The knob curve is an approximation: unlike
+// the placards — where 838 of 840 colors map 1:1 and Levels fits with no
+// ambiguity — the knob's 745 pixels do form a per-channel LUT (red again bit-exact
+// identity) but not a clean Levels one, fitting to within 11 levels on green and
+// 16 on blue. It is a specular highlight 30 px across, so that is invisible; it is
+// recorded here so nobody later reads it as measured to the placards' standard.
+Spec KnobsFor(Profile profile);
 
 // Identity — no curve, no promotion, everything preserved. The A/B baseline in
 // the tool, and what an aircraft looks like with Photon's texture work off.
 Spec StockPassthrough(Texture texture);
-
-// The LED look, on either texture. Paler and cooler than incandescent.
-//
-// ⚠ AUTHORED, NOT FITTED, AND THAT IS THE DIFFERENCE FROM EVERYTHING ABOVE.
-// `GusIncandescent` and `GusKnobs` carry his name because they are *measurements* of
-// a file that exists — 838 of 840 colors mapping 1:1, red bit-exact. There is no
-// LED file to measure: this look was tuned in the bench against the cockpit and
-// signed off by eye on 2026-08-24. So it is a judgement, and the honest place to
-// change it is a tuning session, not a refit.
-//
-// ⚠ IT SHARES THE MEASURED CURVE AND DIVERGES ONLY IN THE STACK. Both textures
-// keep Gus's fitted Levels and add HSL ops on top (see `Palette::hsl`) — which
-// is what makes "LED" a statement about the LAMP rather than a second, unrelated
-// recolor, and what keeps a future refit of the curve flowing into both eras.
-Spec Led(Texture texture);
 
 // The geometry tables for a texture, shared by every look. Named so a future
 // edit can say which rect it is changing.

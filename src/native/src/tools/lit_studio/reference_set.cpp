@@ -466,7 +466,7 @@ bool HarvestReferenceSet(const std::string& xplaneRootUtf8,
         if (imgs.size() < 2) continue;
         invariantChecked = true;
         const lit::Texture tx = static_cast<lit::Texture>(ti);
-        const lit::Spec spec = lit::SpecForProfile(lit::Profile::kIncandescent, tx);
+        const lit::Spec spec = lit::SpecForProfile(lit::Profile::kOldHalogen, tx);
         const std::string what = lit::TextureName(tx);
         for (std::size_t i = 1; i < imgs.size(); ++i) {
             for (std::size_t r = 0; r < spec.preserve.size(); ++r)
@@ -658,7 +658,7 @@ bool RevertAircraft(const std::string& xplaneRootUtf8, const ReferenceSet& set,
                 !lit::LooksRecolored(current, tx) &&
                 image::LoadPng(rt->lit, harvested, e)) {
                 const lit::Spec spec = lit::SpecForProfile(
-                    lit::Profile::kIncandescent, tx);
+                    lit::Profile::kOldHalogen, tx);
                 if (ArtworkDelta(current, harvested, spec) >
                     kArtworkRedrawThreshold) {
                     r.note =
